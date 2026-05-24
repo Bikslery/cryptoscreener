@@ -3,9 +3,26 @@ import type { WsMessage } from '../types.js'
 type WsCallback = (msg: WsMessage) => void
 
 let ws: WebSocket | null = null
-const callbacks = new Set<WsCallback>()
+const wildcardCallbacks = new Set<WsCallback>()
+const typeCallbacks = new Map<string, Set<WsCallback>>()
+const channelCallbacks = new Map<string, Set<WsCallback>>()
 const subscriptions = new Set<string>()
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+function dispatch(msg: WsMessage) {
+  const t = msg.type as string | undefined
+  if (t) {
+    const set = typeCallbacks.get(t)
+    if (set) for (const cb of set) cb(msg)
+  }
+  if (msg.channel) {
+    const set = channelCallbacks.get(msg.channel)
+    if (set) for (const cb of set) cb(msg)
+  }
+  if (wildcardCallbacks.size) {
+    for (const cb of wildcardCallbacks) cb(msg)
+  }
+}
 
 function connect() {
   const token = localStorage.getItem('token') || ''
@@ -22,7 +39,7 @@ function connect() {
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data) as WsMessage
-      for (const cb of callbacks) cb(msg)
+      dispatch(msg)
     } catch {}
   }
 
@@ -62,6 +79,36 @@ export function wsUnsubscribe(channel: string) {
 }
 
 export function wsOnMessage(cb: WsCallback): () => void {
-  callbacks.add(cb)
-  return () => callbacks.delete(cb)
+  wildcardCallbacks.add(cb)
+  return () => { wildcardCallbacks.delete(cb) }
+}
+
+export function wsOnType(type: string, cb: WsCallback): () => void {
+  let set = typeCallbacks.get(type)
+  if (!set) {
+    set = new Set()
+    typeCallbacks.set(type, set)
+  }
+  set.add(cb)
+  return () => {
+    const s = typeCallbacks.get(type)
+    if (!s) return
+    s.delete(cb)
+    if (s.size === 0) typeCallbacks.delete(type)
+  }
+}
+
+export function wsOnChannel(channel: string, cb: WsCallback): () => void {
+  let set = channelCallbacks.get(channel)
+  if (!set) {
+    set = new Set()
+    channelCallbacks.set(channel, set)
+  }
+  set.add(cb)
+  return () => {
+    const s = channelCallbacks.get(channel)
+    if (!s) return
+    s.delete(cb)
+    if (s.size === 0) channelCallbacks.delete(channel)
+  }
 }

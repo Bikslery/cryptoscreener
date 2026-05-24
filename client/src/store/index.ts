@@ -1,6 +1,7 @@
 import { create } from 'zustand'
+import { useSyncExternalStore } from 'react'
 import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, FilterExchange } from '../types.js'
-import { wsOnMessage, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
+import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
 
 const EXCHANGE_PRIORITY: Record<Exchange, number> = {
   'binance-futures': 5,
@@ -37,9 +38,16 @@ function sameTop9(a: string[], b: string[]): boolean {
   return b.every(x => s.has(x))
 }
 
+function buildCoinMap(coins: UnifiedTicker[]): Map<string, UnifiedTicker> {
+  const m = new Map<string, UnifiedTicker>()
+  for (const c of coins) m.set(c.symbol, c)
+  return m
+}
+
 interface CoinListStore {
   coins: UnifiedTicker[]
   sortedCoins: UnifiedTicker[]
+  coinMap: Map<string, UnifiedTicker>
   topChartSymbols: string[]
   sortBy: keyof UnifiedTicker
   sortDir: 'asc' | 'desc'
@@ -67,12 +75,51 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
   const sorted = sortCoins(filtered, state.sortBy, state.sortDir)
   const newTop = sorted.slice(0, 9).map(c => c.symbol)
   const topChartSymbols = sameTop9(newTop, prevTopSymbols) ? prevTopSymbols : (prevTopSymbols = newTop)
-  return { sortedCoins: sorted, topChartSymbols }
+  return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), topChartSymbols }
+}
+
+// --- Live price store (decoupled from the heavy CoinListStore) ----------------
+// Trade WS messages update per-symbol prices via a tiny pub/sub. Components
+// that need live price use `useLivePrice(symbol)` and only re-render when
+// THEIR symbol's price changes — no array clones, no global cascade.
+
+const livePrices = new Map<string, number>()
+const livePriceListeners = new Map<string, Set<() => void>>()
+let globalLivePriceTick = 0
+
+function subscribeLivePrice(symbol: string, listener: () => void): () => void {
+  let set = livePriceListeners.get(symbol)
+  if (!set) { set = new Set(); livePriceListeners.set(symbol, set) }
+  set.add(listener)
+  return () => {
+    const s = livePriceListeners.get(symbol)
+    if (!s) return
+    s.delete(listener)
+    if (s.size === 0) livePriceListeners.delete(symbol)
+  }
+}
+
+function setLivePrice(symbol: string, price: number) {
+  const prev = livePrices.get(symbol)
+  if (prev === price) return
+  livePrices.set(symbol, price)
+  globalLivePriceTick++
+  const set = livePriceListeners.get(symbol)
+  if (set) for (const l of set) l()
+}
+
+export function useLivePrice(symbol: string): number | undefined {
+  return useSyncExternalStore(
+    (cb) => subscribeLivePrice(symbol, cb),
+    () => livePrices.get(symbol),
+    () => livePrices.get(symbol),
+  )
 }
 
 export const useCoinListStore = create<CoinListStore>((set, get) => ({
   coins: [],
   sortedCoins: [],
+  coinMap: new Map(),
   topChartSymbols: [],
   sortBy: 'quoteVolume24h',
   sortDir: 'desc',
@@ -83,7 +130,7 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
 
   setSort: (col) => {
     const s = get()
-    const newDir = s.sortBy === col && s.sortDir === 'desc' ? 'asc' : 'desc'
+    const newDir: 'asc' | 'desc' = s.sortBy === col && s.sortDir === 'desc' ? 'asc' : 'desc'
     const next = { sortBy: col, sortDir: newDir }
     set({ ...next, ...recompute({ ...s, ...next }) })
   },
@@ -103,34 +150,53 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
     let lastSortUpdate = 0
     const SORT_INTERVAL = 3000
 
-    const unsub = wsOnMessage((msg) => {
-      if (msg.type === 'ticker' && Array.isArray(msg.data)) {
-        const s = get()
-        const coins = msg.data as UnifiedTicker[]
-        const now = Date.now()
-        if (now - lastSortUpdate > SORT_INTERVAL) {
-          lastSortUpdate = now
-          set({ coins, ...recompute({ ...s, coins }) })
-        } else {
-          // Update prices without re-sorting
-          const updateMap = new Map<string, UnifiedTicker>(coins.map(c => [c.symbol, c]))
-          const currentCoins = s.coins.map(c => updateMap.get(c.symbol) || c)
-          set({ coins: currentCoins, sortedCoins: s.sortedCoins.map(c => updateMap.get(c.symbol) || c) })
-        }
-      } else if (msg.type && (msg.type as string).startsWith('trade:')) {
-        // Real-time trade update
-        const trade = msg.data as any
-        if (trade && trade.symbol && trade.price) {
-          const s = get()
-          const sym = trade.symbol as string
-          const price = trade.price as number
-          const updater = (c: UnifiedTicker) => c.symbol === sym ? { ...c, price } : c
-          set({ coins: s.coins.map(updater), sortedCoins: s.sortedCoins.map(updater) })
-        }
+    const unsubTicker = wsOnType('ticker', (msg) => {
+      if (!Array.isArray(msg.data)) return
+      const s = get()
+      const coins = msg.data as UnifiedTicker[]
+      const now = Date.now()
+      if (now - lastSortUpdate > SORT_INTERVAL) {
+        lastSortUpdate = now
+        set({ coins, ...recompute({ ...s, coins }) })
+      } else {
+        // Quick price refresh without re-sorting/re-cloning everything.
+        // Merge in place: build a small updates map, then patch arrays
+        // using identity-preserving updates only for changed coins.
+        const updateMap = new Map<string, UnifiedTicker>()
+        for (const c of coins) updateMap.set(c.symbol, c)
+
+        let dirty = false
+        const newCoins = s.coins.map((c) => {
+          const u = updateMap.get(c.symbol)
+          if (!u) return c
+          if (u.price === c.price && u.change24h === c.change24h && u.quoteVolume24h === c.quoteVolume24h) return c
+          dirty = true
+          return u
+        })
+        if (!dirty) return
+
+        const newSorted = s.sortedCoins.map((c) => updateMap.get(c.symbol) || c)
+        set({ coins: newCoins, sortedCoins: newSorted, coinMap: buildCoinMap(newSorted) })
       }
     })
+
+    // Trade messages update only the live-price pub/sub — no array clones,
+    // no React re-renders for components that don't read the price.
+    const unsubTradeWild = wsOnMessage((msg) => {
+      const t = msg.type as string | undefined
+      if (!t || !t.startsWith('trade:')) return
+      const trade = msg.data as any
+      if (!trade || !trade.symbol) return
+      const p = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
+      if (!isFinite(p) || p <= 0) return
+      setLivePrice(trade.symbol as string, p)
+    })
+
     wsSubscribe('ticker')
-    return unsub
+    return () => {
+      unsubTicker()
+      unsubTradeWild()
+    }
   },
 }))
 
@@ -201,10 +267,8 @@ export const useAlertStore = create<AlertStore>((set) => ({
   alerts: [],
 
   init: () => {
-    const unsub = wsOnMessage((msg) => {
-      if (msg.type === 'alert') {
-        set((s) => ({ alerts: [msg.data, ...s.alerts] }))
-      }
+    const unsub = wsOnType('alert', (msg) => {
+      set((s) => ({ alerts: [msg.data, ...s.alerts] }))
     })
     return unsub
   },

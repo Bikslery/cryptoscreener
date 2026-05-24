@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 import { useCoinListStore } from '../../store'
 import type { UnifiedTicker } from '../../types'
 import { formatCompact, extractBaseAsset } from '../../utils/format'
@@ -40,6 +40,45 @@ function formatVal(key: ColKey, coin: UnifiedTicker): string {
   return String(v)
 }
 
+interface RowProps {
+  coin: UnifiedTicker
+  isSelected: boolean
+  onClick: (symbol: string) => void
+}
+
+// Memoized so unchanged rows skip rendering when the surrounding list updates.
+// The default referential equality on `coin` works because the store reuses
+// the same UnifiedTicker object across snapshots whenever fields are unchanged.
+const Row = memo(function Row({ coin, isSelected, onClick }: RowProps) {
+  const isUp = coin.change24h >= 0
+  return (
+    <div
+      className={`grid cursor-pointer border-b border-[#111] transition-colors duration-100 ${
+        isSelected ? 'bg-white/[0.04]' : 'hover:bg-white/[0.02]'
+      } ${isSelected ? 'border-l-2 border-l-white' : 'border-l-2 border-l-transparent'}`}
+      style={{ gridTemplateColumns: '80px 72px 72px 72px 80px', height: '32px', fontFamily: "'JetBrains Mono', monospace" }}
+      onClick={() => onClick(coin.symbol)}
+    >
+      <div className={`flex items-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
+        <ArrowFlag />
+        {formatVal('symbol', coin)}
+      </div>
+      <div className={`flex items-center justify-end px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+        {formatVal('change24h', coin)}%
+      </div>
+      <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
+        {formatVal('range1m', coin)}
+      </div>
+      <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
+        {formatVal('natr5m', coin)}
+      </div>
+      <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0]">
+        {formatVal('quoteVolume24h', coin)}
+      </div>
+    </div>
+  )
+})
+
 export function CoinList() {
   const sortedCoins = useCoinListStore(s => s.sortedCoins)
   const sortBy = useCoinListStore(s => s.sortBy)
@@ -57,7 +96,6 @@ export function CoinList() {
 
   return (
     <div className="w-[400px] h-full flex flex-col bg-[#0a0a0a]">
-      {/* Header */}
       <div
         className="grid border-b border-[#1f1f1f] bg-[#0e0e0e] text-[11px] select-none flex-shrink-0"
         style={{ gridTemplateColumns: '80px 72px 72px 72px 80px', fontFamily: "'Inter', sans-serif" }}
@@ -81,48 +119,15 @@ export function CoinList() {
         ))}
       </div>
 
-      {/* Rows */}
       <div className="flex-1 overflow-y-auto">
-        {filtered.map(coin => {
-          const isSelected = selectedSymbol === coin.symbol
-          const isUp = coin.change24h >= 0
-          return (
-            <div
-              key={coin.symbol}
-              className={`grid cursor-pointer border-b border-[#111] transition-colors duration-100 ${
-                isSelected ? 'bg-white/[0.04]' : 'hover:bg-white/[0.02]'
-              } ${isSelected ? 'border-l-2 border-l-white' : 'border-l-2 border-l-transparent'}`}
-              style={{ gridTemplateColumns: '80px 72px 72px 72px 80px', height: '32px', fontFamily: "'JetBrains Mono', monospace" }}
-              onClick={() => expandChart(coin.symbol)}
-            >
-              {/* Тикер */}
-              <div className={`flex items-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
-                <ArrowFlag />
-                {formatVal('symbol', coin)}
-              </div>
-
-              {/* ИЗМ */}
-              <div className={`flex items-center justify-end px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
-                {formatVal('change24h', coin)}%
-              </div>
-
-              {/* РЕНЖ */}
-              <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
-                {formatVal('range1m', coin)}
-              </div>
-
-              {/* NATR */}
-              <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
-                {formatVal('natr5m', coin)}
-              </div>
-
-              {/* ОБЪЁМ */}
-              <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0]">
-                {formatVal('quoteVolume24h', coin)}
-              </div>
-            </div>
-          )
-        })}
+        {filtered.map(coin => (
+          <Row
+            key={coin.symbol}
+            coin={coin}
+            isSelected={selectedSymbol === coin.symbol}
+            onClick={expandChart}
+          />
+        ))}
       </div>
     </div>
   )

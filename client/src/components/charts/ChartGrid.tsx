@@ -1,9 +1,9 @@
-import { useEffect, useRef, memo, useState, useMemo } from 'react'
+import { useEffect, useRef, memo, useState } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
-import { useCoinListStore } from '../../store'
+import { useCoinListStore, useLivePrice } from '../../store'
 import { useShallow } from 'zustand/shallow'
-import { wsOnMessage, wsSubscribe, wsUnsubscribe } from '../../services/ws'
+import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import api from '../../services/api'
 import type { Timeframe, UnifiedCandle } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
@@ -11,6 +11,12 @@ import { ArrowLeft } from 'lucide-react'
 
 const UP_COLOR = '#26a65b'
 const DOWN_COLOR = '#e74c3c'
+
+const TF_SECONDS: Record<string, number> = {
+  '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+  '1h': 3600, '2h': 7200, '4h': 14400, '1d': 86400, '1w': 604800,
+}
+function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
 
 function exchangeBadge(ex: string): string {
   if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
@@ -54,124 +60,204 @@ function useCandles(symbol: string, tf: Timeframe, candleRef: React.RefObject<IS
   }, [symbol, tf])
 }
 
-function useWsCandle(symbol: string, tf: Timeframe, candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>, volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>, destroyedRef: React.RefObject<boolean>, candlesDataRef?: React.RefObject<UnifiedCandle[]>) {
-  const wsUnsubRef = useRef<(() => void) | null>(null)
+// RAF-throttled candle/volume updates: only the latest pending payload per frame
+// is flushed to lightweight-charts. Avoids saturating React/main thread when
+// WS bursts at 50–100 msg/s.
+function useRafFlush(
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  destroyedRef: React.RefObject<boolean>,
+) {
+  const pendingCandle = useRef<{ time: Time; open: number; high: number; low: number; close: number } | null>(null)
+  const pendingVolume = useRef<{ time: Time; value: number; color: string } | null>(null)
+  const rafId = useRef<number | null>(null)
 
-  useEffect(() => {
-    if (wsUnsubRef.current) {
-      wsUnsubRef.current()
-      wsUnsubRef.current = null
+  const flush = () => {
+    rafId.current = null
+    if (destroyedRef.current) {
+      pendingCandle.current = null
+      pendingVolume.current = null
+      return
     }
+    const c = pendingCandle.current
+    const v = pendingVolume.current
+    pendingCandle.current = null
+    pendingVolume.current = null
+    try {
+      if (c && candleRef.current) candleRef.current.update(c)
+      if (v && volumeRef.current) volumeRef.current.update(v)
+    } catch {}
+  }
 
-    const unsub = wsOnMessage((msg) => {
+  const schedule = () => {
+    if (rafId.current != null) return
+    rafId.current = requestAnimationFrame(flush)
+  }
+
+  useEffect(() => () => {
+    if (rafId.current != null) cancelAnimationFrame(rafId.current)
+    rafId.current = null
+  }, [])
+
+  return {
+    queueCandle(p: { time: Time; open: number; high: number; low: number; close: number }) {
+      pendingCandle.current = p
+      schedule()
+    },
+    queueVolume(p: { time: Time; value: number; color: string }) {
+      pendingVolume.current = p
+      schedule()
+    },
+  }
+}
+
+function useWsCandle(
+  symbol: string,
+  tf: Timeframe,
+  flush: ReturnType<typeof useRafFlush>,
+  destroyedRef: React.RefObject<boolean>,
+  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
+) {
+  useEffect(() => {
+    const channel = `candle:${symbol}:${tf}`
+    const unsub = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current) return
-      if (msg.type === 'candle' && msg.channel === `candle:${symbol}:${tf}`) {
-        const c = msg.data as UnifiedCandle
-        if (!candleRef.current || !volumeRef.current) return
-        if (candlesDataRef && candlesDataRef.current) {
-          const arr = candlesDataRef.current
-          const last = arr[arr.length - 1]
-          if (last && last.time === c.time) {
-            arr[arr.length - 1] = c
-          } else if (!last || c.time > last.time) {
-            arr.push(c)
-          }
+      const c = msg.data as UnifiedCandle
+      if (!c) return
+      if (candlesDataRef && candlesDataRef.current) {
+        const arr = candlesDataRef.current
+        const last = arr[arr.length - 1]
+        if (last && last.time === c.time) {
+          arr[arr.length - 1] = c
+        } else if (!last || c.time > last.time) {
+          arr.push(c)
         }
-        try {
-          candleRef.current.update({
-            time: c.time as Time,
-            open: c.open,
-            high: c.high,
-            low: c.low,
-            close: c.close,
-          })
-          volumeRef.current.update({
-            time: c.time as Time,
-            value: c.volume,
-            color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
-          })
-        } catch {}
       }
+      flush.queueCandle({
+        time: c.time as Time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      })
+      flush.queueVolume({
+        time: c.time as Time,
+        value: c.volume,
+        color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
+      })
     })
-    wsSubscribe(`candle:${symbol}:${tf}`)
-    wsUnsubRef.current = unsub
-
+    wsSubscribe(channel)
     return () => {
-      if (wsUnsubRef.current) {
-        wsUnsubRef.current()
-        wsUnsubRef.current = null
-      }
-      wsUnsubscribe(`candle:${symbol}:${tf}`)
+      unsub()
+      wsUnsubscribe(channel)
     }
   }, [symbol, tf])
 }
 
-function useWsTrade(symbol: string, tf: Timeframe, candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>, volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>, destroyedRef: React.RefObject<boolean>) {
-  const currentCandleRef = useRef<{ time: number; open: number; high: number; low: number; close: number; volume: number } | null>(null)
-
+function useWsTrade(
+  symbol: string,
+  tf: Timeframe,
+  flush: ReturnType<typeof useRafFlush>,
+  destroyedRef: React.RefObject<boolean>,
+) {
   useEffect(() => {
-    currentCandleRef.current = null
+    const tradeType = `trade:${symbol}`
+    let cur: { time: number; open: number; high: number; low: number; close: number; volume: number } | null = null
 
-    const unsub = wsOnMessage((msg) => {
+    const unsub = wsOnType(tradeType, (msg) => {
       if (destroyedRef.current) return
-      if (msg.type === `trade:${symbol}`) {
-        const trade = msg.data as any
-        if (!candleRef.current || !volumeRef.current || !trade?.price) return
+      const trade = msg.data as any
+      if (!trade?.price) return
+      const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
+      if (!isFinite(price)) return
+      const now = Math.floor(Date.now() / 1000)
+      const tfSeconds = getTfSeconds(tf)
+      const candleTime = Math.floor(now / tfSeconds) * tfSeconds
 
-        try {
-          const price = parseFloat(trade.price)
-          const now = Math.floor(Date.now() / 1000)
-
-          // Align time to timeframe interval
-          const tfSeconds = getTfSeconds(tf)
-          const candleTime = Math.floor(now / tfSeconds) * tfSeconds
-
-          let candle = currentCandleRef.current
-          if (!candle || candle.time !== candleTime) {
-            // New candle started
-            candle = {
-              time: candleTime,
-              open: price,
-              high: price,
-              low: price,
-              close: price,
-              volume: trade.volume || 0,
-            }
-            currentCandleRef.current = candle
-          } else {
-            // Update existing candle
-            candle.high = Math.max(candle.high, price)
-            candle.low = Math.min(candle.low, price)
-            candle.close = price
-            candle.volume += trade.volume || 0
-          }
-
-          candleRef.current.update({
-            time: candle.time as Time,
-            open: candle.open,
-            high: candle.high,
-            low: candle.low,
-            close: candle.close,
-          })
-        } catch {}
+      if (!cur || cur.time !== candleTime) {
+        cur = { time: candleTime, open: price, high: price, low: price, close: price, volume: trade.volume || 0 }
+      } else {
+        if (price > cur.high) cur.high = price
+        if (price < cur.low) cur.low = price
+        cur.close = price
+        cur.volume += trade.volume || 0
       }
+
+      flush.queueCandle({
+        time: cur.time as Time,
+        open: cur.open,
+        high: cur.high,
+        low: cur.low,
+        close: cur.close,
+      })
     })
-    wsSubscribe(`trade:${symbol}`)
+    wsSubscribe(tradeType)
 
     return () => {
       unsub()
-      wsUnsubscribe(`trade:${symbol}`)
+      wsUnsubscribe(tradeType)
     }
   }, [symbol, tf])
 }
 
-function getTfSeconds(tf: Timeframe): number {
-  const map: Record<string, number> = {
-    '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
-    '1h': 3600, '2h': 7200, '4h': 14400, '1d': 86400, '1w': 604800,
-  }
-  return map[tf] || 60
-}
+// Header is split out so price/flash updates never re-render the chart body.
+const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: string }) {
+  const coin = useCoinListStore(useShallow(s => {
+    const c = s.coinMap.get(symbol)
+    if (!c) return null
+    return {
+      exchange: c.exchange,
+      change24h: c.change24h,
+      quoteVolume24h: c.quoteVolume24h,
+      natr5m: c.natr5m,
+      range1m: c.range1m,
+    }
+  }))
+  const livePrice = useLivePrice(symbol)
+  const [flash, setFlash] = useState<'green' | 'red' | null>(null)
+  const prevPriceRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (livePrice == null) return
+    const prev = prevPriceRef.current
+    prevPriceRef.current = livePrice
+    if (prev == null || prev === livePrice) return
+    setFlash(livePrice > prev ? 'green' : 'red')
+    const t = setTimeout(() => setFlash(null), 300)
+    return () => clearTimeout(t)
+  }, [livePrice])
+
+  const isUp = coin ? coin.change24h >= 0 : true
+  const badge = exchangeBadge(coin?.exchange || '')
+  const vol = coin ? formatCompact(coin.quoteVolume24h) : '-'
+
+  return (
+    <div className={`relative z-20 flex items-center justify-between px-[6px] py-[3px] border-b border-[#1f1f1f] flex-shrink-0 gap-2 transition-colors duration-300 ${
+      flash === 'green' ? 'bg-[#26a65b]/20' : flash === 'red' ? 'bg-[#e74c3c]/20' : 'bg-[#141414]'
+    }`}>
+      <div className="flex items-center gap-[5px] min-w-0">
+        <span className="text-[9px] font-bold px-[3px] py-[1px] rounded-[2px] leading-none bg-[#f9b600]/15 text-[#f9b600] border border-[#f9b600]/30">
+          {badge}
+        </span>
+        <span className="font-bold text-[11px] text-[#e0e0e0] truncate" style={{ fontFamily: "'Inter', sans-serif" }}>
+          {extractBaseAsset(symbol)}
+        </span>
+      </div>
+      <div className="flex items-center gap-[6px] flex-shrink-0">
+        {coin && (
+          <>
+            <span className={`font-mono font-bold text-[10px] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+              {isUp ? '+' : ''}{coin.change24h.toFixed(1)}%
+            </span>
+            <span className="font-mono text-[10px] text-[#888]">{coin.natr5m ? coin.natr5m.toFixed(1) : '-'}</span>
+            <span className="font-mono text-[10px] text-[#888]">{coin.range1m ? coin.range1m.toFixed(1) : '-'}</span>
+            <span className="font-mono text-[10px] text-[#888]">{vol}</span>
+          </>
+        )}
+      </div>
+    </div>
+  )
+})
 
 const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -180,27 +266,7 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
-  const coin = useCoinListStore(useShallow(s => {
-    const c = s.sortedCoins.find(c => c.symbol === symbol)
-    if (!c) return null
-    return { exchange: c.exchange, change24h: c.change24h, price: c.price, quoteVolume24h: c.quoteVolume24h, pricePrecision: c.pricePrecision, natr5m: c.natr5m, range1m: c.range1m }
-  }))
-  const isUp = coin ? coin.change24h >= 0 : true
-  const [flash, setFlash] = useState<'green' | 'red' | null>(null)
-  const prevPriceRef = useRef<number | null>(null)
-
-  // Flash effect on price change
-  useEffect(() => {
-    if (!coin) return
-    const currentPrice = coin.price
-    const prevPrice = prevPriceRef.current
-    if (prevPrice !== null && currentPrice !== prevPrice) {
-      setFlash(currentPrice > prevPrice ? 'green' : 'red')
-      const timer = setTimeout(() => setFlash(null), 300)
-      return () => clearTimeout(timer)
-    }
-    prevPriceRef.current = currentPrice
-  }, [coin?.price])
+  const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
 
   useEffect(() => {
     destroyedRef.current = false
@@ -227,8 +293,8 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
       wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
       priceFormat: {
         type: 'price',
-        precision: coin?.pricePrecision ?? 2,
-        minMove: Math.pow(10, -(coin?.pricePrecision ?? 2)),
+        precision: pricePrecision,
+        minMove: Math.pow(10, -pricePrecision),
       },
     })
     const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
@@ -245,7 +311,6 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
     })
     ro.observe(containerRef.current)
 
-    // Ctrl + wheel changes bar spacing (candle width)
     const onWheel = (e: WheelEvent) => {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault()
@@ -269,51 +334,21 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
       candleRef.current = null
       volumeRef.current = null
     }
-  }, [symbol, tf])
+  }, [symbol, tf, pricePrecision])
 
+  const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
   useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 300)
-  useWsCandle(symbol, tf, candleRef, volumeRef, destroyedRef)
-  useWsTrade(symbol, tf, candleRef, volumeRef, destroyedRef)
-
-  const badge = exchangeBadge(coin?.exchange || '')
-  const vol = coin ? formatCompact(coin.quoteVolume24h) : '-'
-  const precision = coin?.pricePrecision ?? 2
+  useWsCandle(symbol, tf, flush, destroyedRef)
+  useWsTrade(symbol, tf, flush, destroyedRef)
 
   return (
     <div className="relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px]">
-      {/* Водяной знак */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
         <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'Inter', sans-serif" }}>
           {extractBaseAsset(symbol)}
         </span>
       </div>
-
-      {/* Шапка */}
-      <div className={`relative z-20 flex items-center justify-between px-[6px] py-[3px] border-b border-[#1f1f1f] flex-shrink-0 gap-2 transition-colors duration-300 ${
-        flash === 'green' ? 'bg-[#26a65b]/20' : flash === 'red' ? 'bg-[#e74c3c]/20' : 'bg-[#141414]'
-      }`}>
-        <div className="flex items-center gap-[5px] min-w-0">
-          <span className="text-[9px] font-bold px-[3px] py-[1px] rounded-[2px] leading-none bg-[#f9b600]/15 text-[#f9b600] border border-[#f9b600]/30">
-            {badge}
-          </span>
-          <span className="font-bold text-[11px] text-[#e0e0e0] truncate" style={{ fontFamily: "'Inter', sans-serif" }}>
-            {extractBaseAsset(symbol)}
-          </span>
-        </div>
-        <div className="flex items-center gap-[6px] flex-shrink-0">
-          {coin && (
-            <>
-              <span className={`font-mono font-bold text-[10px] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
-                {isUp ? '+' : ''}{coin.change24h.toFixed(1)}%
-              </span>
-              <span className="font-mono text-[10px] text-[#888]">{coin.natr5m ? coin.natr5m.toFixed(1) : '-'}</span>
-              <span className="font-mono text-[10px] text-[#888]">{coin.range1m ? coin.range1m.toFixed(1) : '-'}</span>
-              <span className="font-mono text-[10px] text-[#888]">{vol}</span>
-            </>
-          )}
-        </div>
-      </div>
-
+      <MiniChartHeader symbol={symbol} />
       <div ref={containerRef} className="relative z-0 flex-1 min-h-0" />
     </div>
   )
@@ -343,6 +378,77 @@ function formatDuration(sec: number): string {
   return h % 24 ? `${d}d ${h % 24}h` : `${d}d`
 }
 
+// Header is split so live price ticks don't re-render the chart canvas.
+const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack }: { symbol: string; onBack: () => void }) {
+  const coin = useCoinListStore(useShallow(s => {
+    const c = s.coinMap.get(symbol)
+    if (!c) return null
+    return {
+      exchange: c.exchange,
+      change24h: c.change24h,
+      price: c.price,
+      quoteVolume24h: c.quoteVolume24h,
+      pricePrecision: c.pricePrecision,
+      high24h: c.high24h,
+      low24h: c.low24h,
+    }
+  }))
+  const livePrice = useLivePrice(symbol)
+  const price = livePrice ?? coin?.price ?? 0
+  const isUp = coin ? coin.change24h >= 0 : true
+  const badge = exchangeBadge(coin?.exchange || '')
+  const precision = coin?.pricePrecision ?? 2
+  const volDisplay = coin ? formatCompact(coin.quoteVolume24h) : '-'
+
+  return (
+    <div className="flex items-center gap-3 px-3 py-[6px] bg-[#141414] border-b border-[#1f1f1f] flex-shrink-0">
+      <button
+        className="flex items-center justify-center w-[28px] h-[28px] rounded-[4px] bg-[#1a1a1a] border border-[#2a2a2a] text-[#666] hover:bg-[#222] hover:text-[#ccc] hover:border-[#444] transition-all duration-150"
+        onClick={onBack}
+        title="Назад к сетке"
+      >
+        <ArrowLeft size={15} />
+      </button>
+
+      <div className="flex items-center gap-[8px] min-w-0">
+        <span className="text-[10px] font-bold px-[4px] py-[1px] rounded-[3px] leading-none bg-[#f9b600]/15 text-[#f9b600] border border-[#f9b600]/30">
+          {badge}
+        </span>
+        <span className="font-bold text-[14px] text-[#f0f0f0] tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>
+          {extractBaseAsset(symbol)}
+        </span>
+      </div>
+
+      <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
+
+      <div className="flex items-center gap-[6px]">
+        <span className={`font-mono font-bold text-[13px] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+          {coin ? `${isUp ? '+' : ''}${coin.change24h.toFixed(2)}%` : ''}
+        </span>
+      </div>
+
+      <span className="font-mono font-bold text-[13px] text-[#e0e0e0]">{price ? `$${formatPrice(price, precision)}` : ''}</span>
+
+      <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
+
+      <div className="flex items-center gap-[6px] text-[11px] text-[#888]">
+        <span>H: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.high24h, precision)}` : '-'}</span></span>
+        <span>L: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.low24h, precision)}` : '-'}</span></span>
+      </div>
+
+      <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
+
+      <div className="flex items-center gap-[4px] text-[11px] text-[#888]">
+        <span>Vol: <span className="font-mono text-[#b3b3b3]">${volDisplay}</span></span>
+      </div>
+
+      <div className="ml-auto text-[10px] text-[#666] font-mono">
+        Shift + ЛКМ / Колёсико — измерить %
+      </div>
+    </div>
+  )
+})
+
 function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -351,12 +457,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
-  const coin = useCoinListStore(useShallow(s => {
-    const c = s.sortedCoins.find(c => c.symbol === symbol)
-    if (!c) return null
-    return { exchange: c.exchange, change24h: c.change24h, price: c.price, quoteVolume24h: c.quoteVolume24h, pricePrecision: c.pricePrecision, high24h: c.high24h, low24h: c.low24h }
-  }))
-  const isUp = coin ? coin.change24h >= 0 : true
+  const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const [selection, setSelection] = useState<RangeSelection | null>(null)
 
   useEffect(() => {
@@ -384,8 +485,8 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
       priceFormat: {
         type: 'price',
-        precision: coin?.pricePrecision ?? 2,
-        minMove: Math.pow(10, -(coin?.pricePrecision ?? 2)),
+        precision: pricePrecision,
+        minMove: Math.pow(10, -pricePrecision),
       },
     })
     const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
@@ -402,7 +503,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     })
     ro.observe(containerRef.current)
 
-    // Ctrl + wheel changes bar spacing (candle width)
     const onWheel = (e: WheelEvent) => {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault()
@@ -426,11 +526,12 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       candleRef.current = null
       volumeRef.current = null
     }
-  }, [symbol, tf])
+  }, [symbol, tf, pricePrecision])
 
+  const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
   useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 500, candlesDataRef)
-  useWsCandle(symbol, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
-  useWsTrade(symbol, tf, candleRef, volumeRef, destroyedRef)
+  useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
+  useWsTrade(symbol, tf, flush, destroyedRef)
 
   useEffect(() => {
     setSelection(null)
@@ -504,17 +605,25 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       setSelection(computeSelection(startX, startY))
     }
 
+    let mmRaf: number | null = null
+    let mmX = 0, mmY = 0
     const onMouseMove = (e: MouseEvent) => {
       if (!dragging) return
       const rect = container.getBoundingClientRect()
-      const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
-      const y = Math.max(0, Math.min(e.clientY - rect.top, rect.height))
-      setSelection(computeSelection(x, y))
+      mmX = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
+      mmY = Math.max(0, Math.min(e.clientY - rect.top, rect.height))
+      if (mmRaf != null) return
+      mmRaf = requestAnimationFrame(() => {
+        mmRaf = null
+        if (!dragging) return
+        setSelection(computeSelection(mmX, mmY))
+      })
     }
 
     const finishDrag = () => {
       if (!dragging) return
       dragging = false
+      if (mmRaf != null) { cancelAnimationFrame(mmRaf); mmRaf = null }
       const chart = chartRef.current
       if (chart && restoreOpts) {
         chart.applyOptions(restoreOpts)
@@ -552,57 +661,11 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     }
   }, [symbol, tf])
 
-  const badge = exchangeBadge(coin?.exchange || '')
-  const volDisplay = coin ? formatCompact(coin.quoteVolume24h) : '-'
-  const precision = coin?.pricePrecision ?? 2
+  const precision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
-      <div className="flex items-center gap-3 px-3 py-[6px] bg-[#141414] border-b border-[#1f1f1f] flex-shrink-0">
-        <button
-          className="flex items-center justify-center w-[28px] h-[28px] rounded-[4px] bg-[#1a1a1a] border border-[#2a2a2a] text-[#666] hover:bg-[#222] hover:text-[#ccc] hover:border-[#444] transition-all duration-150"
-          onClick={onBack}
-          title="Назад к сетке"
-        >
-          <ArrowLeft size={15} />
-        </button>
-
-        <div className="flex items-center gap-[8px] min-w-0">
-          <span className="text-[10px] font-bold px-[4px] py-[1px] rounded-[3px] leading-none bg-[#f9b600]/15 text-[#f9b600] border border-[#f9b600]/30">
-            {badge}
-          </span>
-          <span className="font-bold text-[14px] text-[#f0f0f0] tracking-tight" style={{ fontFamily: "'Inter', sans-serif" }}>
-            {extractBaseAsset(symbol)}
-          </span>
-        </div>
-
-        <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
-
-        <div className="flex items-center gap-[6px]">
-          <span className={`font-mono font-bold text-[13px] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
-            {coin ? `${isUp ? '+' : ''}${coin.change24h.toFixed(2)}%` : ''}
-          </span>
-        </div>
-
-        <span className="font-mono font-bold text-[13px] text-[#e0e0e0]">{coin ? `$${formatPrice(coin.price, precision)}` : ''}</span>
-
-        <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
-
-        <div className="flex items-center gap-[6px] text-[11px] text-[#888]">
-          <span>H: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.high24h, precision)}` : '-'}</span></span>
-          <span>L: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.low24h, precision)}` : '-'}</span></span>
-        </div>
-
-        <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
-
-        <div className="flex items-center gap-[4px] text-[11px] text-[#888]">
-          <span>Vol: <span className="font-mono text-[#b3b3b3]">${volDisplay}</span></span>
-        </div>
-
-        <div className="ml-auto text-[10px] text-[#666] font-mono">
-          Shift + ЛКМ / Колёсико — измерить %
-        </div>
-      </div>
+      <ExpandedChartHeader symbol={symbol} onBack={onBack} />
       <div ref={containerRef} className="relative flex-1 min-h-0">
         {selection && Math.abs(selection.endX - selection.startX) > 2 && (
           <div className="pointer-events-none absolute inset-0 z-30">
