@@ -5,7 +5,6 @@ import { useCoinListStore, useLivePrice } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import api from '../../services/api'
-import * as candleCache from '../../services/candle-cache'
 import type { Timeframe, UnifiedCandle } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
@@ -28,31 +27,42 @@ function exchangeBadge(ex: string): string {
   return 'EX'
 }
 
-// --- WS initial-candles push handler ---
-
-export function useInitialCandlesPush() {
+function useCandles(symbol: string, tf: Timeframe, candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>, volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>, chartRef: React.RefObject<IChartApi | null>, destroyedRef: React.RefObject<boolean>, limit = 300, candlesDataRef?: React.RefObject<UnifiedCandle[]>) {
   useEffect(() => {
-    // Listen for initial-candles WS message
-    // Server format: { type: 'initial-candles', data: { 'BTCUSDT:5m': [...], 'ETHUSDT:1m': [...] } }
-    const unsub = wsOnType('initial-candles', (msg) => {
-      const data = msg.data as Record<string, UnifiedCandle[]> | null
-      if (!data) return
+    if (!candleRef.current || !volumeRef.current || destroyedRef.current) return
 
-      // Store each key in cache
-      for (const [key, candles] of Object.entries(data)) {
-        if (candles.length === 0) continue
-        const colonIdx = key.lastIndexOf(':')
-        if (colonIdx === -1) continue
-        const symbol = key.slice(0, colonIdx)
-        const tf = key.slice(colonIdx + 1)
-        candleCache.setCandles(symbol, tf, candles)
-      }
-    })
-    return unsub
-  }, [])
+    candleRef.current.setData([])
+    volumeRef.current.setData([])
+    if (candlesDataRef) candlesDataRef.current = []
+
+    api.get(`/coins/${symbol}/candles`, { params: { tf, limit } })
+      .then(res => {
+        if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
+        const candles = res.data as UnifiedCandle[]
+        if (candlesDataRef) candlesDataRef.current = candles
+        const candleData = candles.map(c => ({
+          time: c.time as Time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        }))
+        const volumeData = candles.map(c => ({
+          time: c.time as Time,
+          value: c.volume,
+          color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
+        }))
+        candleRef.current.setData(candleData)
+        volumeRef.current.setData(volumeData)
+        chartRef.current?.timeScale().fitContent()
+      })
+      .catch(() => {})
+  }, [symbol, tf])
 }
 
-// --- RAF-throttled candle/volume updates ---
+// RAF-throttled candle/volume updates: only the latest pending payload per frame
+// is flushed to lightweight-charts. Avoids saturating React/main thread when
+// WS bursts at 50–100 msg/s.
 function useRafFlush(
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
@@ -101,33 +111,6 @@ function useRafFlush(
   }
 }
 
-// --- Apply candles to chart series ---
-function applyCandlesToChart(
-  candles: UnifiedCandle[],
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
-  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  chartRef: React.RefObject<IChartApi | null>,
-  destroyedRef: React.RefObject<boolean>,
-) {
-  if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
-  const candleData = candles.map(c => ({
-    time: c.time as Time,
-    open: c.open,
-    high: c.high,
-    low: c.low,
-    close: c.close,
-  }))
-  const volumeData = candles.map(c => ({
-    time: c.time as Time,
-    value: c.volume,
-    color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
-  }))
-  candleRef.current.setData(candleData)
-  volumeRef.current.setData(volumeData)
-  chartRef.current?.timeScale().fitContent()
-}
-
-// --- WS candle subscription ---
 function useWsCandle(
   symbol: string,
   tf: Timeframe,
@@ -141,11 +124,6 @@ function useWsCandle(
       if (destroyedRef.current) return
       const c = msg.data as UnifiedCandle
       if (!c) return
-
-      // Update client cache
-      candleCache.updateCandle(c)
-
-      // Update local ref
       if (candlesDataRef && candlesDataRef.current) {
         const arr = candlesDataRef.current
         const last = arr[arr.length - 1]
@@ -155,7 +133,6 @@ function useWsCandle(
           arr.push(c)
         }
       }
-
       flush.queueCandle({
         time: c.time as Time,
         open: c.open,
@@ -177,7 +154,6 @@ function useWsCandle(
   }, [symbol, tf])
 }
 
-// --- WS trade subscription ---
 function useWsTrade(
   symbol: string,
   tf: Timeframe,
@@ -224,7 +200,7 @@ function useWsTrade(
   }, [symbol, tf])
 }
 
-// --- MiniChart Header ---
+// Header is split out so price/flash updates never re-render the chart body.
 const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: string }) {
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
@@ -283,7 +259,6 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
   )
 })
 
-// --- MiniChart ---
 const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -292,20 +267,17 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
-  const [loaded, setLoaded] = useState(false)
 
-  // Create chart instance
   useEffect(() => {
     destroyedRef.current = false
-    setLoaded(false)
     if (!containerRef.current) return
 
     const chart = createChart(containerRef.current, {
       layout: { background: { type: ColorType.Solid, color: '#0e0e0e' }, textColor: '#666666', fontSize: 9, fontFamily: "'Inter', sans-serif" },
       grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { visible: true, color: '#4d4d4d' }, horzLine: { visible: true, color: '#4d4d4d' } },
-      rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.1, bottom: 0.25 } },
-      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6, minBarSpacing: 2 },
+      rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.1, bottom: 0.25 }, textColor: '#666666' },
+      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, textColor: '#666666', barSpacing: 6 },
       handleScroll: true,
       handleScale: {
         axisPressedMouseMove: { time: true, price: true },
@@ -319,7 +291,6 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
       upColor: UP_COLOR, downColor: DOWN_COLOR,
       borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
       wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
-      borderVisible: true,
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
@@ -327,7 +298,7 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
       },
     })
     const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
-    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, textColor: '#666666' })
 
     chartRef.current = chart
     candleRef.current = candleSeries
@@ -348,7 +319,7 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
         const options = ts.options()
         const currentSpacing = (options as any).barSpacing || 6
         const delta = e.deltaY > 0 ? -0.5 : 0.5
-        const newSpacing = Math.max(2, Math.min(30, currentSpacing + delta))
+        const newSpacing = Math.max(1, Math.min(30, currentSpacing + delta))
         ts.applyOptions({ barSpacing: newSpacing })
       }
     }
@@ -366,33 +337,7 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   }, [symbol, tf, pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-
-  // Load candles — from cache first, then REST if needed
-  useEffect(() => {
-    if (!candleRef.current || !volumeRef.current || destroyedRef.current) return
-
-    // Check client cache first
-    const cached = candleCache.getCandles(symbol, tf)
-    if (cached && cached.length > 0) {
-      applyCandlesToChart(cached, candleRef, volumeRef, chartRef, destroyedRef)
-      setLoaded(true)
-      return
-    }
-
-    // No cache — fetch from REST
-    api.get(`/coins/${symbol}/candles`, { params: { tf, limit: 300 } })
-      .then(res => {
-        if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
-        const candles = res.data as UnifiedCandle[]
-        if (candles.length > 0) {
-          candleCache.setCandles(symbol, tf, candles)
-        }
-        applyCandlesToChart(candles, candleRef, volumeRef, chartRef, destroyedRef)
-        setLoaded(true)
-      })
-      .catch(() => {})
-  }, [symbol, tf])
-
+  useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 300)
   useWsCandle(symbol, tf, flush, destroyedRef)
   useWsTrade(symbol, tf, flush, destroyedRef)
 
@@ -403,25 +348,12 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
           {extractBaseAsset(symbol)}
         </span>
       </div>
-      {!loaded && (
-        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-[#0e0e0e]/95 gap-2 chart-loading-overlay pointer-events-none">
-          <div className="flex items-center gap-[4px]">
-            <div className="w-[24px] h-[3px] rounded-[1px] bg-[#333] chart-skeleton-bar" />
-            <div className="w-[16px] h-[3px] rounded-[1px] bg-[#2a2a2a] chart-skeleton-bar" style={{ animationDelay: '0.15s' }} />
-            <div className="w-[20px] h-[3px] rounded-[1px] bg-[#333] chart-skeleton-bar" style={{ animationDelay: '0.3s' }} />
-          </div>
-          <span className="text-[10px] text-[#555] tracking-wide" style={{ fontFamily: "'Inter', sans-serif" }}>
-            Загрузка...
-          </span>
-        </div>
-      )}
       <MiniChartHeader symbol={symbol} />
       <div ref={containerRef} className="relative z-0 flex-1 min-h-0" />
     </div>
   )
 })
 
-// --- Range Selection ---
 type RangeSelection = {
   startX: number
   startY: number
@@ -446,7 +378,7 @@ function formatDuration(sec: number): string {
   return h % 24 ? `${d}d ${h % 24}h` : `${d}d`
 }
 
-// --- Expanded Chart Header ---
+// Header is split so live price ticks don't re-render the chart canvas.
 const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack }: { symbol: string; onBack: () => void }) {
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
@@ -517,7 +449,6 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack }
   )
 })
 
-// --- Expanded Chart ---
 function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -529,7 +460,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const [selection, setSelection] = useState<RangeSelection | null>(null)
 
-  // Create chart instance
   useEffect(() => {
     destroyedRef.current = false
     if (!containerRef.current) return
@@ -538,8 +468,8 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       layout: { background: { type: ColorType.Solid, color: '#0e0e0e' }, textColor: '#b3b3b3', fontSize: 11, fontFamily: "'Inter', sans-serif" },
       grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' }, horzLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' } },
-      rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.05, bottom: 0.15 } },
-      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6, minBarSpacing: 2 },
+      rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.05, bottom: 0.15 }, textColor: '#666666' },
+      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, textColor: '#666666', barSpacing: 6 },
       handleScroll: true,
       handleScale: {
         axisPressedMouseMove: { time: true, price: true },
@@ -553,7 +483,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       upColor: UP_COLOR, downColor: DOWN_COLOR,
       borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
       wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
-      borderVisible: true,
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
@@ -561,7 +490,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       },
     })
     const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
-    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.9, bottom: 0 } })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.9, bottom: 0 }, textColor: '#666666' })
 
     chartRef.current = chart
     candleRef.current = candleSeries
@@ -582,7 +511,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
         const options = ts.options()
         const currentSpacing = (options as any).barSpacing || 6
         const delta = e.deltaY > 0 ? -0.5 : 0.5
-        const newSpacing = Math.max(2, Math.min(30, currentSpacing + delta))
+        const newSpacing = Math.max(1, Math.min(30, currentSpacing + delta))
         ts.applyOptions({ barSpacing: newSpacing })
       }
     }
@@ -600,33 +529,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [symbol, tf, pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-
-  // Load candles — cache first, then REST
-  useEffect(() => {
-    if (!candleRef.current || !volumeRef.current || destroyedRef.current) return
-
-    // Check client cache first
-    const cached = candleCache.getCandles(symbol, tf)
-    if (cached && cached.length > 0) {
-      candlesDataRef.current = cached
-      applyCandlesToChart(cached, candleRef, volumeRef, chartRef, destroyedRef)
-    }
-
-    // Always fetch more data for expanded chart (500 candles)
-    api.get(`/coins/${symbol}/candles`, { params: { tf, limit: 500 } })
-      .then(res => {
-        if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
-        const candles = res.data as UnifiedCandle[]
-        if (candles.length > 0) {
-          // Merge with cache — REST data takes priority
-          candleCache.setCandles(symbol, tf, candles)
-          candlesDataRef.current = candles
-        }
-        applyCandlesToChart(candles.length > 0 ? candles : (cached || []), candleRef, volumeRef, chartRef, destroyedRef)
-      })
-      .catch(() => {})
-  }, [symbol, tf])
-
+  useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 500, candlesDataRef)
   useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
   useWsTrade(symbol, tf, flush, destroyedRef)
 
@@ -634,7 +537,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     setSelection(null)
   }, [symbol, tf])
 
-  // --- Range selection via Shift+click or middle mouse ---
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -674,7 +576,17 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
         }
       }
 
-      return { startX, startY, endX: curX, endY: curY, startPrice, endPrice, changePct, durationSec, valid }
+      return {
+        startX,
+        startY,
+        endX: curX,
+        endY: curY,
+        startPrice,
+        endPrice,
+        changePct,
+        durationSec,
+        valid,
+      }
     }
 
     const onMouseDown = (e: MouseEvent) => {
@@ -815,51 +727,27 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   )
 }
 
-// --- Chart Grid with bulk init ---
 export function ChartGrid() {
   const topSymbols = useCoinListStore(s => s.topChartSymbols)
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const expandChart = useCoinListStore(s => s.expandChart)
-  const tf = useCoinListStore(s => s.activeTimeframe)
-  const bulkLoadedRef = useRef(false)
-  const bulkLoadingRef = useRef(false)
+  const [visibleCount, setVisibleCount] = useState(0)
+  const staggeredRef = useRef(false)
 
-  // WS initial push handler
-  useInitialCandlesPush()
-
-  // Bulk load candles for all top-9 symbols via /candles-bulk
   useEffect(() => {
-    if (topSymbols.length === 0 || bulkLoadingRef.current) return
-
-    // If we already have data in cache for most symbols, skip bulk
-    const cachedCount = topSymbols.filter(s => candleCache.hasCandles(s, tf)).length
-    if (cachedCount >= topSymbols.length - 2 && !bulkLoadedRef.current) {
-      bulkLoadedRef.current = true
+    if (topSymbols.length === 0) return
+    if (staggeredRef.current) {
+      setVisibleCount(topSymbols.length)
       return
     }
-
-    if (bulkLoadedRef.current) return
-
-    bulkLoadingRef.current = true
-    api.post('/coins/candles-bulk', { symbols: topSymbols, tf, limit: 300 })
-      .then(res => {
-        const data = res.data as Record<string, UnifiedCandle[]>
-        if (data) {
-          candleCache.storeBulk(data, tf)
-        }
-        bulkLoadedRef.current = true
-        bulkLoadingRef.current = false
-      })
-      .catch(() => {
-        bulkLoadingRef.current = false
-      })
-  }, [topSymbols, tf])
-
-  // Reset bulk flag when top symbols change significantly
-  useEffect(() => {
-    bulkLoadedRef.current = false
-    bulkLoadingRef.current = false
-  }, [topSymbols.join(',')])
+    staggeredRef.current = true
+    setVisibleCount(0)
+    const timers: ReturnType<typeof setTimeout>[] = []
+    for (let i = 0; i < topSymbols.length; i++) {
+      timers.push(setTimeout(() => setVisibleCount(i + 1), i * 80))
+    }
+    return () => timers.forEach(clearTimeout)
+  }, [topSymbols])
 
   if (expandedSymbol) {
     return <ExpandedChart symbol={expandedSymbol} onBack={() => expandChart(null)} />
@@ -870,15 +758,8 @@ export function ChartGrid() {
       <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
         <div className="flex-1 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
           {Array.from({ length: 9 }).map((_, i) => (
-            <div key={i} className="flex flex-col items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] gap-2 chart-loading-overlay">
-              <div className="flex items-center gap-[4px]">
-                <div className="w-[24px] h-[3px] rounded-[1px] bg-[#333] chart-skeleton-bar" />
-                <div className="w-[16px] h-[3px] rounded-[1px] bg-[#2a2a2a] chart-skeleton-bar" style={{ animationDelay: '0.15s' }} />
-                <div className="w-[20px] h-[3px] rounded-[1px] bg-[#333] chart-skeleton-bar" style={{ animationDelay: '0.3s' }} />
-              </div>
-              <span className="text-[10px] text-[#555] tracking-wide" style={{ fontFamily: "'Inter', sans-serif" }}>
-                Загрузка...
-              </span>
+            <div key={i} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
+              Loading...
             </div>
           ))}
         </div>
@@ -886,12 +767,16 @@ export function ChartGrid() {
     )
   }
 
-  // No stagger — all 9 charts mount simultaneously
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
       <div className="flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
-        {topSymbols.slice(0, 9).map(symbol => (
+        {topSymbols.slice(0, visibleCount).map(symbol => (
           <MiniChart key={symbol} symbol={symbol} />
+        ))}
+        {Array.from({ length: Math.max(0, 9 - visibleCount) }).map((_, i) => (
+          <div key={`placeholder-${i}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
+            Loading...
+          </div>
         ))}
       </div>
     </div>

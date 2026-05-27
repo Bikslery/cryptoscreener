@@ -5,7 +5,6 @@ import { BinanceFuturesAdapter } from '../exchanges/binance-futures.js'
 // import { OkxSpotAdapter } from '../exchanges/okx-spot.js'
 import type { ExchangeAdapter } from '../exchanges/types.js'
 import { broadcast } from '../../ws/hub.js'
-import { updateCachedCandle } from '../candles/candle-cache.js'
 
 export const adapters: ExchangeAdapter[] = [
   new BinanceSpotAdapter(),
@@ -63,7 +62,6 @@ export function startAggregator() {
     })
 
     adapter.onCandle((candle) => {
-      updateCachedCandle(candle)
       broadcast({ type: 'candle', channel: `candle:${candle.symbol}:${candle.timeframe}`, data: candle })
     })
 

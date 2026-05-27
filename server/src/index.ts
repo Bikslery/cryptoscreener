@@ -7,7 +7,6 @@ import { startAggregator, adapters } from './services/aggregator/index.js'
 import { startAlertEngine } from './services/alerts/index.js'
 import { startTelegramPolling } from './services/telegram/bot.js'
 import { createCandleManager } from './services/candles/manager.js'
-import { startPreload } from './services/candles/preload.js'
 import authRoutes from './routes/auth.js'
 import coinRoutes from './routes/coins.js'
 import watchlistRoutes from './routes/watchlists.js'
@@ -40,7 +39,6 @@ async function main() {
   startAggregator()
   const candleManager = createCandleManager(adapters)
   setCandleManager(candleManager)
-  startPreload(adapters, candleManager)
   startAlertEngine()
   startTelegramPolling()
 

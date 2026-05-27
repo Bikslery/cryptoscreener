@@ -1,9 +1,6 @@
 import { WebSocket, WebSocketServer } from 'ws'
 import { verifyToken, type JwtPayload } from '../middleware/auth.js'
 import type { WsMessage } from '../types.js'
-import { getTopCachedSymbols, getCachedCandles } from '../services/candles/candle-cache.js'
-import { getTickers } from '../services/aggregator/index.js'
-import { PRELOAD_TFS } from '../services/candles/preload.js'
 
 interface Client {
   ws: WebSocket
@@ -36,61 +33,6 @@ function parseDepthChannel(channel: string): string | null {
   return match[1]
 }
 
-// Broadcast batching
-const wsBatchBuffer = new Map<string, unknown>()
-
-let batchTimer: ReturnType<typeof setInterval> | null = null
-
-function flushBatchBuffer(): void {
-  if (wsBatchBuffer.size === 0) return
-  const entries = Array.from(wsBatchBuffer.entries())
-  wsBatchBuffer.clear()
-  for (const [channel, data] of entries) {
-    const msg = { type: channel, channel, data } as WsMessage
-    const raw = JSON.stringify(msg)
-    for (const [, client] of clients) {
-      if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
-        client.ws.send(raw)
-      }
-    }
-  }
-}
-
-function startBatchTimer(): void {
-  if (batchTimer) return
-  batchTimer = setInterval(flushBatchBuffer, 100)
-}
-
-startBatchTimer()
-
-function buildInitialCandlesData(): Record<string, any[]> {
-  // Determine top-9 symbols: prefer cache-based, fall back to ticker-based
-  let topSymbols: string[] = []
-  const cached5m = getTopCachedSymbols('5m', 9)
-  if (cached5m.length >= 9) {
-    topSymbols = cached5m
-  } else {
-    // Fallback: sort tickers by quoteVolume24h
-    const tickers = getTickers()
-    topSymbols = tickers
-      .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
-      .slice(0, 9)
-      .map(t => t.symbol)
-  }
-
-  const data: Record<string, any[]> = {}
-  for (const symbol of topSymbols) {
-    for (const tf of PRELOAD_TFS) {
-      const candles = getCachedCandles(symbol, tf)
-      if (candles && candles.length > 0) {
-        const key = `${symbol}:${tf}`
-        data[key] = candles.slice(candles.length - 300)
-      }
-    }
-  }
-  return data
-}
-
 export function setupWsHub(wss: WebSocketServer) {
   wss.on('connection', (ws, req) => {
     let user: JwtPayload | null = null
@@ -103,17 +45,6 @@ export function setupWsHub(wss: WebSocketServer) {
 
     const client: Client = { ws, user, subscriptions: new Set() }
     clients.set(ws, client)
-
-    // Send initial-candles push immediately after connect
-    try {
-      const initialData = buildInitialCandlesData()
-      if (Object.keys(initialData).length > 0) {
-        const initMsg = { type: 'initial-candles', data: initialData }
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(initMsg))
-        }
-      }
-    } catch {}
 
     ws.on('message', (raw) => {
       try {
@@ -162,7 +93,6 @@ export function setupWsHub(wss: WebSocketServer) {
 }
 
 export function broadcast(msg: WsMessage) {
-  // Immediate broadcast for urgent messages (ticker, alert, listing)
   const raw = JSON.stringify(msg)
   const channel = msg.channel || msg.type
   for (const [, client] of clients) {
@@ -175,6 +105,11 @@ export function broadcast(msg: WsMessage) {
 }
 
 export function broadcastToChannel(channel: string, data: unknown) {
-  // Buffer for batched send (100ms flush)
-  wsBatchBuffer.set(channel, data)
+  const msg: WsMessage = { type: channel as any, channel, data }
+  const raw = JSON.stringify(msg)
+  for (const [, client] of clients) {
+    if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(raw)
+    }
+  }
 }
