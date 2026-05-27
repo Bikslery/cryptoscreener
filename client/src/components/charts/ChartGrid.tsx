@@ -1,13 +1,14 @@
-import { useEffect, useRef, memo, useState } from 'react'
+import { useEffect, useRef, memo, useState, useCallback } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore, useLivePrice } from '../../store'
 import { useShallow } from 'zustand/shallow'
-import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
+import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, wsOnType as wsOnMsgType } from '../../services/ws'
 import api from '../../services/api'
 import type { Timeframe, UnifiedCandle } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
+import * as candleCache from '../../services/candle-cache'
 
 const UP_COLOR = '#26a65b'
 const DOWN_COLOR = '#e74c3c'
@@ -27,7 +28,33 @@ function exchangeBadge(ex: string): string {
   return 'EX'
 }
 
-function useCandles(symbol: string, tf: Timeframe, candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>, volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>, chartRef: React.RefObject<IChartApi | null>, destroyedRef: React.RefObject<boolean>, limit = 300, candlesDataRef?: React.RefObject<UnifiedCandle[]>) {
+// Receive WS initial-candles push ONCE and store in client cache
+let initialPushReceived = false
+
+function useInitialCandlesPush() {
+  useEffect(() => {
+    if (initialPushReceived) return
+    const unsub = wsOnMsgType('initial-candles', (msg) => {
+      if (initialPushReceived) return
+      initialPushReceived = true
+      const data = msg.data as Record<string, UnifiedCandle[]> | undefined
+      if (!data) return
+      candleCache.storeBulk(data)
+    })
+    return unsub
+  }, [])
+}
+
+function useCandles(
+  symbol: string,
+  tf: Timeframe,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  chartRef: React.RefObject<IChartApi | null>,
+  destroyedRef: React.RefObject<boolean>,
+  limit = 300,
+  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
+) {
   useEffect(() => {
     if (!candleRef.current || !volumeRef.current || destroyedRef.current) return
 
@@ -35,11 +62,37 @@ function useCandles(symbol: string, tf: Timeframe, candleRef: React.RefObject<IS
     volumeRef.current.setData([])
     if (candlesDataRef) candlesDataRef.current = []
 
+    // Cache-first: if client cache has candles, render instantly
+    const cached = candleCache.getCandles(symbol, tf)
+    if (cached && cached.length > 0) {
+      if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
+      if (candlesDataRef) candlesDataRef.current = cached
+      const slice = cached.slice(-limit)
+      const candleData = slice.map(c => ({
+        time: c.time as Time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }))
+      const volumeData = slice.map(c => ({
+        time: c.time as Time,
+        value: c.volume,
+        color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
+      }))
+      candleRef.current.setData(candleData)
+      volumeRef.current.setData(volumeData)
+      chartRef.current?.timeScale().fitContent()
+      return  // Data loaded from cache — no REST request needed
+    }
+
+    // No cache — fetch from server (which also uses its cache)
     api.get(`/coins/${symbol}/candles`, { params: { tf, limit } })
       .then(res => {
         if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
         const candles = res.data as UnifiedCandle[]
         if (candlesDataRef) candlesDataRef.current = candles
+        candleCache.setCandles(symbol, tf, candles)
         const candleData = candles.map(c => ({
           time: c.time as Time,
           open: c.open,
@@ -124,6 +177,8 @@ function useWsCandle(
       if (destroyedRef.current) return
       const c = msg.data as UnifiedCandle
       if (!c) return
+      // Update client cache
+      candleCache.updateCandle(symbol, tf, c)
       if (candlesDataRef && candlesDataRef.current) {
         const arr = candlesDataRef.current
         const last = arr[arr.length - 1]
@@ -259,7 +314,8 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
   )
 })
 
-const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
+// Animation: chart appears with a fade + subtle scale
+const MiniChart = memo(function MiniChart({ symbol, animate }: { symbol: string; animate: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -267,6 +323,16 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
+  const [loaded, setLoaded] = useState(false)
+
+  // Mark loaded once candles are rendered (via useCandles cache hit or REST response)
+  // We detect this by checking if data was set on the series
+  useEffect(() => {
+    if (!animate) { setLoaded(true); return }
+    // Small delay to let the chart render its data, then trigger animation
+    const t = setTimeout(() => setLoaded(true), 30)
+    return () => clearTimeout(t)
+  }, [symbol, tf, animate])
 
   useEffect(() => {
     destroyedRef.current = false
@@ -342,7 +408,15 @@ const MiniChart = memo(function MiniChart({ symbol }: { symbol: string }) {
   useWsTrade(symbol, tf, flush, destroyedRef)
 
   return (
-    <div className="relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px]">
+    <div
+      className={`relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px] transition-all duration-500 ease-out ${
+        animate
+          ? loaded
+            ? 'opacity-100 scale-100'
+            : 'opacity-0 scale-95'
+          : 'opacity-100 scale-100'
+      }`}
+    >
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
         <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'Inter', sans-serif" }}>
           {extractBaseAsset(symbol)}
@@ -732,21 +806,15 @@ export function ChartGrid() {
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const expandChart = useCoinListStore(s => s.expandChart)
   const [visibleCount, setVisibleCount] = useState(0)
-  const staggeredRef = useRef(false)
+  const mountedRef = useRef(false)
 
+  // Listen for WS initial-candles push
+  useInitialCandlesPush()
+
+  // All 9 charts mount simultaneously — no stagger
   useEffect(() => {
     if (topSymbols.length === 0) return
-    if (staggeredRef.current) {
-      setVisibleCount(topSymbols.length)
-      return
-    }
-    staggeredRef.current = true
-    setVisibleCount(0)
-    const timers: ReturnType<typeof setTimeout>[] = []
-    for (let i = 0; i < topSymbols.length; i++) {
-      timers.push(setTimeout(() => setVisibleCount(i + 1), i * 80))
-    }
-    return () => timers.forEach(clearTimeout)
+    setVisibleCount(topSymbols.length)
   }, [topSymbols])
 
   if (expandedSymbol) {
@@ -770,8 +838,8 @@ export function ChartGrid() {
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
       <div className="flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
-        {topSymbols.slice(0, visibleCount).map(symbol => (
-          <MiniChart key={symbol} symbol={symbol} />
+        {topSymbols.slice(0, visibleCount).map((symbol, i) => (
+          <MiniChart key={symbol} symbol={symbol} animate={true} />
         ))}
         {Array.from({ length: Math.max(0, 9 - visibleCount) }).map((_, i) => (
           <div key={`placeholder-${i}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f] text-[#333] text-[11px]">
