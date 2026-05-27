@@ -112,7 +112,7 @@ export type Timeframe = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '2h' | '4h' 
 export type FilterExchange = 'all' | 'binance' | 'bybit' | 'okx'
 
 export interface WsMessage {
-  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'alert' | 'listing'
+  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'alert' | 'listing' | 'initial-candles'
   channel?: string
   data?: unknown
 }

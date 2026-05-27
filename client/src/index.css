@@ -67,3 +67,26 @@ html, body, #root {
 .font-mono { font-family: 'JetBrains Mono', ui-monospace, Consolas, 'Courier New', monospace; }
 
 a[href*="tradingview.com"] { display: none !important; }
+
+@keyframes chart-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.7; }
+}
+@keyframes chart-bar-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+.chart-loading-overlay {
+  animation: chart-pulse 1.8s ease-in-out infinite;
+}
+.chart-skeleton-bar {
+  position: relative;
+  overflow: hidden;
+}
+.chart-skeleton-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.04) 50%, transparent 100%);
+  animation: chart-bar-sweep 1.5s ease-in-out infinite;
+}
