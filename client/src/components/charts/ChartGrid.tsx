@@ -126,31 +126,32 @@ function useFullHistory(
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
 ) {
-  const backfillDoneRef = useRef(false)
-
   useEffect(() => {
-    backfillDoneRef.current = false
     const cancelled = { value: false }
-
-    const candles = candlesDataRef.current
-    if (!candles || candles.length === 0) return
-
-    const tfMs = (TF_SECONDS[tf] || 60) * 1000
-    const oldestTimeMs = candles[0].time * 1000
-    const batchSpanMs = BATCH_SIZE * tfMs
-
-    const batches: { startMs: number; endMs: number }[] = []
-    for (let endMs = oldestTimeMs; endMs > LISTING_EPOCH_MS; endMs -= batchSpanMs) {
-      const startMs = endMs - batchSpanMs
-      batches.push({ startMs: Math.max(startMs, LISTING_EPOCH_MS), endMs })
-    }
-    if (batches.length === 0) return
-
-    let processedBatches = 0
-
     const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
     const run = async () => {
+      let candles: UnifiedCandle[] | undefined
+      for (let i = 0; i < 50; i++) {
+        if (cancelled.value || destroyedRef.current) return
+        candles = candlesDataRef.current
+        if (candles && candles.length > 0) break
+        await delay(100)
+      }
+      if (!candles || candles.length === 0) return
+      if (cancelled.value || destroyedRef.current) return
+
+      const tfMs = (TF_SECONDS[tf] || 60) * 1000
+      const oldestTimeMs = candles[0].time * 1000
+      const batchSpanMs = BATCH_SIZE * tfMs
+
+      const batches: { startMs: number; endMs: number }[] = []
+      for (let endMs = oldestTimeMs; endMs > LISTING_EPOCH_MS; endMs -= batchSpanMs) {
+        const startMs = endMs - batchSpanMs
+        batches.push({ startMs: Math.max(startMs, LISTING_EPOCH_MS), endMs })
+      }
+      if (batches.length === 0) return
+
       for (let i = 0; i < batches.length; i += BACKFILL_CONCURRENCY) {
         if (cancelled.value || destroyedRef.current) return
         const chunk = batches.slice(i, i + BACKFILL_CONCURRENCY)
@@ -173,7 +174,6 @@ function useFullHistory(
         for (const batchCandles of results) {
           if (batchCandles.length === 0) { anyEmpty = true; continue }
           candleCache.prependCandles(symbol, tf, batchCandles)
-          processedBatches++
         }
 
         if (!destroyedRef.current && candleRef.current && volumeRef.current) {
@@ -199,10 +199,9 @@ function useFullHistory(
           await delay(BACKFILL_DELAY_MS)
         }
       }
-      backfillDoneRef.current = true
     }
 
-    const timer = setTimeout(run, 200)
+    const timer = setTimeout(run, 100)
 
     return () => {
       cancelled.value = true
