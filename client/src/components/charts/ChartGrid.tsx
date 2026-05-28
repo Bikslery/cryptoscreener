@@ -123,6 +123,7 @@ function useFullHistory(
   tf: Timeframe,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
 ) {
@@ -130,16 +131,43 @@ function useFullHistory(
     const cancelled = { value: false }
     const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
+    const renderCandles = (candles: UnifiedCandle[], fitContent: boolean) => {
+      if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
+      candlesDataRef.current = candles
+      const candleData = candles.map(c => ({
+        time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+      }))
+      const volumeData = candles.map(c => ({
+        time: c.time as Time, value: c.volume,
+        color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
+      }))
+      try {
+        candleRef.current.setData(candleData)
+        volumeRef.current.setData(volumeData)
+        if (fitContent) chartRef.current?.timeScale().fitContent()
+      } catch {}
+    }
+
     const run = async () => {
-      let candles: UnifiedCandle[] | undefined
-      for (let i = 0; i < 50; i++) {
-        if (cancelled.value || destroyedRef.current) return
-        candles = candlesDataRef.current
-        if (candles && candles.length > 0) break
-        await delay(100)
+      candleRef.current?.setData([])
+      volumeRef.current?.setData([])
+      candlesDataRef.current = []
+
+      let candles: UnifiedCandle[] | undefined = candleCache.getCandles(symbol, tf)
+      if (!candles || candles.length === 0) {
+        try {
+          const res = await api.get(`/coins/${symbol}/candles`, { params: { tf, limit: 1500 } })
+          if (cancelled.value || destroyedRef.current) return
+          candles = res.data as UnifiedCandle[]
+          if (candles.length > 0) candleCache.setCandles(symbol, tf, candles)
+        } catch {
+          return
+        }
       }
       if (!candles || candles.length === 0) return
       if (cancelled.value || destroyedRef.current) return
+
+      renderCandles(candles, true)
 
       const tfMs = (TF_SECONDS[tf] || 60) * 1000
       const oldestTimeMs = candles[0].time * 1000
@@ -176,22 +204,9 @@ function useFullHistory(
           candleCache.prependCandles(symbol, tf, batchCandles)
         }
 
-        if (!destroyedRef.current && candleRef.current && volumeRef.current) {
-          const cached = candleCache.getCandles(symbol, tf)
-          if (cached && cached.length > 0) {
-            candlesDataRef.current = cached
-            const candleData = cached.map(c => ({
-              time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
-            }))
-            const volumeData = cached.map(c => ({
-              time: c.time as Time, value: c.volume,
-              color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
-            }))
-            try {
-              candleRef.current.setData(candleData)
-              volumeRef.current.setData(volumeData)
-            } catch {}
-          }
+        const cached = candleCache.getCandles(symbol, tf)
+        if (cached && cached.length > 0) {
+          renderCandles(cached, false)
         }
 
         if (anyEmpty) return
@@ -201,11 +216,10 @@ function useFullHistory(
       }
     }
 
-    const timer = setTimeout(run, 100)
+    run()
 
     return () => {
       cancelled.value = true
-      clearTimeout(timer)
     }
   }, [symbol, tf])
 }
@@ -700,8 +714,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [symbol, tf, pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-  useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 500, candlesDataRef)
-  useFullHistory(symbol, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
+  useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef)
   useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
   useWsTrade(symbol, tf, flush, destroyedRef)
 
