@@ -65,7 +65,7 @@ export interface Alert {
   createdAt: number
 }
 
-export type DrawingType = 'level' | 'measure'
+export type DrawingType = 'level' | 'measure' | 'h-ray' | 't-ray' | 'segment'
 
 export interface LevelDrawing {
   price: number
@@ -80,13 +80,32 @@ export interface MeasureDrawing {
   toTime: number
 }
 
+export interface HRayDrawing {
+  price: number
+  time: number
+}
+
+export interface TRayDrawing {
+  fromPrice: number
+  fromTime: number
+  toPrice: number
+  toTime: number
+}
+
+export interface SegmentDrawing {
+  fromPrice: number
+  fromTime: number
+  toPrice: number
+  toTime: number
+}
+
 export interface Drawing {
   id: string
   userId: string
   symbol: string
   timeframe: string
   type: DrawingType
-  data: LevelDrawing | MeasureDrawing
+  data: LevelDrawing | MeasureDrawing | HRayDrawing | TRayDrawing | SegmentDrawing
 }
 
 export interface Watchlist {

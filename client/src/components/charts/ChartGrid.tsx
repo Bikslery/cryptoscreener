@@ -9,6 +9,8 @@ import type { Timeframe, UnifiedCandle } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
+import { useDrawings, type DrawingTool } from './useDrawings'
+import DrawingToolsPanel from './DrawingToolsPanel'
 
 const UP_COLOR = '#26a65b'
 const DOWN_COLOR = '#e74c3c'
@@ -564,7 +566,7 @@ function formatDuration(sec: number): string {
 }
 
 // Header is split so live price ticks don't re-render the chart canvas.
-const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack }: { symbol: string; onBack: () => void }) {
+const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, activeTool }: { symbol: string; onBack: () => void; activeTool: DrawingTool | null }) {
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
     if (!c) return null
@@ -627,8 +629,15 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack }
         <span>Vol: <span className="font-mono text-[#b3b3b3]">${volDisplay}</span></span>
       </div>
 
-      <div className="ml-auto text-[10px] text-[#666] font-mono">
-        Shift + ЛКМ / Колёсико — измерить %
+      <div className="ml-auto flex items-center gap-2">
+        {activeTool !== null && (
+          <span className="text-[10px] text-[#ccc] font-mono bg-[#333] px-[6px] py-[2px] rounded-[3px] border border-[#444]">
+            {activeTool === 'h-ray' ? 'Гориз. луч' : activeTool === 't-ray' ? 'Тренд. луч' : 'Отрезок'} — клик на графике | Esc — отмена
+          </span>
+        )}
+        <span className="text-[10px] text-[#666] font-mono">
+          Shift + ЛКМ / Колёсико — измерить %
+        </span>
       </div>
     </div>
   )
@@ -644,6 +653,23 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const [selection, setSelection] = useState<RangeSelection | null>(null)
+  const [chartVersion, setChartVersion] = useState(0)
+
+  const {
+    drawings,
+    activeTool,
+    setActiveTool,
+    clearAllDrawings,
+    hasDrawings,
+    deactivateTool,
+    handleClick: drawingClickHandler,
+    handleMouseMove: drawingMouseMoveHandler,
+    pendingPoint,
+    pendingPointPixel,
+    previewLine,
+    renderedDrawings,
+    CLICK_THRESHOLD,
+  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, chartVersion)
 
   useEffect(() => {
     destroyedRef.current = false
@@ -680,6 +706,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     chartRef.current = chart
     candleRef.current = candleSeries
     volumeRef.current = volumeSeries
+    setChartVersion(v => v + 1)
 
     const ro = new ResizeObserver(() => {
       if (containerRef.current && !destroyedRef.current) {
@@ -729,7 +756,10 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     let dragging = false
     let startX = 0
     let startY = 0
+    let mouseDownX = 0
+    let mouseDownY = 0
     let restoreOpts: { handleScroll?: boolean; handleScale?: boolean } | null = null
+    let restoreDrawingOpts: { handleScroll?: boolean; handleScale?: boolean } | null = null
 
     const computeSelection = (curX: number, curY: number): RangeSelection => {
       const chart = chartRef.current
@@ -775,28 +805,46 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     }
 
     const onMouseDown = (e: MouseEvent) => {
-      if (!(e.button === 0 && e.shiftKey) && e.button !== 1) return
       const rect = container.getBoundingClientRect()
-      startX = e.clientX - rect.left
-      startY = e.clientY - rect.top
-      dragging = true
-      e.preventDefault()
-      e.stopPropagation()
-      const chart = chartRef.current
-      if (chart) {
-        restoreOpts = { handleScroll: true, handleScale: true }
-        chart.applyOptions({ handleScroll: false, handleScale: false })
+      mouseDownX = e.clientX - rect.left
+      mouseDownY = e.clientY - rect.top
+
+      if ((e.button === 0 && e.shiftKey) || e.button === 1) {
+        startX = mouseDownX
+        startY = mouseDownY
+        dragging = true
+        e.preventDefault()
+        e.stopPropagation()
+        const chart = chartRef.current
+        if (chart) {
+          restoreOpts = { handleScroll: true, handleScale: true }
+          chart.applyOptions({ handleScroll: false, handleScale: false })
+        }
+        setSelection(computeSelection(startX, startY))
+        return
       }
-      setSelection(computeSelection(startX, startY))
+
+      if (e.button === 0 && activeTool !== null && !e.shiftKey) {
+        const chart = chartRef.current
+        if (chart) {
+          restoreDrawingOpts = { handleScroll: true, handleScale: true }
+          chart.applyOptions({ handleScroll: false, handleScale: false })
+        }
+      }
     }
 
     let mmRaf: number | null = null
     let mmX = 0, mmY = 0
     const onMouseMove = (e: MouseEvent) => {
-      if (!dragging) return
       const rect = container.getBoundingClientRect()
-      mmX = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
-      mmY = Math.max(0, Math.min(e.clientY - rect.top, rect.height))
+      const curX = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
+      const curY = Math.max(0, Math.min(e.clientY - rect.top, rect.height))
+
+      drawingMouseMoveHandler(e)
+
+      if (!dragging) return
+      mmX = curX
+      mmY = curY
       if (mmRaf != null) return
       mmRaf = requestAnimationFrame(() => {
         mmRaf = null
@@ -805,33 +853,62 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       })
     }
 
-    const finishDrag = () => {
-      if (!dragging) return
-      dragging = false
-      if (mmRaf != null) { cancelAnimationFrame(mmRaf); mmRaf = null }
+    const restoreDrawingScroll = () => {
       const chart = chartRef.current
-      if (chart && restoreOpts) {
-        chart.applyOptions(restoreOpts)
+      if (chart && restoreDrawingOpts) {
+        chart.applyOptions(restoreDrawingOpts)
+        restoreDrawingOpts = null
       }
-      restoreOpts = null
     }
 
-    const onMouseUp = () => {
-      finishDrag()
-      setSelection(null)
+    const onMouseUp = (e: MouseEvent) => {
+      if (dragging) {
+        dragging = false
+        if (mmRaf != null) { cancelAnimationFrame(mmRaf); mmRaf = null }
+        const chart = chartRef.current
+        if (chart && restoreOpts) {
+          chart.applyOptions(restoreOpts)
+        }
+        restoreOpts = null
+        setSelection(null)
+        restoreDrawingScroll()
+        return
+      }
+
+      if (e.button === 0 && activeTool !== null) {
+        restoreDrawingScroll()
+        const rect = container.getBoundingClientRect()
+        const upX = e.clientX - rect.left
+        const upY = e.clientY - rect.top
+        const dx = Math.abs(upX - mouseDownX)
+        const dy = Math.abs(upY - mouseDownY)
+        if (dx < CLICK_THRESHOLD && dy < CLICK_THRESHOLD) {
+          drawingClickHandler(e)
+        }
+      }
     }
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setSelection(null)
-        finishDrag()
+        dragging = false
+        if (mmRaf != null) { cancelAnimationFrame(mmRaf); mmRaf = null }
+        const chart = chartRef.current
+        if (chart && restoreOpts) {
+          chart.applyOptions(restoreOpts)
+        }
+        restoreOpts = null
+        restoreDrawingScroll()
+        deactivateTool()
       }
     }
 
     const onAuxclick = (e: MouseEvent) => { if (e.button === 1) e.preventDefault() }
+    const onContextMenu = (e: MouseEvent) => e.preventDefault()
 
     container.addEventListener('mousedown', onMouseDown, true)
     container.addEventListener('auxclick', onAuxclick)
+    container.addEventListener('contextmenu', onContextMenu)
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
     window.addEventListener('keydown', onKeyDown)
@@ -839,19 +916,77 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     return () => {
       container.removeEventListener('mousedown', onMouseDown, true)
       container.removeEventListener('auxclick', onAuxclick)
+      container.removeEventListener('contextmenu', onContextMenu)
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
       window.removeEventListener('keydown', onKeyDown)
-      finishDrag()
+      dragging = false
+      if (mmRaf != null) cancelAnimationFrame(mmRaf)
     }
-  }, [symbol, tf])
+  }, [symbol, tf, activeTool, drawingClickHandler, drawingMouseMoveHandler, deactivateTool])
 
   const precision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
+  const [svgSize, setSvgSize] = useState({ w: 0, h: 0 })
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const ro = new ResizeObserver(() => {
+      setSvgSize({ w: container.clientWidth, h: container.clientHeight })
+    })
+    ro.observe(container)
+    setSvgSize({ w: container.clientWidth, h: container.clientHeight })
+    return () => ro.disconnect()
+  }, [symbol, tf])
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
-      <ExpandedChartHeader symbol={symbol} onBack={onBack} />
+      <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} />
       <div ref={containerRef} className="relative flex-1 min-h-0">
+        {/* SVG overlay for drawings */}
+        <svg
+          className="pointer-events-none absolute inset-0 z-20"
+          width={svgSize.w}
+          height={svgSize.h}
+          style={{ overflow: 'visible' }}
+        >
+          {renderedDrawings.map(rd => (
+            <g key={rd.id}>{rd.elements}</g>
+          ))}
+          {pendingPointPixel && previewLine && (
+            <line
+              x1={previewLine.x1}
+              y1={previewLine.y1}
+              x2={previewLine.x2}
+              y2={previewLine.y2}
+              stroke="#fff"
+              strokeWidth={1}
+              strokeDasharray="4 3"
+              strokeOpacity={0.5}
+            />
+          )}
+          {pendingPointPixel && (
+            <circle
+              cx={pendingPointPixel.x}
+              cy={pendingPointPixel.y}
+              r={3}
+              fill="#fff"
+              stroke="#0e0e0e"
+              strokeWidth={1}
+            />
+          )}
+        </svg>
+
+        {/* Drawing tools panel */}
+        <DrawingToolsPanel
+          activeTool={activeTool}
+          setActiveTool={setActiveTool}
+          clearAllDrawings={clearAllDrawings}
+          hasDrawings={hasDrawings}
+          pendingPoint={pendingPoint}
+        />
+
+        {/* Measure tool overlay */}
         {selection && Math.abs(selection.endX - selection.startX) > 2 && (
           <div className="pointer-events-none absolute inset-0 z-30">
             <div
