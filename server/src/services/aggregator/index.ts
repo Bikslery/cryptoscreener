@@ -128,15 +128,15 @@ export function getTicker(symbol: string): UnifiedTicker | undefined {
   return best.get(symbol)
 }
 
-export async function fetchCandles(symbol: string, tf: string, limit: number, exchange?: Exchange): Promise<UnifiedCandle[]> {
+export async function fetchCandles(symbol: string, tf: string, limit: number, exchange?: Exchange, startTime?: number, endTime?: number): Promise<UnifiedCandle[]> {
   const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
   const adapter = adapters.find(a => a.exchange === targetExchange)
   if (!adapter) return []
   try {
-    return await adapter.fetchCandles(symbol, tf, limit)
+    return await adapter.fetchCandles(symbol, tf, limit, startTime, endTime)
   } catch {
     const fallback = adapters.find(a => a.exchange !== targetExchange)
-    if (fallback) return await fallback.fetchCandles(symbol, tf, limit)
+    if (fallback) return await fallback.fetchCandles(symbol, tf, limit, startTime, endTime)
     return []
   }
 }

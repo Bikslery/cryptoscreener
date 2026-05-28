@@ -62,6 +62,14 @@ router.get('/:symbol/candles', async (req, res) => {
   const tf = (req.query.tf as string) || '1m'
   const limit = parseInt(req.query.limit as string) || 500
   const exchange = req.query.exchange as string | undefined
+  const startTime = req.query.startTime ? parseInt(req.query.startTime as string) : undefined
+  const endTime = req.query.endTime ? parseInt(req.query.endTime as string) : undefined
+
+  if (startTime !== undefined || endTime !== undefined) {
+    const candles = await fetchCandles(symbol, tf, limit, exchange as any, startTime, endTime)
+    res.json(candles)
+    return
+  }
 
   // Cache-first
   const cached = getCachedCandles(symbol, tf)

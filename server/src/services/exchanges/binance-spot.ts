@@ -224,9 +224,12 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     }
   }
 
-  async fetchCandles(symbol: string, tf: string, limit: number): Promise<UnifiedCandle[]> {
+  async fetchCandles(symbol: string, tf: string, limit: number, startTime?: number, endTime?: number): Promise<UnifiedCandle[]> {
     const interval = TF_MAP[tf] || '1m'
-    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
+    const params = new URLSearchParams({ symbol, interval, limit: String(limit) })
+    if (startTime !== undefined) params.set('startTime', String(startTime))
+    if (endTime !== undefined) params.set('endTime', String(endTime))
+    const url = `https://api.binance.com/api/v3/klines?${params.toString()}`
     const res = await fetch(url)
     const data = await res.json()
     return data.map((k: any[]) => ({

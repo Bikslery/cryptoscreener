@@ -19,6 +19,11 @@ const TF_SECONDS: Record<string, number> = {
 }
 function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
 
+const BATCH_SIZE = 1000
+const BACKFILL_CONCURRENCY = 5
+const BACKFILL_DELAY_MS = 50
+const LISTING_EPOCH_MS = 1262304000000 // 2010-01-01 — safe floor for any crypto
+
 function exchangeBadge(ex: string): string {
   if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
   if (ex.includes('binance') && ex.includes('spot')) return 'BI-S'
@@ -110,6 +115,99 @@ function useCandles(
         chartRef.current?.timeScale().fitContent()
       })
       .catch(() => {})
+  }, [symbol, tf])
+}
+
+function useFullHistory(
+  symbol: string,
+  tf: Timeframe,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  destroyedRef: React.RefObject<boolean>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+) {
+  const backfillDoneRef = useRef(false)
+
+  useEffect(() => {
+    backfillDoneRef.current = false
+    const cancelled = { value: false }
+
+    const candles = candlesDataRef.current
+    if (!candles || candles.length === 0) return
+
+    const tfMs = (TF_SECONDS[tf] || 60) * 1000
+    const oldestTimeMs = candles[0].time * 1000
+    const batchSpanMs = BATCH_SIZE * tfMs
+
+    const batches: { startMs: number; endMs: number }[] = []
+    for (let endMs = oldestTimeMs; endMs > LISTING_EPOCH_MS; endMs -= batchSpanMs) {
+      const startMs = endMs - batchSpanMs
+      batches.push({ startMs: Math.max(startMs, LISTING_EPOCH_MS), endMs })
+    }
+    if (batches.length === 0) return
+
+    let processedBatches = 0
+
+    const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+
+    const run = async () => {
+      for (let i = 0; i < batches.length; i += BACKFILL_CONCURRENCY) {
+        if (cancelled.value || destroyedRef.current) return
+        const chunk = batches.slice(i, i + BACKFILL_CONCURRENCY)
+        const results = await Promise.all(
+          chunk.map(async (b) => {
+            try {
+              const res = await api.get(`/coins/${symbol}/candles`, {
+                params: { tf, limit: BATCH_SIZE, startTime: b.startMs, endTime: b.endMs },
+              })
+              return res.data as UnifiedCandle[]
+            } catch {
+              return []
+            }
+          })
+        )
+
+        if (cancelled.value || destroyedRef.current) return
+
+        let anyEmpty = false
+        for (const batchCandles of results) {
+          if (batchCandles.length === 0) { anyEmpty = true; continue }
+          candleCache.prependCandles(symbol, tf, batchCandles)
+          processedBatches++
+        }
+
+        if (!destroyedRef.current && candleRef.current && volumeRef.current) {
+          const cached = candleCache.getCandles(symbol, tf)
+          if (cached && cached.length > 0) {
+            candlesDataRef.current = cached
+            const candleData = cached.map(c => ({
+              time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+            }))
+            const volumeData = cached.map(c => ({
+              time: c.time as Time, value: c.volume,
+              color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
+            }))
+            try {
+              candleRef.current.setData(candleData)
+              volumeRef.current.setData(volumeData)
+            } catch {}
+          }
+        }
+
+        if (anyEmpty) return
+        if (i + BACKFILL_CONCURRENCY < batches.length) {
+          await delay(BACKFILL_DELAY_MS)
+        }
+      }
+      backfillDoneRef.current = true
+    }
+
+    const timer = setTimeout(run, 200)
+
+    return () => {
+      cancelled.value = true
+      clearTimeout(timer)
+    }
   }, [symbol, tf])
 }
 
@@ -604,6 +702,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
   useCandles(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, 500, candlesDataRef)
+  useFullHistory(symbol, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
   useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
   useWsTrade(symbol, tf, flush, destroyedRef)
 
