@@ -1,84 +1,87 @@
 import type { UnifiedCandle } from '../../types.js'
 
 const MAX_CANDLES_PER_KEY = 2000
-const MAX_TOTAL_CANDLES = 500000
+// Bumped from 500_000 -> 1_500_000. With preload of 50 symbols * 10 timeframes * up to 2000 candles,
+// theoretical max is 1M; we leave headroom so the LRU does not start evicting freshly-preloaded
+// top symbols during the very first minutes after startup (which caused empty initial-candles).
+const MAX_TOTAL_CANDLES = 1_500_000
 
 class LRU {
-  private map = new Map<string, { prev: string | null; next: string | null }>()
-  private head: string | null = null
-  private tail: string | null = null
+private map = new Map<string, { prev: string | null; next: string | null }>()
+private head: string | null = null
+private tail: string | null = null
 
-  touch(key: string) {
-    if (!this.map.has(key)) {
-      this.map.set(key, { prev: null, next: this.head })
-      if (this.head !== null) {
-        const h = this.map.get(this.head)!
-        h.prev = key
-      }
-      this.head = key
-      if (this.tail === null) this.tail = key
-      return
-    }
-    const node = this.map.get(key)!
-    if (this.head === key) return
-    this.detach(key, node)
-    node.prev = null
-    node.next = this.head
+touch(key: string) {
+  if (!this.map.has(key)) {
+    this.map.set(key, { prev: null, next: this.head })
     if (this.head !== null) {
       const h = this.map.get(this.head)!
       h.prev = key
     }
     this.head = key
+    if (this.tail === null) this.tail = key
+    return
   }
-
-  private detach(key: string, node: { prev: string | null; next: string | null }) {
-    if (node.prev !== null) {
-      const p = this.map.get(node.prev)!
-      p.next = node.next
-    } else {
-      this.head = node.next
-    }
-    if (node.next !== null) {
-      const n = this.map.get(node.next)!
-      n.prev = node.prev
-    } else {
-      this.tail = node.prev
-    }
+  const node = this.map.get(key)!
+  if (this.head === key) return
+  this.detach(key, node)
+  node.prev = null
+  node.next = this.head
+  if (this.head !== null) {
+    const h = this.map.get(this.head)!
+    h.prev = key
   }
+  this.head = key
+}
 
-  evictTail(): string | null {
-    if (this.tail === null) return null
-    const key = this.tail
-    const node = this.map.get(key)!
-    this.map.delete(key)
+private detach(key: string, node: { prev: string | null; next: string | null }) {
+  if (node.prev !== null) {
+    const p = this.map.get(node.prev)!
+    p.next = node.next
+  } else {
+    this.head = node.next
+  }
+  if (node.next !== null) {
+    const n = this.map.get(node.next)!
+    n.prev = node.prev
+  } else {
     this.tail = node.prev
-    if (this.tail !== null) {
-      const t = this.map.get(this.tail)!
-      t.next = null
-    } else {
-      this.head = null
-    }
-    return key
   }
+}
 
-  has(key: string): boolean {
-    return this.map.has(key)
+evictTail(): string | null {
+  if (this.tail === null) return null
+  const key = this.tail
+  const node = this.map.get(key)!
+  this.map.delete(key)
+  this.tail = node.prev
+  if (this.tail !== null) {
+    const t = this.map.get(this.tail)!
+    t.next = null
+  } else {
+    this.head = null
   }
+  return key
+}
 
-  get size(): number {
-    return this.map.size
-  }
+has(key: string): boolean {
+  return this.map.has(key)
+}
 
-  keysFromRecent(): string[] {
-    const result: string[] = []
-    let cur = this.head
-    while (cur !== null) {
-      result.push(cur)
-      const node = this.map.get(cur)
-      cur = node ? node.next : null
-    }
-    return result
+get size(): number {
+  return this.map.size
+}
+
+keysFromRecent(): string[] {
+  const result: string[] = []
+  let cur = this.head
+  while (cur !== null) {
+    result.push(cur)
+    const node = this.map.get(cur)
+    cur = node ? node.next : null
   }
+  return result
+}
 }
 
 const cache = new Map<string, UnifiedCandle[]>()
@@ -87,95 +90,95 @@ const restKeys = new Set<string>()
 let totalCandleCount = 0
 
 function evictIfNeeded() {
-  while (totalCandleCount > MAX_TOTAL_CANDLES) {
-    const key = lru.evictTail()
-    if (key === null) break
-    const arr = cache.get(key)
-    if (arr) totalCandleCount -= arr.length
-    cache.delete(key)
-    restKeys.delete(key)
-  }
+while (totalCandleCount > MAX_TOTAL_CANDLES) {
+  const key = lru.evictTail()
+  if (key === null) break
+  const arr = cache.get(key)
+  if (arr) totalCandleCount -= arr.length
+  cache.delete(key)
+  restKeys.delete(key)
+}
 }
 
 function mergeCandles(existing: UnifiedCandle[], incoming: UnifiedCandle[]): UnifiedCandle[] {
-  const map = new Map<number, UnifiedCandle>()
-  for (const c of existing) map.set(c.time, c)
-  for (const c of incoming) map.set(c.time, c)
-  const merged = Array.from(map.values()).sort((a, b) => a.time - b.time)
-  return merged.length > MAX_CANDLES_PER_KEY
-    ? merged.slice(merged.length - MAX_CANDLES_PER_KEY)
-    : merged
+const map = new Map<number, UnifiedCandle>()
+for (const c of existing) map.set(c.time, c)
+for (const c of incoming) map.set(c.time, c)
+const merged = Array.from(map.values()).sort((a, b) => a.time - b.time)
+return merged.length > MAX_CANDLES_PER_KEY
+  ? merged.slice(merged.length - MAX_CANDLES_PER_KEY)
+  : merged
 }
 
 export function getCachedCandles(symbol: string, tf: string): UnifiedCandle[] | undefined {
-  const key = `${symbol}:${tf}`
-  const data = cache.get(key)
-  if (data) lru.touch(key)
-  return data
+const key = `${symbol}:${tf}`
+const data = cache.get(key)
+if (data) lru.touch(key)
+return data
 }
 
 export function setCachedCandles(symbol: string, tf: string, candles: UnifiedCandle[]): void {
-  const key = `${symbol}:${tf}`
-  const existing = cache.get(key)
-  if (existing) totalCandleCount -= existing.length
-  const merged = existing ? mergeCandles(existing, candles) : candles.slice(0, MAX_CANDLES_PER_KEY)
-  cache.set(key, merged)
-  totalCandleCount += merged.length
-  lru.touch(key)
-  evictIfNeeded()
+const key = `${symbol}:${tf}`
+const existing = cache.get(key)
+if (existing) totalCandleCount -= existing.length
+const merged = existing ? mergeCandles(existing, candles) : candles.slice(0, MAX_CANDLES_PER_KEY)
+cache.set(key, merged)
+totalCandleCount += merged.length
+lru.touch(key)
+evictIfNeeded()
 }
 
 export function setCachedCandlesFromRest(symbol: string, tf: string, candles: UnifiedCandle[]): void {
-  const key = `${symbol}:${tf}`
-  setCachedCandles(symbol, tf, candles)
-  restKeys.add(key)
+const key = `${symbol}:${tf}`
+setCachedCandles(symbol, tf, candles)
+restKeys.add(key)
 }
 
 export function updateCachedCandle(candle: UnifiedCandle): void {
-  const key = `${candle.symbol}:${candle.timeframe}`
-  const arr = cache.get(key)
-  if (!arr) return
+const key = `${candle.symbol}:${candle.timeframe}`
+const arr = cache.get(key)
+if (!arr) return
 
-  const lastIdx = arr.length - 1
-  if (lastIdx >= 0 && arr[lastIdx].time === candle.time) {
-    arr[lastIdx] = candle
-    return
-  }
-  if (lastIdx >= 0 && candle.time > arr[lastIdx].time) {
-    arr.push(candle)
-    totalCandleCount++
-    if (arr.length > MAX_CANDLES_PER_KEY) { arr.shift(); totalCandleCount-- }
-    lru.touch(key)
-    return
-  }
-  const idx = arr.findIndex(c => c.time === candle.time)
-  if (idx !== -1) {
-    arr[idx] = candle
-  }
+const lastIdx = arr.length - 1
+if (lastIdx >= 0 && arr[lastIdx].time === candle.time) {
+  arr[lastIdx] = candle
+  return
+}
+if (lastIdx >= 0 && candle.time > arr[lastIdx].time) {
+  arr.push(candle)
+  totalCandleCount++
+  if (arr.length > MAX_CANDLES_PER_KEY) { arr.shift(); totalCandleCount-- }
+  lru.touch(key)
+  return
+}
+const idx = arr.findIndex(c => c.time === candle.time)
+if (idx !== -1) {
+  arr[idx] = candle
+}
 }
 
 export function isRestCached(symbol: string, tf: string): boolean {
-  return restKeys.has(`${symbol}:${tf}`)
+return restKeys.has(`${symbol}:${tf}`)
 }
 
 export function clearCache(): void {
-  cache.clear()
-  totalCandleCount = 0
-  restKeys.clear()
+cache.clear()
+totalCandleCount = 0
+restKeys.clear()
 }
 
 export function getTopCachedSymbols(tf: string, limit: number): string[] {
-  const symbols: string[] = []
-  const keys = lru.keysFromRecent()
-  for (const key of keys) {
-    if (symbols.length >= limit) break
-    if (key.endsWith(`:${tf}`)) {
-      symbols.push(key.split(':')[0])
-    }
+const symbols: string[] = []
+const keys = lru.keysFromRecent()
+for (const key of keys) {
+  if (symbols.length >= limit) break
+  if (key.endsWith(`:${tf}`)) {
+    symbols.push(key.split(':')[0])
   }
-  return symbols
+}
+return symbols
 }
 
 export function getCacheKeys(): string[] {
-  return Array.from(cache.keys())
+return Array.from(cache.keys())
 }
