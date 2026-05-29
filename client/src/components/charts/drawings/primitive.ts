@@ -7,9 +7,13 @@ import type {
   PaneAttachedParameter,
   PrimitiveHoveredItem,
   Time,
-  CanvasRenderingTarget2D,
+  Logical,
 } from 'lightweight-charts'
 import type { Drawing, HRayDrawing, TRayDrawing, SegmentDrawing } from '../../../types'
+
+interface CanvasTarget {
+  useMediaCoordinateSpace(cb: (scope: { context: CanvasRenderingContext2D }) => void): void
+}
 
 interface HRayItem {
   type: 'h-ray'
@@ -49,13 +53,14 @@ function timeToPixel(
   const px = chart.timeScale().timeToCoordinate(time)
   if (px !== null) return px
 
-  if (logical != null && isFinite(logical)) {
-    return chart.timeScale().logicalToCoordinate(logical)
-  }
-
   const visLogical = chart.timeScale().getVisibleLogicalRange()
   const visTime = chart.timeScale().getVisibleRange()
-  if (!visLogical || !visTime) return null
+  if (!visLogical || !visTime) {
+    if (logical != null && isFinite(logical)) {
+      return chart.timeScale().logicalToCoordinate(logical as Logical)
+    }
+    return null
+  }
 
   const lFrom = visLogical.from as number
   const lTo = visLogical.to as number
@@ -69,23 +74,22 @@ function timeToPixel(
   const estLogical = lFrom + (timeNum - tFrom) * (lTo - lFrom) / (tTo - tFrom)
   if (!isFinite(estLogical)) return null
 
-  return chart.timeScale().logicalToCoordinate(estLogical)
+  return chart.timeScale().logicalToCoordinate(estLogical as Logical)
 }
 
 class DrawingsRenderer implements IPrimitivePaneRenderer {
   private _items: DrawItem[] = []
   private _cw = 0
-  private _ch = 0
   private _pricePrecision = 2
 
   setItems(items: DrawItem[], cw: number, ch: number, pricePrecision: number) {
     this._items = items
     this._cw = cw
-    this._ch = ch
+    void ch
     this._pricePrecision = pricePrecision
   }
 
-  draw(target: CanvasRenderingTarget2D) {
+  draw(target: CanvasTarget) {
     if (this._items.length === 0) return
 
     target.useMediaCoordinateSpace(({ context }) => {
@@ -314,7 +318,7 @@ export class DrawingsPrimitive implements IPanePrimitive {
         const dx = x2 - x1
         const dy = y2 - y1
         let endX = this._cw
-        let endY = y2
+        let endY: number = y2
         if (dx !== 0) {
           const t = (this._cw - x2) / dx
           endY = y2 + t * dy

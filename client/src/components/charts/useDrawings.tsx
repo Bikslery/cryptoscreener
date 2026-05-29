@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
+import type { IChartApi, ISeriesApi, Logical, Time } from 'lightweight-charts'
 import type { Drawing, HRayDrawing, TRayDrawing, SegmentDrawing } from '../../types'
 import api from '../../services/api'
 import { useAuthStore, useCoinListStore } from '../../store'
@@ -55,13 +55,14 @@ function timeToPixel(
   const px = chart.timeScale().timeToCoordinate(time)
   if (px !== null) return px
 
-  if (logical != null && isFinite(logical)) {
-    return chart.timeScale().logicalToCoordinate(logical)
-  }
-
   const visLogical = chart.timeScale().getVisibleLogicalRange()
   const visTime = chart.timeScale().getVisibleRange()
-  if (!visLogical || !visTime) return null
+  if (!visLogical || !visTime) {
+    if (logical != null && isFinite(logical)) {
+      return chart.timeScale().logicalToCoordinate(logical as Logical)
+    }
+    return null
+  }
 
   const lFrom = visLogical.from as number
   const lTo = visLogical.to as number
@@ -75,7 +76,7 @@ function timeToPixel(
   const estLogical = lFrom + (timeNum - tFrom) * (lTo - lFrom) / (tTo - tFrom)
   if (!isFinite(estLogical)) return null
 
-  return chart.timeScale().logicalToCoordinate(estLogical)
+  return chart.timeScale().logicalToCoordinate(estLogical as Logical)
 }
 
 export function useDrawings(
