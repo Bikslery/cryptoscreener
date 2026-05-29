@@ -1,12 +1,24 @@
 import { Router } from 'express'
+import rateLimit from 'express-rate-limit'
 import { getTickers, fetchCandles, fetchDepth } from '../services/aggregator/index.js'
 import { getCachedCandles, setCachedCandlesFromRest } from '../services/candles/candle-cache.js'
 
+const apiLimiter = rateLimit({
+  windowMs: 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+})
+
 const router = Router()
+
+router.use(apiLimiter)
 
 router.get('/', (_req, res) => {
   const tickers = getTickers()
   const sorted = tickers.sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+  res.setHeader('Cache-Control', 'public, max-age=2')
   res.json(sorted)
 })
 
@@ -16,6 +28,7 @@ router.get('/top-symbols', (_req, res) => {
     .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
     .slice(0, 9)
     .map(t => t.symbol)
+  res.setHeader('Cache-Control', 'public, max-age=5')
   res.json(top9)
 })
 
@@ -23,6 +36,10 @@ router.post('/candles-bulk', async (req, res) => {
   const { symbols, tf, limit } = req.body as { symbols: string[]; tf: string; limit: number }
   if (!Array.isArray(symbols) || !tf || !limit) {
     res.status(400).json({ error: 'Missing symbols, tf, or limit' })
+    return
+  }
+  if (symbols.length > 50) {
+    res.status(400).json({ error: 'Too many symbols (max 50)' })
     return
   }
   const result: Record<string, any[]> = {}
@@ -71,16 +88,14 @@ router.get('/:symbol/candles', async (req, res) => {
     return
   }
 
-  // Cache-first, but only if cache has enough candles (avoid serving short
-  // metric-buffer slices as full history)
   const cached = getCachedCandles(symbol, tf)
   const minUsable = Math.min(Math.floor(limit * 0.5), 100)
   if (cached && cached.length >= minUsable) {
+    res.setHeader('Cache-Control', 'public, max-age=5')
     res.json(cached.slice(-limit))
     return
   }
 
-  // Cache empty or too small — fetch from adapter
   const candles = await fetchCandles(symbol, tf, limit, exchange as any)
   if (candles.length > 0) {
     setCachedCandlesFromRest(symbol, tf, candles)

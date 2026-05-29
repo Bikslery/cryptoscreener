@@ -2,14 +2,13 @@ import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../..
 import { BinanceSpotAdapter } from '../exchanges/binance-spot.js'
 import { BinanceFuturesAdapter } from '../exchanges/binance-futures.js'
 import type { ExchangeAdapter } from '../exchanges/types.js'
-import { broadcast } from '../../ws/hub.js'
+import { broadcast, broadcastToChannel } from '../../ws/hub.js'
 import { updateCachedCandle, getCachedCandles } from '../candles/candle-cache.js'
+import { getRedisPub, getRedisData } from '../../redis.js'
 
 export const adapters: ExchangeAdapter[] = [
   new BinanceSpotAdapter(),
   new BinanceFuturesAdapter(),
-  // new BybitFuturesAdapter(),
-  // new OkxSpotAdapter(),
 ]
 
 const tickerMap = new Map<string, UnifiedTicker>()
@@ -31,19 +30,43 @@ function pickBestFromMap(): Map<string, UnifiedTicker> {
   return best
 }
 
+const BROADCAST_INTERVAL = 200
 let lastBroadcast = 0
-const BROADCAST_INTERVAL = 50
 let loggedFirst = false
 let tickerCount = 0
 const metricsMap = new Map<string, { range1m: number; natr5m: number }>()
 
 let cachedBestMap: Map<string, UnifiedTicker> | null = null
 let cachedBest: UnifiedTicker[] | null = null
+let lastBroadcastedTickers = new Map<string, Partial<UnifiedTicker>>()
 
 function getBestMap(): Map<string, UnifiedTicker> {
   if (!cachedBestMap) cachedBestMap = pickBestFromMap()
   return cachedBestMap
 }
+
+function computeDelta(best: Map<string, UnifiedTicker>): UnifiedTicker[] {
+  const delta: UnifiedTicker[] = []
+  const seen = new Set<string>()
+  for (const [symbol, t] of best) {
+    seen.add(symbol)
+    const prev = lastBroadcastedTickers.get(symbol)
+    if (!prev || prev.price !== t.price || prev.change24h !== t.change24h || prev.quoteVolume24h !== t.quoteVolume24h) {
+      delta.push(t)
+    }
+  }
+  for (const [symbol] of lastBroadcastedTickers) {
+    if (!seen.has(symbol)) delta.push({ symbol, exchange: 'binance-spot' } as UnifiedTicker)
+  }
+  lastBroadcastedTickers = new Map(
+    Array.from(best.entries()).map(([s, t]) => [s, { symbol: s, price: t.price, change24h: t.change24h, quoteVolume24h: t.quoteVolume24h }])
+  )
+  return delta
+}
+
+const ROLE = process.env.ROLE || 'all'
+const isBroadcast = ROLE === 'broadcast' || ROLE === 'all'
+const isIngestion = ROLE === 'ingestion' || ROLE === 'all'
 
 export function startAggregator() {
   for (const adapter of adapters) {
@@ -62,21 +85,51 @@ export function startAggregator() {
         lastBroadcast = now
         const best = getBestMap()
         const arr = Array.from(best.values())
+
+        if (isIngestion) {
+          try {
+            const redis = getRedisPub()
+            redis.publish('tickers', JSON.stringify(arr)).catch(() => {})
+          } catch {}
+        }
+
+        if (isBroadcast) {
+          const delta = computeDelta(best)
+          if (delta.length > 0) {
+            broadcast({ type: 'ticker', data: arr })
+          }
+        }
+
         if (!loggedFirst) {
           loggedFirst = true
           console.log(`[Aggregator] First broadcast: ${arr.length} coins (received ${tickerCount} ticks), top: ${arr.slice(0, 3).map(t => t.symbol).join(', ')}`)
         }
-        broadcast({ type: 'ticker', data: arr })
       }
     })
 
     adapter.onCandle((candle) => {
       updateCachedCandle(candle)
-      broadcast({ type: 'candle', channel: `candle:${candle.symbol}:${candle.timeframe}`, data: candle })
+      if (isIngestion) {
+        try {
+          const redis = getRedisPub()
+          redis.publish('candles', JSON.stringify(candle)).catch(() => {})
+        } catch {}
+      }
+      if (isBroadcast) {
+        broadcastToChannel(`candle:${candle.symbol}:${candle.timeframe}`, candle)
+      }
     })
 
     adapter.onDepth((depth) => {
-      broadcast({ type: 'depth', channel: `depth:${depth.symbol}`, data: depth })
+      if (isIngestion) {
+        try {
+          const redis = getRedisPub()
+          redis.publish('depth', JSON.stringify(depth)).catch(() => {})
+        } catch {}
+      }
+      if (isBroadcast) {
+        broadcastToChannel(`depth:${depth.symbol}`, depth)
+      }
     })
 
     console.log(`[Aggregator] Starting adapter: ${adapter.name} (${adapter.exchange})`)
@@ -156,6 +209,14 @@ export function getTickers(): UnifiedTicker[] {
 
 export function getTicker(symbol: string): UnifiedTicker | undefined {
   return getBestMap().get(symbol)
+}
+
+export function setTickersFromRedis(tickers: UnifiedTicker[]) {
+  for (const t of tickers) {
+    tickerMap.set(`${t.symbol}:${t.exchange}`, t)
+  }
+  cachedBestMap = null
+  cachedBest = null
 }
 
 export async function fetchCandles(symbol: string, tf: string, limit: number, exchange?: Exchange, startTime?: number, endTime?: number): Promise<UnifiedCandle[]> {

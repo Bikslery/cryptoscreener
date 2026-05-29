@@ -1,5 +1,6 @@
 import WebSocket from 'ws'
 import { broadcastToChannel } from '../../ws/hub.js'
+import { getWsAgent } from '../exchanges/proxy.js'
 
 const AGGTRADE_WS_BASE = 'wss://stream.binance.com:9443'
 
@@ -15,10 +16,12 @@ function connect() {
 
   const streams = Array.from(activeSymbols).map(s => `${s.toLowerCase()}@aggTrade`).join('/')
   const url = `${AGGTRADE_WS_BASE}/stream?streams=${streams}`
+  const agent = getWsAgent()
+  const opts = agent ? { agent } : undefined
 
   console.log(`[AggTrade] Connecting to ${activeSymbols.size} symbols...`)
 
-  ws = new WebSocket(url)
+  ws = new WebSocket(url, opts)
 
   ws.on('open', () => {
     console.log('[AggTrade] WebSocket connected')

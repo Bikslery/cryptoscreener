@@ -4,9 +4,9 @@ import { getTickers } from '../aggregator/index.js'
 
 export const PRELOAD_TFS = ['5m', '15m', '1h'] as const
 export const INITIAL_CANDLES_TF = '5m'
-const TOP_SYMBOLS_COUNT = 20
-const P1_CONCURRENCY = 5
-const RATE_LIMIT_MS = 100
+const TOP_SYMBOLS_COUNT = 100
+const P1_CONCURRENCY = 10
+const RATE_LIMIT_MS = 50
 const PERIODIC_REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes
 
 let preloaded = false
@@ -17,7 +17,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function waitForTickers(): Promise<void> {
-  const maxWait = 30000
+  const maxWait = 15000
   const pollInterval = 500
   const start = Date.now()
   while (Date.now() - start < maxWait) {

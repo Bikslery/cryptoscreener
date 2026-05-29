@@ -2,7 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import { WebSocketServer, WebSocket } from 'ws'
 import { createServer } from 'http'
-import { setupWsHub, setCandleManager } from './ws/hub.js'
+import { setupWsHub, setCandleManager, startRedisListener, stopWsHub } from './ws/hub.js'
 import { startAggregator, adapters } from './services/aggregator/index.js'
 import { startAlertEngine, stopAlertEngine } from './services/alerts/index.js'
 import { startTelegramPolling } from './services/telegram/bot.js'
@@ -14,8 +14,10 @@ import watchlistRoutes from './routes/watchlists.js'
 import alertRoutes from './routes/alerts.js'
 import drawingRoutes from './routes/drawings.js'
 import { prisma } from './db/index.js'
+import { disconnectRedis } from './redis.js'
 
 const PORT = parseInt(process.env.PORT || '3001')
+const ROLE = process.env.ROLE || 'all'
 
 async function main() {
   await prisma.$connect()
@@ -31,22 +33,47 @@ async function main() {
   app.use('/api/alerts', alertRoutes)
   app.use('/api/drawings', drawingRoutes)
 
-  app.get('/api/health', (_req, res) => res.json({ ok: true }))
+  app.get('/api/health', (_req, res) => res.json({ ok: true, role: ROLE }))
 
   const server = createServer(app)
-  const wss = new WebSocketServer({ server, path: '/ws' })
+
+  const wss = new WebSocketServer({
+    server,
+    path: '/ws',
+    perMessageDeflate: {
+      zlibDeflateOptions: { level: 3 },
+      zlibInflateOptions: { chunkSize: 16 * 1024 },
+      clientNoContextTakeover: true,
+      serverNoContextTakeover: true,
+      threshold: 1024,
+    },
+  })
+
+  const isIngestion = ROLE === 'ingestion' || ROLE === 'all'
+  const isBroadcast = ROLE === 'broadcast' || ROLE === 'all'
 
   setupWsHub(wss)
-  startAggregator()
-  const candleManager = createCandleManager(adapters)
-  setCandleManager(candleManager)
-  startPreload(adapters, candleManager)
-  startAlertEngine()
-  startTelegramPolling()
+
+  if (isIngestion) {
+    startAggregator()
+    const candleManager = createCandleManager(adapters)
+    setCandleManager(candleManager)
+    startPreload(adapters, candleManager)
+    startAlertEngine()
+    startTelegramPolling()
+    console.log('[Role] Ingestion + Broadcast (all-in-one)')
+  }
+
+  if (isBroadcast && !isIngestion) {
+    startRedisListener()
+    const candleManager = createCandleManager(adapters)
+    setCandleManager(candleManager)
+    console.log('[Role] Broadcast worker (reading from Redis)')
+  }
 
   server.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`)
-    console.log(`WebSocket on ws://localhost:${PORT}/ws`)
+    console.log(`Server running on http://localhost:${PORT} (role=${ROLE})`)
+    console.log(`WebSocket on ws://localhost:${PORT}/ws [compression enabled]`)
   })
 
   const shutdown = async (signal: string) => {
@@ -56,7 +83,9 @@ async function main() {
     })
     for (const adapter of adapters) adapter.disconnect()
     stopAlertEngine()
+    stopWsHub()
     server.close()
+    await disconnectRedis()
     await prisma.$disconnect()
     process.exit(0)
   }

@@ -1,4 +1,7 @@
-const WEIGHT_WARNING_THRESHOLD = 0.8
+const WEIGHT_THRESHOLD_RATIO = 0.8
+const CIRCUIT_BREAKER_ERRORS = 5
+const CIRCUIT_BREAKER_COOLDOWN_MS = 60_000
+const BAN_COOLDOWN_MS = 120_000
 
 const LIMITS: Record<string, number> = {
   spot: 6000,
@@ -25,6 +28,8 @@ export class BinanceRateLimiter {
   private throttledUntil = 0
   private backoffUntil = 0
   private lastWarning = 0
+  private consecutiveErrors = 0
+  private circuitBrokenUntil = 0
 
   constructor(market: 'spot' | 'futures') {
     this.market = market
@@ -45,7 +50,7 @@ export class BinanceRateLimiter {
     }
 
     const ratio = this.currentWeight / this.limit
-    if (ratio >= WEIGHT_WARNING_THRESHOLD && Date.now() - this.lastWarning > 30_000) {
+    if (ratio >= WEIGHT_THRESHOLD_RATIO && Date.now() - this.lastWarning > 30_000) {
       this.lastWarning = Date.now()
       console.warn(`[RateLimit:${this.market}] Weight at ${this.currentWeight}/${this.limit} (${(ratio * 100).toFixed(1)}%)`)
     }
@@ -63,17 +68,46 @@ export class BinanceRateLimiter {
     console.error(`[RateLimit:${this.market}] 429 hit! Throttling for ${waitMs / 1000}s`)
   }
 
+  handle418(headers: Headers) {
+    const retryAfter = headers.get(RETRY_AFTER_HEADER)
+    let waitMs = BAN_COOLDOWN_MS
+    if (retryAfter) {
+      const parsed = parseInt(retryAfter, 10)
+      if (!isNaN(parsed) && parsed * 1000 > waitMs) waitMs = parsed * 1000
+    }
+    this.throttledUntil = Date.now() + waitMs
+    this.currentWeight = 0
+    console.error(`[RateLimit:${this.market}] 418 IP ban! Throttling for ${waitMs / 1000}s`)
+  }
+
+  isOverThreshold(): boolean {
+    return this.currentWeight >= this.limit * WEIGHT_THRESHOLD_RATIO
+  }
+
   isThrottled(): boolean {
-    return Date.now() < this.throttledUntil || Date.now() < this.backoffUntil
+    const now = Date.now()
+    return now < this.throttledUntil || now < this.backoffUntil || now < this.circuitBrokenUntil
   }
 
   async waitIfThrottled(): Promise<void> {
     while (this.isThrottled()) {
-      const waitUntil = Math.max(this.throttledUntil, this.backoffUntil)
+      const waitUntil = Math.max(this.throttledUntil, this.backoffUntil, this.circuitBrokenUntil)
       const delay = Math.max(waitUntil - Date.now(), 100)
       console.warn(`[RateLimit:${this.market}] Throttled, waiting ${Math.ceil(delay / 1000)}s...`)
       await new Promise(r => setTimeout(r, delay))
     }
+  }
+
+  recordError() {
+    this.consecutiveErrors++
+    if (this.consecutiveErrors >= CIRCUIT_BREAKER_ERRORS) {
+      this.circuitBrokenUntil = Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS
+      console.error(`[RateLimit:${this.market}] Circuit breaker triggered! ${this.consecutiveErrors} consecutive errors, pausing for ${CIRCUIT_BREAKER_COOLDOWN_MS / 1000}s`)
+    }
+  }
+
+  recordSuccess() {
+    this.consecutiveErrors = 0
   }
 
   getWeight(): number {

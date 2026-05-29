@@ -1,18 +1,23 @@
 import { WebSocket, WebSocketServer } from 'ws'
 import { verifyToken, type JwtPayload } from '../middleware/auth.js'
 import type { WsMessage } from '../types.js'
+import type { UnifiedTicker, UnifiedCandle } from '../types.js'
 import { getTopCachedSymbols, getCachedCandles } from '../services/candles/candle-cache.js'
-import { getTickers } from '../services/aggregator/index.js'
+import { getTickers, setTickersFromRedis } from '../services/aggregator/index.js'
 import { INITIAL_CANDLES_TF } from '../services/candles/preload.js'
+import { getRedisSub } from '../redis.js'
 
 interface Client {
   ws: WebSocket
   user: JwtPayload | null
   subscriptions: Set<string>
+  tickerSymbols: Set<string>
   alive: boolean
+  buffered: number
 }
 
 const clients = new Map<WebSocket, Client>()
+const MAX_BUFFERED = 50
 
 const CLIENT_PING_INTERVAL = 30_000
 let clientPingTimer: ReturnType<typeof setInterval> | null = null
@@ -28,7 +33,6 @@ export function setCandleManager(cm: typeof candleManager) {
   candleManager = cm
 }
 
-// Broadcast batching for channel messages
 const wsBatchBuffer = new Map<string, unknown>()
 
 function flushBatchBuffer() {
@@ -37,9 +41,9 @@ function flushBatchBuffer() {
     const msg: WsMessage = { type: channel as any, channel, data }
     let raw: string | null = null
     for (const client of clients.values()) {
-      if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
+      if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN && client.buffered < MAX_BUFFERED) {
         if (raw === null) raw = JSON.stringify(msg)
-        client.ws.send(raw)
+        client.ws.send(raw, (err) => { if (err) client.buffered++ })
       }
     }
   }
@@ -49,14 +53,8 @@ function flushBatchBuffer() {
 let batchTimer: ReturnType<typeof setInterval> | null = setInterval(flushBatchBuffer, 100)
 
 export function stopWsHub() {
-  if (batchTimer) {
-    clearInterval(batchTimer)
-    batchTimer = null
-  }
-  if (clientPingTimer) {
-    clearInterval(clientPingTimer)
-    clientPingTimer = null
-  }
+  if (batchTimer) { clearInterval(batchTimer); batchTimer = null }
+  if (clientPingTimer) { clearInterval(clientPingTimer); clientPingTimer = null }
 }
 
 function parseCandleChannel(channel: string): { symbol: string; tf: string } | null {
@@ -98,6 +96,17 @@ function buildInitialCandlesData(): Record<string, any[]> {
   return result
 }
 
+function cleanupClient(client: Client) {
+  if (candleManager) {
+    for (const channel of client.subscriptions) {
+      const candleInfo = parseCandleChannel(channel)
+      if (candleInfo) candleManager.unsubscribeCandle(candleInfo.symbol, candleInfo.tf)
+      const depthSymbol = parseDepthChannel(channel)
+      if (depthSymbol) candleManager.unsubscribeDepth(depthSymbol)
+    }
+  }
+}
+
 export function setupWsHub(wss: WebSocketServer) {
   wss.on('connection', (ws, req) => {
     let user: JwtPayload | null = null
@@ -108,12 +117,11 @@ export function setupWsHub(wss: WebSocketServer) {
       user = verifyToken(token)
     }
 
-    const client: Client = { ws, user, subscriptions: new Set(), alive: true }
+    const client: Client = { ws, user, subscriptions: new Set(), tickerSymbols: new Set(), alive: true, buffered: 0 }
     clients.set(ws, client)
 
-    ws.on('pong', () => { client.alive = true })
+    ws.on('pong', () => { client.alive = true; client.buffered = 0 })
 
-    // Send initial-candles data on connect
     try {
       const initialCandles = buildInitialCandlesData()
       if (Object.keys(initialCandles).length > 0) {
@@ -130,6 +138,11 @@ export function setupWsHub(wss: WebSocketServer) {
           const isNew = !client.subscriptions.has(msg.channel)
           client.subscriptions.add(msg.channel)
 
+          if (msg.channel.startsWith('ticker:')) {
+            const symbol = msg.channel.slice(7)
+            client.tickerSymbols.add(symbol)
+          }
+
           if (isNew) {
             const candleInfo = parseCandleChannel(msg.channel)
             if (candleInfo && candleManager) {
@@ -143,6 +156,10 @@ export function setupWsHub(wss: WebSocketServer) {
           }
         } else if (msg.type === 'unsubscribe' && msg.channel) {
           client.subscriptions.delete(msg.channel)
+
+          if (msg.channel.startsWith('ticker:')) {
+            client.tickerSymbols.delete(msg.channel.slice(7))
+          }
 
           const candleInfo = parseCandleChannel(msg.channel)
           if (candleInfo && candleManager) {
@@ -158,15 +175,7 @@ export function setupWsHub(wss: WebSocketServer) {
     })
 
     ws.on('close', () => {
-      // Unsubscribe from all channels on disconnect
-      if (candleManager) {
-        for (const channel of client.subscriptions) {
-          const candleInfo = parseCandleChannel(channel)
-          if (candleInfo) candleManager.unsubscribeCandle(candleInfo.symbol, candleInfo.tf)
-          const depthSymbol = parseDepthChannel(channel)
-          if (depthSymbol) candleManager.unsubscribeDepth(depthSymbol)
-        }
-      }
+      cleanupClient(client)
       clients.delete(ws)
     })
   })
@@ -176,15 +185,8 @@ export function setupWsHub(wss: WebSocketServer) {
       for (const [ws, client] of clients) {
         if (!client.alive) {
           ws.terminate()
+          cleanupClient(client)
           clients.delete(ws)
-          if (candleManager) {
-            for (const channel of client.subscriptions) {
-              const candleInfo = parseCandleChannel(channel)
-              if (candleInfo) candleManager.unsubscribeCandle(candleInfo.symbol, candleInfo.tf)
-              const depthSymbol = parseDepthChannel(channel)
-              if (depthSymbol) candleManager.unsubscribeDepth(depthSymbol)
-            }
-          }
           continue
         }
         client.alive = false
@@ -197,16 +199,73 @@ export function setupWsHub(wss: WebSocketServer) {
 export function broadcast(msg: WsMessage) {
   const raw = JSON.stringify(msg)
   const channel = msg.channel || msg.type
-  const isGlobal = msg.type === 'ticker' || msg.type === 'alert' || msg.type === 'listing'
+  const isGlobal = msg.type === 'alert' || msg.type === 'listing'
+
+  if (msg.type === 'ticker') {
+    const tickers = msg.data as UnifiedTicker[]
+    const bySymbol = new Map<string, UnifiedTicker>()
+    for (const t of tickers) bySymbol.set(t.symbol, t)
+
+    let fullRaw: string | null = null
+    for (const client of clients.values()) {
+      if (client.ws.readyState !== WebSocket.OPEN) continue
+      if (client.buffered >= MAX_BUFFERED) continue
+
+      if (client.tickerSymbols.size === 0) {
+        if (fullRaw === null) fullRaw = raw
+        client.ws.send(fullRaw, (err) => { if (err) client.buffered++ })
+      } else {
+        const filtered = tickers.filter(t => client.tickerSymbols.has(t.symbol))
+        if (filtered.length > 0) {
+          client.ws.send(JSON.stringify({ type: 'ticker', data: filtered }), (err) => { if (err) client.buffered++ })
+        }
+      }
+    }
+    return
+  }
+
   for (const client of clients.values()) {
     if (client.ws.readyState !== WebSocket.OPEN) continue
+    if (client.buffered >= MAX_BUFFERED) continue
     if (isGlobal || client.subscriptions.has(channel)) {
-      client.ws.send(raw)
+      client.ws.send(raw, (err) => { if (err) client.buffered++ })
     }
   }
 }
 
 export function broadcastToChannel(channel: string, data: unknown) {
-  // Buffer into batch buffer instead of immediate send
   wsBatchBuffer.set(channel, data)
+}
+
+export function startRedisListener() {
+  try {
+    const sub = getRedisSub()
+
+    sub.on('message', (channel, message) => {
+      try {
+        if (channel === 'tickers') {
+          const tickers = JSON.parse(message) as UnifiedTicker[]
+          setTickersFromRedis(tickers)
+          broadcast({ type: 'ticker', data: tickers })
+        } else if (channel === 'candles') {
+          const candle = JSON.parse(message) as UnifiedCandle
+          broadcastToChannel(`candle:${candle.symbol}:${candle.timeframe}`, candle)
+        } else if (channel === 'depth') {
+          const depth = JSON.parse(message)
+          broadcastToChannel(`depth:${depth.symbol}`, depth)
+        } else if (channel === 'trades') {
+          const trade = JSON.parse(message)
+          broadcastToChannel(`trade:${trade.symbol}`, trade)
+        } else if (channel === 'alerts') {
+          broadcast({ type: 'alert', data: JSON.parse(message) })
+        }
+      } catch (e) {
+        console.warn('[Hub] Redis message parse error:', e instanceof Error ? e.message : e)
+      }
+    })
+
+    console.log('[Hub] Redis listener started')
+  } catch (e) {
+    console.warn('[Hub] Redis unavailable, running in single-process mode')
+  }
 }
