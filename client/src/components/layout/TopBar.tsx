@@ -1,18 +1,18 @@
 import { useCoinListStore, useAuthStore, useUIStore } from '../../store'
 import type { Timeframe, FilterExchange } from '../../types'
-import { LogIn, User, ChevronLeft, ChevronRight } from 'lucide-react'
+import { LogIn, User, ChevronFirst, ChevronLeft, ChevronRight } from 'lucide-react'
 
 const TF_OPTIONS: { value: Timeframe; label: string }[] = [
-  { value: '1m', label: '1m' },
-  { value: '3m', label: '3m' },
-  { value: '5m', label: '5m' },
-  { value: '15m', label: '15m' },
-  { value: '30m', label: '30m' },
-  { value: '1h', label: '1h' },
-  { value: '2h', label: '2h' },
-  { value: '4h', label: '4h' },
-  { value: '1d', label: '1d' },
-  { value: '1w', label: '1w' },
+  { value: '1m', label: '1М' },
+  { value: '3m', label: '3М' },
+  { value: '5m', label: '5М' },
+  { value: '15m', label: '15М' },
+  { value: '30m', label: '30М' },
+  { value: '1h', label: '1Ч' },
+  { value: '2h', label: '2Ч' },
+  { value: '4h', label: '4Ч' },
+  { value: '1d', label: '1Д' },
+  { value: '1w', label: '1Н' },
 ]
 
 const EXCHANGE_FILTERS: { value: FilterExchange; label: string }[] = [
@@ -47,49 +47,65 @@ export function TopBar() {
 
   return (
     <div
-      className="flex items-center justify-between px-4 h-[48px] bg-[#0e0e0e] border-b border-[#1f1f1f] flex-shrink-0 select-none"
-      style={{ fontFamily: "'Inter', sans-serif" }}
+      className="flex items-center justify-between gap-3 px-4 h-[48px] bg-[#0e0e0e] border-b border-[#1f1f1f] flex-shrink-0 select-none overflow-x-auto"
+      style={{ fontFamily: "'JetBrains Mono', monospace" }}
     >
       {/* Лево: логотип */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 shrink-0">
         <ScalpBoardLogo />
         <span className="font-bold text-[13px] text-white tracking-tight">ScalpBoard</span>
       </div>
 
       {/* Центр: таймфреймы + пагинация */}
-      <div className="flex items-center gap-[2px]">
-        {TF_OPTIONS.map(opt => (
-          <button
-            key={opt.value}
-            className={`
-              flex items-center justify-center h-[26px] px-[8px] text-[11px] font-mono font-medium rounded-[4px] border transition-all duration-150 cursor-pointer
-              ${activeTf === opt.value
-                ? 'bg-white text-black border-white'
-                : 'bg-transparent text-[#666] border-transparent hover:text-[#aaa] hover:border-[#2a2a2a]'
-              }
-            `}
-            onClick={() => setTimeframe(opt.value)}
-          >
-            {opt.label}
-          </button>
-        ))}
+      <div className="flex items-center gap-2 shrink-0">
+        <div className="flex h-[30px] border border-[#2a2a2a] rounded-[4px] overflow-hidden bg-[#1a1a1a]">
+          {TF_OPTIONS.map((opt, i) => (
+            <button
+              key={opt.value}
+              className={`
+                flex items-center justify-center h-full px-[12px] text-[12px] font-mono font-medium transition-all duration-150 cursor-pointer
+                ${i < TF_OPTIONS.length - 1 ? 'border-r border-[#2a2a2a]' : ''}
+                ${activeTf === opt.value
+                  ? 'bg-[#3a3a3a] text-[#fff]'
+                  : 'text-[#888] hover:bg-[#242424] hover:text-[#bbb]'
+                }
+              `}
+              onClick={() => setTimeframe(opt.value)}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
 
         <div className="w-[1px] h-[20px] bg-[#1f1f1f] mx-2" />
+
+        <button
+          aria-label="На первую страницу"
+          disabled={pageIndex === 0}
+          className={`
+            flex items-center justify-center h-[30px] px-[9px] text-[12px] font-mono font-medium rounded-[4px] border transition-all duration-150
+            disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-[#1a1a1a] disabled:hover:text-[#888] disabled:hover:border-[#2a2a2a]
+            bg-[#1a1a1a] text-[#888] border-[#2a2a2a] hover:bg-[#242424] hover:text-[#bbb] hover:border-[#3a3a3a] cursor-pointer
+          `}
+          onClick={() => setPageIndex(0)}
+        >
+          <ChevronFirst size={15} />
+        </button>
 
         <button
           aria-label="Предыдущие 9 графиков"
           disabled={pageIndex === 0}
           className={`
-            flex items-center justify-center h-[26px] px-[6px] text-[11px] font-mono font-medium rounded-[4px] border transition-all duration-150
-            disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:border-transparent disabled:hover:text-[#666]
-            bg-transparent text-[#666] border-transparent hover:text-[#aaa] hover:border-[#2a2a2a] cursor-pointer
+            flex items-center justify-center h-[30px] px-[9px] text-[12px] font-mono font-medium rounded-[4px] border transition-all duration-150
+            disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-[#1a1a1a] disabled:hover:text-[#888] disabled:hover:border-[#2a2a2a]
+            bg-[#1a1a1a] text-[#888] border-[#2a2a2a] hover:bg-[#242424] hover:text-[#bbb] hover:border-[#3a3a3a] cursor-pointer
           `}
           onClick={() => setPageIndex(pageIndex - 1)}
         >
-          <ChevronLeft size={13} />
+          <ChevronLeft size={15} />
         </button>
 
-        <span className="px-[8px] text-[11px] font-mono text-[#aaa] tabular-nums">
+        <span className="px-[10px] text-[12px] font-mono text-[#aaa] tabular-nums">
           {pageIndex + 1} / {pageCount}
         </span>
 
@@ -97,23 +113,23 @@ export function TopBar() {
           aria-label="Следующие 9 графиков"
           disabled={pageIndex >= pageCount - 1}
           className={`
-            flex items-center justify-center h-[26px] px-[6px] text-[11px] font-mono font-medium rounded-[4px] border transition-all duration-150
-            disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:border-transparent disabled:hover:text-[#666]
-            bg-transparent text-[#666] border-transparent hover:text-[#aaa] hover:border-[#2a2a2a] cursor-pointer
+            flex items-center justify-center h-[30px] px-[9px] text-[12px] font-mono font-medium rounded-[4px] border transition-all duration-150
+            disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-[#1a1a1a] disabled:hover:text-[#888] disabled:hover:border-[#2a2a2a]
+            bg-[#1a1a1a] text-[#888] border-[#2a2a2a] hover:bg-[#242424] hover:text-[#bbb] hover:border-[#3a3a3a] cursor-pointer
           `}
           onClick={() => setPageIndex(pageIndex + 1)}
         >
-          <ChevronRight size={13} />
+          <ChevronRight size={15} />
         </button>
       </div>
 
       {/* Право: фильтры бирж + авторизация */}
-      <div className="flex items-center gap-[2px]">
+      <div className="flex items-center gap-[2px] shrink-0">
         {EXCHANGE_FILTERS.map(f => (
           <button
             key={f.value}
             className={`
-              flex items-center justify-center h-[26px] px-[10px] text-[11px] font-medium rounded-[4px] border transition-all duration-150 cursor-pointer
+              flex items-center justify-center h-[30px] px-[10px] text-[12px] font-medium rounded-[4px] border transition-all duration-150 cursor-pointer
               ${filterExchange === f.value
                 ? 'bg-white text-black border-white'
                 : 'bg-transparent text-[#666] border-transparent hover:text-[#aaa] hover:border-[#2a2a2a]'
@@ -129,7 +145,7 @@ export function TopBar() {
 
         {isLoggedIn ? (
           <button
-            className="flex items-center gap-1.5 h-[26px] px-2 text-[11px] text-[#aaa] hover:text-white transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 h-[30px] px-2 text-[11px] text-[#aaa] hover:text-white transition-colors cursor-pointer"
             onClick={() => setShowProfile(true)}
           >
             <User size={13} />
@@ -137,7 +153,7 @@ export function TopBar() {
           </button>
         ) : (
           <button
-            className="flex items-center gap-1.5 h-[26px] px-2 text-[11px] text-[#aaa] hover:text-white transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 h-[30px] px-2 text-[11px] text-[#aaa] hover:text-white transition-colors cursor-pointer"
             onClick={() => setShowLogin(true)}
           >
             <LogIn size={13} />

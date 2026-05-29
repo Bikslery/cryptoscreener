@@ -29,7 +29,7 @@ export function LoginModal() {
         className="w-full max-w-sm p-6 bg-[#0e0e0e] border border-[#1f1f1f] rounded-xl shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h1 className="text-lg font-bold text-center mb-6 text-white" style={{ fontFamily: "'Inter', sans-serif" }}>
+        <h1 className="text-lg font-bold text-center mb-6 text-white" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
           {isRegister ? 'Регистрация' : 'Вход'}
         </h1>
         <form onSubmit={handleSubmit} className="space-y-3">

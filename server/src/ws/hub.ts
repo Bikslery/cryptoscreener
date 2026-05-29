@@ -9,9 +9,13 @@ interface Client {
   ws: WebSocket
   user: JwtPayload | null
   subscriptions: Set<string>
+  alive: boolean
 }
 
 const clients = new Map<WebSocket, Client>()
+
+const CLIENT_PING_INTERVAL = 30_000
+let clientPingTimer: ReturnType<typeof setInterval> | null = null
 
 let candleManager: {
   subscribeCandle: (symbol: string, tf: string) => void
@@ -48,6 +52,10 @@ export function stopWsHub() {
   if (batchTimer) {
     clearInterval(batchTimer)
     batchTimer = null
+  }
+  if (clientPingTimer) {
+    clearInterval(clientPingTimer)
+    clientPingTimer = null
   }
 }
 
@@ -100,8 +108,10 @@ export function setupWsHub(wss: WebSocketServer) {
       user = verifyToken(token)
     }
 
-    const client: Client = { ws, user, subscriptions: new Set() }
+    const client: Client = { ws, user, subscriptions: new Set(), alive: true }
     clients.set(ws, client)
+
+    ws.on('pong', () => { client.alive = true })
 
     // Send initial-candles data on connect
     try {
@@ -160,6 +170,28 @@ export function setupWsHub(wss: WebSocketServer) {
       clients.delete(ws)
     })
   })
+
+  if (!clientPingTimer) {
+    clientPingTimer = setInterval(() => {
+      for (const [ws, client] of clients) {
+        if (!client.alive) {
+          ws.terminate()
+          clients.delete(ws)
+          if (candleManager) {
+            for (const channel of client.subscriptions) {
+              const candleInfo = parseCandleChannel(channel)
+              if (candleInfo) candleManager.unsubscribeCandle(candleInfo.symbol, candleInfo.tf)
+              const depthSymbol = parseDepthChannel(channel)
+              if (depthSymbol) candleManager.unsubscribeDepth(depthSymbol)
+            }
+          }
+          continue
+        }
+        client.alive = false
+        ws.ping()
+      }
+    }, CLIENT_PING_INTERVAL)
+  }
 }
 
 export function broadcast(msg: WsMessage) {

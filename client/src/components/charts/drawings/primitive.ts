@@ -97,7 +97,7 @@ class DrawingsRenderer implements IPrimitivePaneRenderer {
       context.strokeStyle = '#ffffff'
       context.fillStyle = '#ffffff'
       context.lineWidth = 1
-      context.font = "10px 'Inter', sans-serif"
+      context.font = "10px 'JetBrains Mono', monospace"
 
       for (const item of this._items) {
         if (item.type === 'h-ray') {

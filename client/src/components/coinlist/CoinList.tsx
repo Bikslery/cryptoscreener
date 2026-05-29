@@ -101,7 +101,7 @@ export function CoinList() {
     <div className="w-[400px] h-full flex flex-col bg-[#0a0a0a]">
       <div
         className="grid border-b border-[#1f1f1f] bg-[#0e0e0e] text-[11px] select-none flex-shrink-0"
-        style={{ gridTemplateColumns: '80px 72px 72px 72px 80px', fontFamily: "'Inter', sans-serif" }}
+        style={{ gridTemplateColumns: '80px 72px 72px 72px 80px', fontFamily: "'JetBrains Mono', monospace" }}
       >
         {COLS.map((col, i) => (
           <div

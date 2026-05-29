@@ -2,6 +2,7 @@ import WebSocket from 'ws'
 import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } from './types.js'
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
+import { BinanceRateLimiter } from './rate-limiter.js'
 
 async function fetchWithTimeout(url: string, ms = 10000): Promise<Response> {
   const ctrl = new AbortController()
@@ -22,6 +23,12 @@ const STABLECOIN_BASES = new Set([
   'USDC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'EUR', 'AEUR', 'EURI', 'USDSB', 'PYUSD',
 ])
 
+const TICKER_WS_URL = 'wss://stream.binance.com:9443/ws/!ticker@arr'
+const TICKER_REST_URL = 'https://api.binance.com/api/v3/ticker/24hr'
+const TICKER_WS_PING_INTERVAL = 20_000
+const TICKER_WS_RECONNECT_BASE = 1000
+const TICKER_WS_RECONNECT_MAX = 60_000
+
 export class BinanceSpotAdapter implements ExchangeAdapter {
   name = 'Binance'
   type: 'spot' | 'futures' = 'spot'
@@ -29,16 +36,23 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
 
   private candleWs: WebSocket | null = null
   private depthWs: WebSocket | null = null
+  private tickerWs: WebSocket | null = null
+  private tickerWsPingTimer: ReturnType<typeof setInterval> | null = null
+  private tickerWsReconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private tickerWsReconnectDelay = TICKER_WS_RECONNECT_BASE
+  private tickerWsIntentionalClose = false
+  private pollTimer: ReturnType<typeof setInterval> | null = null
+  private usingRestFallback = false
   private candleSubs = new Map<string, CandleCallback>()
   private depthSubs = new Map<string, DepthCallback>()
   private tickerCbs: TickerCallback[] = []
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
-  private pollTimer: ReturnType<typeof setInterval> | null = null
   private reconnectCandleTimer: ReturnType<typeof setTimeout> | null = null
   private intentionalCandleClose = false
   private intentionalDepthClose = false
   private precisionMap = new Map<string, number>()
+  private rateLimiter = new BinanceRateLimiter('spot')
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
@@ -46,9 +60,8 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
 
   connect() {
     this.fetchExchangeInfo()
-    this.pollTickers()
-    this.pollTimer = setInterval(() => this.pollTickers(), 2000)
-    console.log(`[${this.name}] Connected (REST polling for tickers)`)
+    this.connectTickerWs()
+    console.log(`[${this.name}] Connected (WebSocket !ticker@arr)`)
   }
 
   private async fetchExchangeInfo() {
@@ -71,35 +84,116 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     }
   }
 
-  private async pollTickers() {
-    try {
-      const res = await fetchWithTimeout('https://api.binance.com/api/v3/ticker/24hr')
-      const arr = await res.json()
-      for (const t of arr) {
-        if (!t.symbol.endsWith('USDT')) continue
-        if (STABLECOIN_BASES.has(t.symbol.slice(0, -4))) continue
-        const ticker = this.parseTicker(t)
-        for (const cb of this.tickerCbs) cb(ticker)
+  private connectTickerWs() {
+    this.tickerWsIntentionalClose = false
+    if (this.tickerWs && this.tickerWs.readyState !== WebSocket.CLOSED && this.tickerWs.readyState !== WebSocket.CLOSING) {
+      this.tickerWsIntentionalClose = true
+      try { this.tickerWs.close() } catch {}
+    }
+
+    console.log(`[${this.name}] Ticker WS connecting...`)
+    this.tickerWs = new WebSocket(TICKER_WS_URL)
+
+    this.tickerWs.on('open', () => {
+      console.log(`[${this.name}] Ticker WS connected (!ticker@arr)`)
+      this.tickerWsReconnectDelay = TICKER_WS_RECONNECT_BASE
+      if (this.usingRestFallback) {
+        this.usingRestFallback = false
+        if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
+        console.log(`[${this.name}] Switched from REST fallback back to WS`)
       }
+      this.tickerWsPingTimer = setInterval(() => {
+        if (this.tickerWs?.readyState === WebSocket.OPEN) {
+          this.tickerWs.ping()
+        }
+      }, TICKER_WS_PING_INTERVAL)
+    })
+
+    this.tickerWs.on('message', (raw) => {
+      try {
+        const arr = JSON.parse(raw.toString())
+        if (!Array.isArray(arr)) return
+        this.processTickerArray(arr)
+      } catch (e) {
+        console.error(`[${this.name}] Ticker WS parse error:`, e instanceof Error ? e.message : e)
+      }
+    })
+
+    this.tickerWs.on('pong', () => {})
+
+    this.tickerWs.on('error', (err) => {
+      console.error(`[${this.name}] Ticker WS error:`, err.message || err)
+    })
+
+    this.tickerWs.on('close', () => {
+      if (this.tickerWsPingTimer) { clearInterval(this.tickerWsPingTimer); this.tickerWsPingTimer = null }
+      if (this.tickerWsIntentionalClose) {
+        this.tickerWsIntentionalClose = false
+        return
+      }
+      console.warn(`[${this.name}] Ticker WS closed unexpectedly, falling back to REST, WS reconnect in ${this.tickerWsReconnectDelay}ms`)
+      this.startRestFallback()
+      this.tickerWsReconnectTimer = setTimeout(() => {
+        this.tickerWsReconnectTimer = null
+        this.tickerWsReconnectDelay = Math.min(this.tickerWsReconnectDelay * 2, TICKER_WS_RECONNECT_MAX)
+        this.connectTickerWs()
+      }, this.tickerWsReconnectDelay)
+    })
+  }
+
+  private startRestFallback() {
+    if (this.usingRestFallback) return
+    this.usingRestFallback = true
+    this.pollTickers()
+    this.pollTimer = setInterval(() => this.pollTickers(), 5000)
+  }
+
+  private processTickerArray(arr: any[]) {
+    for (const t of arr) {
+      const symbol = t.s || t.symbol
+      if (!symbol?.endsWith('USDT')) continue
+      if (STABLECOIN_BASES.has(symbol.slice(0, -4))) continue
+      const ticker = this.parseTicker(t)
+      for (const cb of this.tickerCbs) cb(ticker)
+    }
+  }
+
+  private async pollTickers() {
+    if (this.rateLimiter.isThrottled()) return
+    try {
+      const res = await fetchWithTimeout(TICKER_REST_URL)
+      this.rateLimiter.updateFromHeaders(res.headers)
+      if (res.status === 429) {
+        this.rateLimiter.handle429(res.headers)
+        return
+      }
+      const arr = await res.json()
+      if (!Array.isArray(arr)) {
+        console.warn(`[${this.name}] Ticker REST response not an array:`, JSON.stringify(arr).slice(0, 200))
+        return
+      }
+      this.processTickerArray(arr)
     } catch (e) {
       console.error(`[${this.name}] Ticker poll error:`, e instanceof Error ? e.message : e)
     }
   }
 
   private parseTicker(t: any): UnifiedTicker {
-    const price = parseFloat(t.lastPrice)
-    const open = parseFloat(t.openPrice)
-    const pricePrecision = this.precisionMap.get(t.symbol) ?? fallbackPrecision(price)
+    const isWs = !!t.s
+    const symbol = isWs ? t.s : t.symbol
+    const price = parseFloat(isWs ? t.c : t.lastPrice)
+    const open = parseFloat(isWs ? t.o : t.openPrice)
+    const pricePrecision = this.precisionMap.get(symbol) ?? fallbackPrecision(price)
     return {
-      symbol: t.symbol,
+      symbol,
       exchange: this.exchange,
       price,
       change24h: open > 0 ? ((price - open) / open) * 100 : 0,
-      high24h: parseFloat(t.highPrice),
-      low24h: parseFloat(t.lowPrice),
-      volume24h: parseFloat(t.volume),
-      trades24h: parseInt(t.count),
-      quoteVolume24h: parseFloat(t.quoteVolume),
+      high24h: parseFloat(isWs ? t.h : t.highPrice),
+      low24h: parseFloat(isWs ? t.l : t.lowPrice),
+      volume24h: parseFloat(isWs ? t.v : t.volume),
+      trades24h: parseInt(isWs ? t.n : t.count),
+      quoteVolume24h: parseFloat(isWs ? t.q : t.quoteVolume),
       range1m: 0,
       natr5m: 0,
       pricePrecision,
@@ -108,6 +202,10 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   }
 
   disconnect() {
+    this.tickerWsIntentionalClose = true
+    this.tickerWs?.close()
+    if (this.tickerWsPingTimer) clearInterval(this.tickerWsPingTimer)
+    if (this.tickerWsReconnectTimer) clearTimeout(this.tickerWsReconnectTimer)
     this.candleWs?.close()
     this.depthWs?.close()
     if (this.pollTimer) clearInterval(this.pollTimer)
@@ -138,9 +236,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   }
 
   private reconnectCandles() {
-    if (this.reconnectCandleTimer) {
-      clearTimeout(this.reconnectCandleTimer)
-    }
+    if (this.reconnectCandleTimer) clearTimeout(this.reconnectCandleTimer)
     this.reconnectCandleTimer = setTimeout(() => {
       this.reconnectCandleTimer = null
       this.doReconnectCandles()
@@ -275,8 +371,15 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     if (startTime !== undefined) params.set('startTime', String(startTime))
     if (endTime !== undefined) params.set('endTime', String(endTime))
     const url = `https://api.binance.com/api/v3/klines?${params.toString()}`
+    await this.rateLimiter.waitIfThrottled()
     const res = await fetchWithTimeout(url)
+    this.rateLimiter.updateFromHeaders(res.headers)
+    if (res.status === 429) {
+      this.rateLimiter.handle429(res.headers)
+      return []
+    }
     const data = await res.json()
+    if (!Array.isArray(data)) return []
     return data.map((k: any[]) => ({
       symbol,
       exchange: this.exchange,
@@ -292,7 +395,13 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
 
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
     const url = `https://api.binance.com/api/v3/depth?symbol=${symbol}&limit=${limit}`
+    await this.rateLimiter.waitIfThrottled()
     const res = await fetchWithTimeout(url)
+    this.rateLimiter.updateFromHeaders(res.headers)
+    if (res.status === 429) {
+      this.rateLimiter.handle429(res.headers)
+      return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() }
+    }
     const data = await res.json()
     return {
       symbol,
