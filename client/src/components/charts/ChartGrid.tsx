@@ -27,8 +27,10 @@ const BACKFILL_DELAY_MS = 50
 const RETRY_CONCURRENCY = 2
 const RETRY_DELAY_MS = 300
 const MAX_RETRIES = 2
-const LISTING_EPOCH_MS = 1262304000000 // 2010-01-01 — safe floor for any crypto
-const MAX_EMPTY_CHUNKS_IN_A_ROW = 2 // stop backfill only after this many fully-empty chunks (listing reached)
+const LISTING_EPOCH_MS = 1262304000000
+const MAX_EMPTY_CHUNKS_IN_A_ROW = 2
+const MAX_BACKFILL_CANDLES = 50000
+const INTERIM_FLUSH_CANDLES = 15000
 
 type BatchResult = { ok: boolean; candles: UnifiedCandle[] }
 
@@ -71,7 +73,7 @@ function useFullHistory(
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   options?: { limit?: number; enableBackfill?: boolean },
 ): { isInitialLoading: boolean } {
-  const limit = options?.limit ?? 1500
+  const limit = options?.limit ?? 5000
   const enableBackfill = options?.enableBackfill ?? true
   const [isInitialLoading, setIsInitialLoading] = useState(true)
 
@@ -91,37 +93,61 @@ function useFullHistory(
         color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
       }))
       try {
-        candleRef.current.setData(candleData)
-        volumeRef.current.setData(volumeData)
-        if (fitContent) chartRef.current?.timeScale().fitContent()
+        if (fitContent && candleData.length > 500) {
+          candleRef.current.setData(candleData.slice(-500))
+          volumeRef.current.setData(volumeData.slice(-500))
+          chartRef.current?.timeScale().fitContent()
+          candleRef.current.setData(candleData)
+          volumeRef.current.setData(volumeData)
+        } else {
+          candleRef.current.setData(candleData)
+          volumeRef.current.setData(volumeData)
+          if (fitContent) chartRef.current?.timeScale().fitContent()
+        }
       } catch {}
     }
 
     const run = async () => {
       let candles: UnifiedCandle[] | undefined = candleCache.getCandles(symbol, tf)
       const hadCache = !!(candles && candles.length > 0)
-      if (!hadCache) {
-        candleRef.current?.setData([])
-        volumeRef.current?.setData([])
-        candlesDataRef.current = []
+
+      if (hadCache && candles!.length > 0) {
+        renderCandles(candles!, true)
+        setIsInitialLoading(false)
+      }
+
+      if (!hadCache || candles!.length < limit) {
         try {
           const res = await api.get(`/coins/${symbol}/candles`, { params: { tf, limit } })
           if (cancelled.value || destroyedRef.current) return
-          candles = res.data as UnifiedCandle[]
-          if (candles.length > 0) candleCache.setCandles(symbol, tf, candles)
+          const fetched = res.data as UnifiedCandle[]
+          if (fetched.length > 0) {
+            candleCache.setCandles(symbol, tf, fetched)
+            candles = fetched
+          }
         } catch {
-          setIsInitialLoading(false)
-          return
+          if (!hadCache) {
+            setIsInitialLoading(false)
+            return
+          }
         }
       }
+
       if (!candles || candles.length === 0) {
         setIsInitialLoading(false)
         return
       }
       if (cancelled.value || destroyedRef.current) return
 
-      renderCandles(candles, true)
-      setIsInitialLoading(false)
+      if (!hadCache) {
+        renderCandles(candles, true)
+        setIsInitialLoading(false)
+      } else {
+        const cached = candleCache.getCandles(symbol, tf)
+        if (cached && cached !== candles) {
+          renderCandles(cached, false)
+        }
+      }
 
       if (!enableBackfill) {
         return
@@ -130,25 +156,33 @@ function useFullHistory(
       const tfMs = (TF_SECONDS[tf] || 60) * 1000
       const oldestTimeMs = candles[0].time * 1000
       const batchSpanMs = BATCH_SIZE * tfMs
+      const maxBatches = Math.ceil(MAX_BACKFILL_CANDLES / BATCH_SIZE)
 
       const batches: { startMs: number; endMs: number }[] = []
       for (let endMs = oldestTimeMs; endMs > LISTING_EPOCH_MS; endMs -= batchSpanMs) {
         const startMs = endMs - batchSpanMs
         batches.push({ startMs: Math.max(startMs, LISTING_EPOCH_MS), endMs })
       }
+      batches.length = Math.min(batches.length, maxBatches)
       if (batches.length === 0) {
         setIsInitialLoading(false)
         return
       }
 
-      // Yield to browser so initial frame paints before backfill kicks in.
       await delay(0)
       if (cancelled.value || destroyedRef.current) return
 
       let consecutiveEmptyChunks = 0
-      let lastRenderAt = 0
-      const RENDER_THROTTLE_MS = 150
       const failed: { startMs: number; endMs: number }[] = []
+      const collected: UnifiedCandle[] = []
+
+      const flushCollected = () => {
+        if (cancelled.value || destroyedRef.current || collected.length === 0) return
+        candleCache.prependCandles(symbol, tf, collected)
+        collected.length = 0
+        const cached = candleCache.getCandles(symbol, tf)
+        if (cached && cached.length > 0) renderCandles(cached, false)
+      }
 
       const fetchBatch = async (b: { startMs: number; endMs: number }): Promise<BatchResult> => {
         try {
@@ -159,25 +193,6 @@ function useFullHistory(
         } catch {
           return { ok: false, candles: [] }
         }
-      }
-
-      const processBatchResults = (results: BatchResult[], trackFailed: boolean) => {
-        let nonEmptyOkInChunk = 0
-        let okCount = 0
-        for (const r of results) {
-          if (!r.ok) {
-            if (trackFailed) {
-              // failed batch already pushed by the caller
-            }
-            continue
-          }
-          okCount++
-          if (r.candles.length > 0) {
-            nonEmptyOkInChunk++
-            candleCache.prependCandles(symbol, tf, r.candles)
-          }
-        }
-        return { nonEmptyOkInChunk, okCount }
       }
 
       for (let i = 0; i < batches.length; i += BACKFILL_CONCURRENCY) {
@@ -196,16 +211,15 @@ function useFullHistory(
         if (cancelled.value || destroyedRef.current) return
 
         failed.push(...chunkFailed)
-        const { nonEmptyOkInChunk, okCount } = processBatchResults(results, false)
-
-        const isFirstChunk = i === 0
-        const now = performance.now()
-        if (isFirstChunk || now - lastRenderAt >= RENDER_THROTTLE_MS) {
-          const cached = candleCache.getCandles(symbol, tf)
-          if (cached && cached.length > 0) {
-            renderCandles(cached, false)
+        let nonEmptyOkInChunk = 0
+        let okCount = 0
+        for (const r of results) {
+          if (!r.ok) continue
+          okCount++
+          if (r.candles.length > 0) {
+            nonEmptyOkInChunk++
+            collected.push(...r.candles)
           }
-          lastRenderAt = now
         }
 
         if (okCount > 0 && nonEmptyOkInChunk === 0) {
@@ -215,12 +229,14 @@ function useFullHistory(
           consecutiveEmptyChunks = 0
         }
 
+        if (collected.length >= INTERIM_FLUSH_CANDLES) flushCollected()
+
         if (i + BACKFILL_CONCURRENCY < batches.length) {
           await delay(BACKFILL_DELAY_MS)
         }
       }
 
-      // Retry failed batches (network errors, 429, 5xx) with lower concurrency and longer delay
+      // Retry failed batches
       let retryBatch = failed.splice(0)
       for (let attempt = 1; attempt <= MAX_RETRIES && retryBatch.length > 0; attempt++) {
         if (cancelled.value || destroyedRef.current) return
@@ -240,7 +256,11 @@ function useFullHistory(
           )
 
           stillFailed.push(...chunkFailed)
-          processBatchResults(results, false)
+          for (const r of results) {
+            if (r.ok && r.candles.length > 0) {
+              collected.push(...r.candles)
+            }
+          }
 
           if (i + RETRY_CONCURRENCY < retryBatch.length) {
             await delay(RETRY_DELAY_MS)
@@ -251,12 +271,9 @@ function useFullHistory(
         if (retryBatch.length > 0) await delay(RETRY_DELAY_MS * attempt)
       }
 
-      // Final render to ensure last chunks (which may have been throttled) hit the canvas.
+      // Single flush for remaining collected candles
       if (!cancelled.value && !destroyedRef.current) {
-        const cached = candleCache.getCandles(symbol, tf)
-        if (cached && cached.length > 0) {
-          renderCandles(cached, false)
-        }
+        flushCollected()
       }
     }
 

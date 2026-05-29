@@ -1,8 +1,9 @@
-import { memo, useCallback } from 'react'
-import { Virtuoso } from 'react-virtuoso'
+import { memo, useCallback, useMemo, useRef, useEffect } from 'react'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { useCoinListStore } from '../../store'
 import type { UnifiedTicker } from '../../types'
 import { formatCompact, extractBaseAsset } from '../../utils/format'
+import { prefetchHistory } from '../../services/candle-prefetch'
 
 type ColKey = keyof UnifiedTicker
 
@@ -44,17 +45,30 @@ function formatVal(key: ColKey, coin: UnifiedTicker): string {
 interface RowProps {
   coin: UnifiedTicker
   isSelected: boolean
+  isOnPage: boolean
+  isNextOnPage: boolean
   onClick: (symbol: string) => void
+  onPrefetch: (symbol: string) => void
 }
 
-const Row = memo(function Row({ coin, isSelected, onClick }: RowProps) {
+const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage, onClick, onPrefetch }: RowProps) {
   const isUp = coin.change24h >= 0
+  const bg = isSelected
+    ? 'bg-white/[0.10]'
+    : isOnPage
+      ? 'bg-white/[0.06]'
+      : 'hover:bg-white/[0.02]'
+  const borderL = isSelected
+    ? 'border-l-2 border-l-white'
+    : 'border-l-2 border-l-transparent'
+  const borderB = isOnPage && isNextOnPage
+    ? 'border-b border-white/[0.06]'
+    : 'border-b border-[#111]'
   return (
     <div
-      className={`grid cursor-pointer border-b border-[#111] transition-colors duration-100 ${
-        isSelected ? 'bg-white/[0.04]' : 'hover:bg-white/[0.02]'
-      } ${isSelected ? 'border-l-2 border-l-white' : 'border-l-2 border-l-transparent'}`}
+      className={`grid cursor-pointer transition-colors duration-100 ${bg} ${borderL} ${borderB}`}
       style={{ gridTemplateColumns: '80px 72px 72px 72px 80px', height: '32px', fontFamily: "'JetBrains Mono', monospace" }}
+      onMouseDown={() => onPrefetch(coin.symbol)}
       onClick={() => onClick(coin.symbol)}
     >
       <div className={`flex items-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
@@ -84,18 +98,39 @@ export function CoinList() {
   const selectedSymbol = useCoinListStore(s => s.selectedSymbol)
   const setSort = useCoinListStore(s => s.setSort)
   const expandChart = useCoinListStore(s => s.expandChart)
+  const topChartSymbols = useCoinListStore(s => s.topChartSymbols)
+  const pageIndex = useCoinListStore(s => s.pageIndex)
+  const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
+  const tf = useCoinListStore(s => s.activeTimeframe)
+  const virtuosoRef = useRef<VirtuosoHandle>(null)
+
+  const onPrefetch = useCallback((symbol: string) => prefetchHistory(symbol, tf), [tf])
+
+  const pageSet = useMemo(() => new Set(topChartSymbols), [topChartSymbols])
+  const highlightActive = expandedSymbol === null
+
+  useEffect(() => {
+    if (sortedCoins.length === 0) return
+    virtuosoRef.current?.scrollToIndex({ index: pageIndex * 9, align: 'start', behavior: 'smooth' })
+  }, [pageIndex, sortedCoins.length])
 
   const rowRenderer = useCallback((index: number) => {
     const coin = sortedCoins[index]
+    const onPage = highlightActive && pageSet.has(coin.symbol)
+    const nextCoin = sortedCoins[index + 1]
+    const nextOnPage = highlightActive && !!nextCoin && pageSet.has(nextCoin.symbol)
     return (
       <Row
         key={coin.symbol}
         coin={coin}
         isSelected={selectedSymbol === coin.symbol}
+        isOnPage={onPage}
+        isNextOnPage={nextOnPage}
         onClick={expandChart}
+        onPrefetch={onPrefetch}
       />
     )
-  }, [sortedCoins, selectedSymbol, expandChart])
+  }, [sortedCoins, selectedSymbol, expandChart, pageSet, highlightActive, onPrefetch])
 
   return (
     <div className="w-[400px] h-full flex flex-col bg-[#0a0a0a]">
@@ -124,6 +159,7 @@ export function CoinList() {
 
       <div className="flex-1 min-h-0">
         <Virtuoso
+          ref={virtuosoRef}
           totalCount={sortedCoins.length}
           itemContent={rowRenderer}
           style={{ height: '100%' }}
