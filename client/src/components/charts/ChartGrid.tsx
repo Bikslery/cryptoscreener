@@ -61,74 +61,6 @@ function useInitialCandlesPush() {
   }, [])
 }
 
-function useCandles(
-  symbol: string,
-  tf: Timeframe,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
-  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  chartRef: React.RefObject<IChartApi | null>,
-  destroyedRef: React.RefObject<boolean>,
-  limit = 300,
-  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
-) {
-  useEffect(() => {
-    if (!candleRef.current || !volumeRef.current || destroyedRef.current) return
-
-    candleRef.current.setData([])
-    volumeRef.current.setData([])
-    if (candlesDataRef) candlesDataRef.current = []
-
-    // Cache-first: if client cache has candles, render instantly
-    const cached = candleCache.getCandles(symbol, tf)
-    if (cached && cached.length > 0) {
-      if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
-      if (candlesDataRef) candlesDataRef.current = cached
-      const slice = cached.slice(-limit)
-      const candleData = slice.map(c => ({
-        time: c.time as Time,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      }))
-      const volumeData = slice.map(c => ({
-        time: c.time as Time,
-        value: c.volume,
-        color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
-      }))
-      candleRef.current.setData(candleData)
-      volumeRef.current.setData(volumeData)
-      chartRef.current?.timeScale().fitContent()
-      return  // Data loaded from cache — no REST request needed
-    }
-
-    // No cache — fetch from server (which also uses its cache)
-    api.get(`/coins/${symbol}/candles`, { params: { tf, limit } })
-      .then(res => {
-        if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
-        const candles = res.data as UnifiedCandle[]
-        if (candlesDataRef) candlesDataRef.current = candles
-        candleCache.setCandles(symbol, tf, candles)
-        const candleData = candles.map(c => ({
-          time: c.time as Time,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        }))
-        const volumeData = candles.map(c => ({
-          time: c.time as Time,
-          value: c.volume,
-          color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
-        }))
-        candleRef.current.setData(candleData)
-        volumeRef.current.setData(volumeData)
-        chartRef.current?.timeScale().fitContent()
-      })
-      .catch(() => {})
-  }, [symbol, tf])
-}
-
 function useFullHistory(
   symbol: string,
   tf: Timeframe,
@@ -137,7 +69,10 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  options?: { limit?: number; enableBackfill?: boolean },
 ): { isInitialLoading: boolean } {
+  const limit = options?.limit ?? 1500
+  const enableBackfill = options?.enableBackfill ?? true
   const [isInitialLoading, setIsInitialLoading] = useState(true)
 
   useEffect(() => {
@@ -163,14 +98,14 @@ function useFullHistory(
     }
 
     const run = async () => {
-      candleRef.current?.setData([])
-      volumeRef.current?.setData([])
-      candlesDataRef.current = []
-
       let candles: UnifiedCandle[] | undefined = candleCache.getCandles(symbol, tf)
-      if (!candles || candles.length === 0) {
+      const hadCache = !!(candles && candles.length > 0)
+      if (!hadCache) {
+        candleRef.current?.setData([])
+        volumeRef.current?.setData([])
+        candlesDataRef.current = []
         try {
-          const res = await api.get(`/coins/${symbol}/candles`, { params: { tf, limit: 1500 } })
+          const res = await api.get(`/coins/${symbol}/candles`, { params: { tf, limit } })
           if (cancelled.value || destroyedRef.current) return
           candles = res.data as UnifiedCandle[]
           if (candles.length > 0) candleCache.setCandles(symbol, tf, candles)
@@ -186,6 +121,11 @@ function useFullHistory(
       if (cancelled.value || destroyedRef.current) return
 
       renderCandles(candles, true)
+      setIsInitialLoading(false)
+
+      if (!enableBackfill) {
+        return
+      }
 
       const tfMs = (TF_SECONDS[tf] || 60) * 1000
       const oldestTimeMs = candles[0].time * 1000
@@ -266,10 +206,6 @@ function useFullHistory(
             renderCandles(cached, false)
           }
           lastRenderAt = now
-        }
-
-        if (isFirstChunk) {
-          setIsInitialLoading(false)
         }
 
         if (okCount > 0 && nonEmptyOkInChunk === 0) {
@@ -550,7 +486,7 @@ const MiniChart = memo(function MiniChart({
   const candlesDataRef = useRef<UnifiedCandle[]>([])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-  const { isInitialLoading } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef)
+  const { isInitialLoading } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300, enableBackfill: false })
 
   useEffect(() => {
     if (!animate) {
@@ -635,7 +571,6 @@ const MiniChart = memo(function MiniChart({
   }, [symbol, tf, pricePrecision])
 
   useWsCandle(symbol, tf, flush, destroyedRef)
-  useWsTrade(symbol, tf, flush, destroyedRef)
 
   return (
     <div
@@ -1179,6 +1114,7 @@ export function ChartGrid() {
   const topSymbols = useCoinListStore(s => s.topChartSymbols)
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const expandChart = useCoinListStore(s => s.expandChart)
+  const tf = useCoinListStore(s => s.activeTimeframe)
   const [visibleCount, setVisibleCount] = useState(0)
   const [loadedSet, setLoadedSet] = useState<Set<string>>(() => new Set())
 
@@ -1188,6 +1124,10 @@ export function ChartGrid() {
     setVisibleCount(0)
     setLoadedSet(new Set())
   }, [topSymbols])
+
+  useEffect(() => {
+    setLoadedSet(new Set())
+  }, [tf])
 
   useEffect(() => {
     if (visibleCount >= topSymbols.length) return

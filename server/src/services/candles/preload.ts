@@ -2,8 +2,9 @@ import type { ExchangeAdapter } from '../exchanges/types.js'
 import { setCachedCandlesFromRest, getCachedCandles } from './candle-cache.js'
 import { getTickers } from '../aggregator/index.js'
 
-export const PRELOAD_TFS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d', '1w'] as const
-const TOP_SYMBOLS_COUNT = 50
+export const PRELOAD_TFS = ['5m', '15m', '1h'] as const
+export const INITIAL_CANDLES_TF = '5m'
+const TOP_SYMBOLS_COUNT = 20
 const P1_CONCURRENCY = 5
 const RATE_LIMIT_MS = 100
 const PERIODIC_REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes

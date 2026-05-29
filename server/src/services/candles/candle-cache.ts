@@ -1,9 +1,6 @@
 import type { UnifiedCandle } from '../../types.js'
 
 const MAX_CANDLES_PER_KEY = 2000
-// Bumped from 500_000 -> 1_500_000. With preload of 50 symbols * 10 timeframes * up to 2000 candles,
-// theoretical max is 1M; we leave headroom so the LRU does not start evicting freshly-preloaded
-// top symbols during the very first minutes after startup (which caused empty initial-candles).
 const MAX_TOTAL_CANDLES = 1_500_000
 
 class LRU {
@@ -139,22 +136,26 @@ const key = `${candle.symbol}:${candle.timeframe}`
 const arr = cache.get(key)
 if (!arr) return
 
-const lastIdx = arr.length - 1
-if (lastIdx >= 0 && arr[lastIdx].time === candle.time) {
-  arr[lastIdx] = candle
-  return
-}
-if (lastIdx >= 0 && candle.time > arr[lastIdx].time) {
-  arr.push(candle)
-  totalCandleCount++
-  if (arr.length > MAX_CANDLES_PER_KEY) { arr.shift(); totalCandleCount-- }
-  lru.touch(key)
-  return
-}
-const idx = arr.findIndex(c => c.time === candle.time)
-if (idx !== -1) {
-  arr[idx] = candle
-}
+  const lastIdx = arr.length - 1
+  if (lastIdx >= 0 && arr[lastIdx].time === candle.time) {
+    arr[lastIdx] = candle
+    return
+  }
+  if (lastIdx >= 0 && candle.time > arr[lastIdx].time) {
+    arr.push(candle)
+    totalCandleCount++
+    if (arr.length > MAX_CANDLES_PER_KEY + 200) {
+      const excess = arr.length - MAX_CANDLES_PER_KEY
+      arr.splice(0, excess)
+      totalCandleCount -= excess
+    }
+    lru.touch(key)
+    return
+  }
+  const idx = arr.findIndex(c => c.time === candle.time)
+  if (idx !== -1) {
+    arr[idx] = candle
+  }
 }
 
 export function isRestCached(symbol: string, tf: string): boolean {

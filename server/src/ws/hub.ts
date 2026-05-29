@@ -3,7 +3,7 @@ import { verifyToken, type JwtPayload } from '../middleware/auth.js'
 import type { WsMessage } from '../types.js'
 import { getTopCachedSymbols, getCachedCandles } from '../services/candles/candle-cache.js'
 import { getTickers } from '../services/aggregator/index.js'
-import { PRELOAD_TFS } from '../services/candles/preload.js'
+import { INITIAL_CANDLES_TF } from '../services/candles/preload.js'
 
 interface Client {
   ws: WebSocket
@@ -31,9 +31,10 @@ function flushBatchBuffer() {
   if (wsBatchBuffer.size === 0) return
   for (const [channel, data] of wsBatchBuffer) {
     const msg: WsMessage = { type: channel as any, channel, data }
-    const raw = JSON.stringify(msg)
-    for (const [, client] of clients) {
+    let raw: string | null = null
+    for (const client of clients.values()) {
       if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
+        if (raw === null) raw = JSON.stringify(msg)
         client.ws.send(raw)
       }
     }
@@ -41,7 +42,14 @@ function flushBatchBuffer() {
   wsBatchBuffer.clear()
 }
 
-const batchTimer = setInterval(flushBatchBuffer, 100)
+let batchTimer: ReturnType<typeof setInterval> | null = setInterval(flushBatchBuffer, 100)
+
+export function stopWsHub() {
+  if (batchTimer) {
+    clearInterval(batchTimer)
+    batchTimer = null
+  }
+}
 
 function parseCandleChannel(channel: string): { symbol: string; tf: string } | null {
   const match = channel.match(/^candle:([^:]+):(.+)$/)
@@ -55,16 +63,16 @@ function parseDepthChannel(channel: string): string | null {
   return match[1]
 }
 
+const INITIAL_CANDLES_LIMIT = 300
+
 function buildInitialCandlesData(): Record<string, any[]> {
-  // Get top-9 symbols: prefer cache-based, fallback to ticker-based
-  let topSymbols = getTopCachedSymbols('5m', 9)
+  let topSymbols = getTopCachedSymbols(INITIAL_CANDLES_TF, 9)
   if (topSymbols.length < 9) {
     const tickers = getTickers()
     const tickerTop = tickers
       .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
       .slice(0, 9)
       .map(t => t.symbol)
-    // Merge: cache-based first, then fill with ticker-based
     const combined = [...topSymbols]
     for (const s of tickerTop) {
       if (!combined.includes(s) && combined.length < 9) combined.push(s)
@@ -74,11 +82,9 @@ function buildInitialCandlesData(): Record<string, any[]> {
 
   const result: Record<string, any[]> = {}
   for (const symbol of topSymbols) {
-    for (const tf of PRELOAD_TFS) {
-      const cached = getCachedCandles(symbol, tf)
-      if (cached && cached.length > 0) {
-        result[`${symbol}:${tf}`] = cached.slice(-1000)
-      }
+    const cached = getCachedCandles(symbol, INITIAL_CANDLES_TF)
+    if (cached && cached.length > 0) {
+      result[`${symbol}:${INITIAL_CANDLES_TF}`] = cached.slice(-INITIAL_CANDLES_LIMIT)
     }
   }
   return result
@@ -159,11 +165,11 @@ export function setupWsHub(wss: WebSocketServer) {
 export function broadcast(msg: WsMessage) {
   const raw = JSON.stringify(msg)
   const channel = msg.channel || msg.type
-  for (const [, client] of clients) {
-    if (client.subscriptions.has(channel) || msg.type === 'ticker' || msg.type === 'alert' || msg.type === 'listing') {
-      if (client.ws.readyState === WebSocket.OPEN) {
-        client.ws.send(raw)
-      }
+  const isGlobal = msg.type === 'ticker' || msg.type === 'alert' || msg.type === 'listing'
+  for (const client of clients.values()) {
+    if (client.ws.readyState !== WebSocket.OPEN) continue
+    if (isGlobal || client.subscriptions.has(channel)) {
+      client.ws.send(raw)
     }
   }
 }
