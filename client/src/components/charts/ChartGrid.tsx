@@ -486,21 +486,6 @@ const MiniChart = memo(function MiniChart({
   const candlesDataRef = useRef<UnifiedCandle[]>([])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-  const { isInitialLoading } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300, enableBackfill: false })
-
-  useEffect(() => {
-    if (!animate) {
-      setLoaded(true)
-      if (onLoaded) onLoaded(symbol)
-      return
-    }
-    if (isInitialLoading) {
-      setLoaded(false)
-    } else {
-      setLoaded(true)
-      if (onLoaded) onLoaded(symbol)
-    }
-  }, [isInitialLoading, symbol, onLoaded, animate])
 
   useEffect(() => {
     destroyedRef.current = false
@@ -569,6 +554,22 @@ const MiniChart = memo(function MiniChart({
       volumeRef.current = null
     }
   }, [symbol, tf, pricePrecision])
+
+  const { isInitialLoading } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300, enableBackfill: false })
+
+  useEffect(() => {
+    if (!animate) {
+      setLoaded(true)
+      if (onLoaded) onLoaded(symbol)
+      return
+    }
+    if (isInitialLoading) {
+      setLoaded(false)
+    } else {
+      setLoaded(true)
+      if (onLoaded) onLoaded(symbol)
+    }
+  }, [isInitialLoading, symbol, onLoaded, animate])
 
   useWsCandle(symbol, tf, flush, destroyedRef)
 
