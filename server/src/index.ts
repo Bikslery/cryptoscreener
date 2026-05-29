@@ -20,8 +20,12 @@ const PORT = parseInt(process.env.PORT || '3001')
 const ROLE = process.env.ROLE || 'all'
 
 async function main() {
-  await prisma.$connect()
-  console.log('Database connected')
+  try {
+    await prisma.$connect()
+    console.log('Database connected')
+  } catch (e) {
+    console.warn('Database unavailable, running without persistence:', e instanceof Error ? e.message : e)
+  }
 
   const app = express()
   app.use(cors())

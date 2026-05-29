@@ -4,7 +4,7 @@ import { BinanceFuturesAdapter } from '../exchanges/binance-futures.js'
 import type { ExchangeAdapter } from '../exchanges/types.js'
 import { broadcast, broadcastToChannel } from '../../ws/hub.js'
 import { updateCachedCandle, getCachedCandles } from '../candles/candle-cache.js'
-import { getRedisPub, getRedisData } from '../../redis.js'
+import { getRedisPub, getRedisData, REDIS_ENABLED } from '../../redis.js'
 
 export const adapters: ExchangeAdapter[] = [
   new BinanceSpotAdapter(),
@@ -86,7 +86,7 @@ export function startAggregator() {
         const best = getBestMap()
         const arr = Array.from(best.values())
 
-        if (isIngestion) {
+        if (isIngestion && REDIS_ENABLED) {
           try {
             const redis = getRedisPub()
             redis.publish('tickers', JSON.stringify(arr)).catch(() => {})
@@ -109,7 +109,7 @@ export function startAggregator() {
 
     adapter.onCandle((candle) => {
       updateCachedCandle(candle)
-      if (isIngestion) {
+      if (isIngestion && REDIS_ENABLED) {
         try {
           const redis = getRedisPub()
           redis.publish('candles', JSON.stringify(candle)).catch(() => {})
@@ -121,7 +121,7 @@ export function startAggregator() {
     })
 
     adapter.onDepth((depth) => {
-      if (isIngestion) {
+      if (isIngestion && REDIS_ENABLED) {
         try {
           const redis = getRedisPub()
           redis.publish('depth', JSON.stringify(depth)).catch(() => {})

@@ -1,20 +1,26 @@
 import Redis from 'ioredis'
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379'
+const ROLE = process.env.ROLE || 'all'
+export const REDIS_ENABLED = ROLE === 'ingestion' || ROLE === 'broadcast'
 
 let _pub: Redis | null = null
 let _sub: Redis | null = null
 let _data: Redis | null = null
 
 function createClient(): Redis {
-  return new Redis(REDIS_URL, {
+  const client = new Redis(REDIS_URL, {
     maxRetriesPerRequest: 3,
     retryStrategy(times) {
-      const delay = Math.min(times * 500, 5000)
-      return delay
+      if (times > 10) return null
+      return Math.min(times * 500, 5000)
     },
     lazyConnect: true,
   })
+  client.on('error', (err) => {
+    if (REDIS_ENABLED) console.warn('[Redis] Connection error:', err.message)
+  })
+  return client
 }
 
 export function getRedisPub(): Redis {
