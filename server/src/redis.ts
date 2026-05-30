@@ -2,7 +2,7 @@ import Redis from 'ioredis'
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379'
 const ROLE = process.env.ROLE || 'all'
-export const REDIS_ENABLED = ROLE === 'ingestion' || ROLE === 'broadcast'
+export const REDIS_ENABLED = ROLE === 'ingestion' || ROLE === 'broadcast' || ROLE === 'all'
 
 let _pub: Redis | null = null
 let _sub: Redis | null = null

@@ -4,11 +4,11 @@ import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore, useLivePrice } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
-import api from '../../services/api'
 import type { Timeframe, UnifiedCandle } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
+import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk } from '../../services/candle-prefetch'
 import { useDrawings, type DrawingTool } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
 
@@ -20,16 +20,6 @@ const TF_SECONDS: Record<string, number> = {
   '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
 }
 function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
-
-function ChartLoadingOverlay({ label }: { label: string }) {
-  return (
-    <div className="chart-loading-overlay absolute inset-0 z-30 flex items-center justify-center pointer-events-none backdrop-blur-[5px]">
-      <span className="chart-loading-text text-[18px] font-semibold text-[#e8e8e8] tracking-wide">
-        {label}<span className="chart-loading-dots" aria-hidden="true" />
-      </span>
-    </div>
-  )
-}
 
 function ChartMessageOverlay({ label, tone = 'muted' }: { label: string; tone?: 'muted' | 'error' }) {
   return (
@@ -45,30 +35,14 @@ function ChartMessageOverlay({ label, tone = 'muted' }: { label: string; tone?: 
   )
 }
 
-const BATCH_SIZE = 1000
-const BACKFILL_CONCURRENCY = 5
-const BACKFILL_DELAY_MS = 50
-const RETRY_CONCURRENCY = 2
-const RETRY_DELAY_MS = 300
-const MAX_RETRIES = 2
-const LISTING_EPOCH_MS = 1262304000000
-const MAX_EMPTY_CHUNKS_IN_A_ROW = 2
-const MAX_BACKFILL_CANDLES = 50000
-const INTERIM_FLUSH_CANDLES = 15000
-
-type BatchResult = { ok: boolean; candles: UnifiedCandle[] }
-
-function exchangeBadge(ex: string): string {
-  if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
-  if (ex.includes('binance') && ex.includes('spot')) return 'BI-S'
-  if (ex.includes('bybit')) return 'BY-F'
-  if (ex.includes('okx') && ex.includes('futures')) return 'OK-F'
-  if (ex.includes('okx') && ex.includes('spot')) return 'OK-S'
-  return 'EX'
+function ChartCornerSpinner() {
+  return (
+    <div className="absolute top-[8px] right-[8px] z-30 pointer-events-none">
+      <div className="w-[14px] h-[14px] border-2 border-[#555] border-t-[#ccc] rounded-full animate-spin" />
+    </div>
+  )
 }
 
-// Receive WS initial-candles push ONCE and store in client cache
-// Reset on reconnect so server can push fresh data after reconnection
 let initialPushReceived = false
 
 function useInitialCandlesPush() {
@@ -95,20 +69,18 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  options?: { limit?: number; enableBackfill?: boolean },
+  options?: { limit?: number },
 ): { isInitialLoading: boolean; status: 'loading' | 'ready' | 'empty' | 'error' } {
-  const limit = options?.limit ?? 5000
-  const enableBackfill = options?.enableBackfill ?? true
+  const limit = options?.limit ?? 1000
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading')
 
   useEffect(() => {
     const cancelled = { value: false }
-    const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
     setIsInitialLoading(true)
     setStatus('loading')
 
-    const renderCandles = (candles: UnifiedCandle[], fitContent: boolean) => {
+    const renderCandles = (candles: UnifiedCandle[]) => {
       if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
       candlesDataRef.current = candles
       const candleData = candles.map(c => ({
@@ -119,210 +91,204 @@ function useFullHistory(
         color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
       }))
       try {
-        if (fitContent && candleData.length > 500) {
-          candleRef.current.setData(candleData.slice(-500))
-          volumeRef.current.setData(volumeData.slice(-500))
-          chartRef.current?.timeScale().fitContent()
-          candleRef.current.setData(candleData)
-          volumeRef.current.setData(volumeData)
-        } else {
-          candleRef.current.setData(candleData)
-          volumeRef.current.setData(volumeData)
-          if (fitContent) chartRef.current?.timeScale().fitContent()
+        candleRef.current.setData(candleData)
+        volumeRef.current.setData(volumeData)
+        const ts = chartRef.current?.timeScale()
+        if (ts && candleData.length > 0) {
+          const lastBar = candleData.length - 1
+          const visibleBars = 150
+          ts.setVisibleLogicalRange({ from: lastBar - visibleBars, to: lastBar + 5 })
         }
       } catch {}
     }
 
     const run = async () => {
-      let candles: UnifiedCandle[] | undefined = candleCache.getCandles(symbol, tf)
-      const hadCache = !!(candles && candles.length > 0)
-
-      if (hadCache && candles!.length > 0) {
-        renderCandles(candles!, true)
-        setIsInitialLoading(false)
-        setStatus('ready')
-      }
-
-      if (!hadCache || candles!.length < limit) {
-        try {
-          const res = await api.get(`/coins/${symbol}/candles`, { params: { tf, limit } })
-          if (cancelled.value || destroyedRef.current) return
-          const fetched = res.data as UnifiedCandle[]
-          if (fetched.length > 0) {
-            candleCache.setCandles(symbol, tf, fetched)
-            candles = fetched
-          }
-        } catch {
-          if (!hadCache) {
-            setIsInitialLoading(false)
-            setStatus('error')
-            return
-          }
-        }
-      }
-
-      if (!candles || candles.length === 0) {
-        setIsInitialLoading(false)
-        setStatus('empty')
-        return
-      }
-      if (cancelled.value || destroyedRef.current) return
-
-      if (!hadCache) {
-        renderCandles(candles, true)
-        setIsInitialLoading(false)
-        setStatus('ready')
-      } else {
-        const cached = candleCache.getCandles(symbol, tf)
-        if (cached && cached !== candles) {
-          renderCandles(cached, false)
-        }
-      }
-
-      if (!enableBackfill) {
-        setStatus('ready')
-        return
-      }
-
-      const tfMs = (TF_SECONDS[tf] || 60) * 1000
-      const oldestTimeMs = candles[0].time * 1000
-      const batchSpanMs = BATCH_SIZE * tfMs
-      const maxBatches = Math.ceil(MAX_BACKFILL_CANDLES / BATCH_SIZE)
-
-      const batches: { startMs: number; endMs: number }[] = []
-      for (let endMs = oldestTimeMs; endMs > LISTING_EPOCH_MS; endMs -= batchSpanMs) {
-        const startMs = endMs - batchSpanMs
-        batches.push({ startMs: Math.max(startMs, LISTING_EPOCH_MS), endMs })
-      }
-      batches.length = Math.min(batches.length, maxBatches)
-      if (batches.length === 0) {
+      // Fast path: check client cache
+      const cached = candleCache.getCandles(symbol, tf)
+      if (cached && cached.length > 0) {
+        renderCandles(cached)
         setIsInitialLoading(false)
         setStatus('ready')
         return
       }
 
-      await delay(0)
-      if (cancelled.value || destroyedRef.current) return
-
-      let consecutiveEmptyChunks = 0
-      const failed: { startMs: number; endMs: number }[] = []
-      const collected: UnifiedCandle[] = []
-
-      const flushCollected = () => {
-        if (cancelled.value || destroyedRef.current || collected.length === 0) return
-        candleCache.prependCandles(symbol, tf, collected)
-        collected.length = 0
-        const cached = candleCache.getCandles(symbol, tf)
-        if (cached && cached.length > 0) renderCandles(cached, false)
-      }
-
-      const fetchBatch = async (b: { startMs: number; endMs: number }): Promise<BatchResult> => {
-        try {
-          const res = await api.get(`/coins/${symbol}/candles`, {
-            params: { tf, limit: BATCH_SIZE, startTime: b.startMs, endTime: b.endMs },
-          })
-          return { ok: true, candles: res.data as UnifiedCandle[] }
-        } catch {
-          return { ok: false, candles: [] }
-        }
-      }
-
-      for (let i = 0; i < batches.length; i += BACKFILL_CONCURRENCY) {
+      // Fallback: individual fetch (server does seamless stitching)
+      try {
+        const fetched = await getOrFetchHistory(symbol, tf, limit)
         if (cancelled.value || destroyedRef.current) return
-        const chunk = batches.slice(i, i + BACKFILL_CONCURRENCY)
-
-        const chunkFailed: { startMs: number; endMs: number }[] = []
-        const results = await Promise.all(
-          chunk.map(async (b): Promise<BatchResult> => {
-            const r = await fetchBatch(b)
-            if (!r.ok) chunkFailed.push(b)
-            return r
-          })
-        )
-
-        if (cancelled.value || destroyedRef.current) return
-
-        failed.push(...chunkFailed)
-        let nonEmptyOkInChunk = 0
-        let okCount = 0
-        for (const r of results) {
-          if (!r.ok) continue
-          okCount++
-          if (r.candles.length > 0) {
-            nonEmptyOkInChunk++
-            collected.push(...r.candles)
-          }
+        if (fetched.length > 0) {
+          renderCandles(fetched)
+          setIsInitialLoading(false)
+          setStatus('ready')
+        } else {
+          setIsInitialLoading(false)
+          setStatus('empty')
         }
-
-        if (okCount > 0 && nonEmptyOkInChunk === 0) {
-          consecutiveEmptyChunks++
-          if (consecutiveEmptyChunks >= MAX_EMPTY_CHUNKS_IN_A_ROW) break
-        } else if (nonEmptyOkInChunk > 0) {
-          consecutiveEmptyChunks = 0
-        }
-
-        if (collected.length >= INTERIM_FLUSH_CANDLES) flushCollected()
-
-        if (i + BACKFILL_CONCURRENCY < batches.length) {
-          await delay(BACKFILL_DELAY_MS)
-        }
+      } catch {
+        setIsInitialLoading(false)
+        setStatus('error')
       }
-
-      // Retry failed batches
-      let retryBatch = failed.splice(0)
-      for (let attempt = 1; attempt <= MAX_RETRIES && retryBatch.length > 0; attempt++) {
-        if (cancelled.value || destroyedRef.current) return
-        const stillFailed: { startMs: number; endMs: number }[] = []
-
-        for (let i = 0; i < retryBatch.length; i += RETRY_CONCURRENCY) {
-          if (cancelled.value || destroyedRef.current) return
-          const chunk = retryBatch.slice(i, i + RETRY_CONCURRENCY)
-
-          const chunkFailed: { startMs: number; endMs: number }[] = []
-          const results = await Promise.all(
-            chunk.map(async (b): Promise<BatchResult> => {
-              const r = await fetchBatch(b)
-              if (!r.ok) chunkFailed.push(b)
-              return r
-            })
-          )
-
-          stillFailed.push(...chunkFailed)
-          for (const r of results) {
-            if (r.ok && r.candles.length > 0) {
-              collected.push(...r.candles)
-            }
-          }
-
-          if (i + RETRY_CONCURRENCY < retryBatch.length) {
-            await delay(RETRY_DELAY_MS)
-          }
-        }
-
-        retryBatch = stillFailed
-        if (retryBatch.length > 0) await delay(RETRY_DELAY_MS * attempt)
-      }
-
-      // Single flush for remaining collected candles
-      if (!cancelled.value && !destroyedRef.current) {
-        flushCollected()
-      }
-      setStatus('ready')
     }
 
     run()
-
-    return () => {
-      cancelled.value = true
-    }
+    return () => { cancelled.value = true }
   }, [symbol, tf])
 
   return { isInitialLoading, status }
 }
 
-// RAF-throttled candle/volume updates: only the latest pending payload per frame
-// is flushed to lightweight-charts. Avoids saturating React/main thread when
-// WS bursts at 50–100 msg/s.
+function useLazyScroll(
+  symbol: string,
+  tf: Timeframe,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  chartRef: React.RefObject<IChartApi | null>,
+  destroyedRef: React.RefObject<boolean>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  isInitialLoading: boolean,
+  setIsLoadingMore?: (loading: boolean) => void,
+) {
+  const adjustingRef = useRef(false)
+  const inflightRef = useRef(false)
+  const reachedStartRef = useRef(false)
+  const symbolRef = useRef(symbol)
+  const tfRef = useRef(tf)
+  const emptyCountRef = useRef(0)
+
+  useEffect(() => {
+    symbolRef.current = symbol
+    tfRef.current = tf
+    reachedStartRef.current = false
+    inflightRef.current = false
+    adjustingRef.current = false
+    emptyCountRef.current = 0
+  }, [symbol, tf])
+
+  useEffect(() => {
+    if (isInitialLoading) return
+    const chart = chartRef.current
+    if (!chart) return
+
+    const ts = chart.timeScale()
+
+    const onRange = (range: { from: number; to: number } | null) => {
+      if (!range || adjustingRef.current || inflightRef.current || reachedStartRef.current) return
+
+      // Dynamic threshold: start loading when approaching edge
+      // Use 30% of visible range or minimum 100 bars (whichever is larger)
+      const visibleBars = range.to - range.from
+      const threshold = Math.max(100, visibleBars * 0.3)
+
+      if (range.from > threshold) return
+
+      const curSymbol = symbolRef.current
+      const curTf = tfRef.current
+
+      inflightRef.current = true
+      setIsLoadingMore?.(true)
+
+      const cached = candleCache.getCandles(curSymbol, curTf)
+      if (!cached || cached.length === 0) {
+        inflightRef.current = false
+        setIsLoadingMore?.(false)
+        return
+      }
+
+      const before = cached[0].time
+
+      getOrFetchOlder(curSymbol, curTf, before, 1000)
+        .then(older => {
+          if (destroyedRef.current) {
+            inflightRef.current = false
+            setIsLoadingMore?.(false)
+            return
+          }
+
+          // Filter out candles we already have (time >= before)
+          const newCandles = older.filter(c => c.time < before)
+
+          if (newCandles.length === 0) {
+            emptyCountRef.current++
+            if (emptyCountRef.current >= 3) {
+              reachedStartRef.current = true
+            }
+            inflightRef.current = false
+            setIsLoadingMore?.(false)
+            return
+          }
+
+          // Got new data — reset empty counter
+          emptyCountRef.current = 0
+
+          candleCache.prependCandles(curSymbol, curTf, newCandles)
+          const merged = candleCache.getCandles(curSymbol, curTf)
+          if (!merged || merged.length === 0) {
+            inflightRef.current = false
+            setIsLoadingMore?.(false)
+            return
+          }
+
+          const chart = chartRef.current
+          const ts = chart?.timeScale()
+          if (!chart || !ts) {
+            inflightRef.current = false
+            setIsLoadingMore?.(false)
+            return
+          }
+
+          const prevRange = ts.getVisibleLogicalRange()
+          const prevLen = candlesDataRef.current.length
+          candlesDataRef.current = merged
+          const added = merged.length - prevLen
+
+          if (added <= 0) {
+            inflightRef.current = false
+            setIsLoadingMore?.(false)
+            return
+          }
+
+          adjustingRef.current = true
+
+          const barSpacing = (ts.options() as any).barSpacing
+
+          try {
+            const candleData = merged.map(c => ({
+              time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+            }))
+            const volumeData = merged.map(c => ({
+              time: c.time as Time, value: c.volume,
+              color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
+            }))
+            candleRef.current?.setData(candleData)
+            volumeRef.current?.setData(volumeData)
+
+            if (barSpacing != null) {
+              ts.applyOptions({ barSpacing })
+            }
+
+            if (prevRange) {
+              ts.setVisibleLogicalRange({
+                from: prevRange.from + added,
+                to: prevRange.to + added,
+              })
+            }
+          } catch {}
+
+          adjustingRef.current = false
+          inflightRef.current = false
+          setIsLoadingMore?.(false)
+        })
+        .catch(() => {
+          inflightRef.current = false
+          setIsLoadingMore?.(false)
+        })
+    }
+
+    ts.subscribeVisibleLogicalRangeChange(onRange)
+    return () => { ts.unsubscribeVisibleLogicalRangeChange(onRange) }
+  }, [symbol, tf, isInitialLoading])
+}
+
 function useRafFlush(
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
@@ -384,7 +350,6 @@ function useWsCandle(
       if (destroyedRef.current) return
       const c = msg.data as UnifiedCandle
       if (!c) return
-      // Update client cache
       candleCache.updateCandle(symbol, tf, c)
       if (candlesDataRef && candlesDataRef.current) {
         const arr = candlesDataRef.current
@@ -462,7 +427,15 @@ function useWsTrade(
   }, [symbol, tf])
 }
 
-// Header is split out so price/flash updates never re-render the chart body.
+function exchangeBadge(ex: string): string {
+  if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
+  if (ex.includes('binance') && ex.includes('spot')) return 'BI-S'
+  if (ex.includes('bybit')) return 'BY-F'
+  if (ex.includes('okx') && ex.includes('futures')) return 'OK-F'
+  if (ex.includes('okx') && ex.includes('spot')) return 'OK-S'
+  return 'EX'
+}
+
 const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: string }) {
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
@@ -558,13 +531,14 @@ const MiniChart = memo(function MiniChart({
       upColor: UP_COLOR, downColor: DOWN_COLOR,
       borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
       wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+      priceLineVisible: false,
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
         minMove: Math.pow(10, -pricePrecision),
       },
     })
-    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
+    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', priceLineVisible: false })
     chart.priceScale('').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, textColor: '#666666' })
 
     chartRef.current = chart
@@ -603,7 +577,7 @@ const MiniChart = memo(function MiniChart({
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300, enableBackfill: false })
+  const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 })
 
   useEffect(() => {
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
@@ -654,7 +628,6 @@ function formatDuration(sec: number): string {
   return h % 24 ? `${d}d ${h % 24}h` : `${d}d`
 }
 
-// Header is split so live price ticks don't re-render the chart canvas.
 const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, activeTool }: { symbol: string; onBack: () => void; activeTool: DrawingTool | null }) {
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
@@ -732,17 +705,71 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
   )
 })
 
+function usePriceLine(
+  symbol: string,
+  priceLineRef: React.RefObject<any>,
+  prevPriceRef: React.RefObject<number | null>,
+  destroyedRef: React.RefObject<boolean>,
+) {
+  useEffect(() => {
+    prevPriceRef.current = null
+  }, [symbol])
+
+  useEffect(() => {
+    const channel = `candle:${symbol}:1m`
+    const tradeType = `trade:${symbol}`
+
+    const updateLine = (price: number) => {
+      if (destroyedRef.current || !priceLineRef.current || !isFinite(price) || price <= 0) return
+      const prev = prevPriceRef.current
+      const isUp = prev == null || price >= prev
+      prevPriceRef.current = price
+      try {
+        priceLineRef.current.applyOptions({
+          price,
+          color: isUp ? '#26a65b' : '#e74c3c',
+        })
+      } catch {}
+    }
+
+    const unsubCandle = wsOnChannel(channel, (msg) => {
+      const c = msg.data as UnifiedCandle
+      if (c?.close) updateLine(c.close)
+    })
+
+    const unsubTrade = wsOnType(tradeType, (msg) => {
+      const trade = msg.data as any
+      if (!trade?.price) return
+      const p = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
+      updateLine(p)
+    })
+
+    wsSubscribe(channel)
+    wsSubscribe(tradeType)
+
+    return () => {
+      unsubCandle()
+      unsubTrade()
+      wsUnsubscribe(channel)
+      wsUnsubscribe(tradeType)
+    }
+  }, [symbol])
+}
+
 function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const candlesDataRef = useRef<UnifiedCandle[]>([])
+  const priceLineRef = useRef<any>(null)
+  const prevPriceRef = useRef<number | null>(null)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const [selection, setSelection] = useState<RangeSelection | null>(null)
   const [chartVersion, setChartVersion] = useState(0)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
 
   const {
     activeTool,
@@ -783,18 +810,27 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       upColor: UP_COLOR, downColor: DOWN_COLOR,
       borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
       wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+      priceLineVisible: false,
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
         minMove: Math.pow(10, -pricePrecision),
       },
     })
-    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '' })
+    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', priceLineVisible: false })
     chart.priceScale('').applyOptions({ scaleMargins: { top: 0.9, bottom: 0 }, textColor: '#666666' })
 
     chartRef.current = chart
     candleRef.current = candleSeries
     volumeRef.current = volumeSeries
+    priceLineRef.current = candleSeries.createPriceLine({
+      price: 0,
+      color: '#26a65b',
+      lineStyle: 2, // Dashed
+      lineWidth: 1,
+      axisLabelVisible: true,
+      title: '',
+    })
     setChartVersion(v => v + 1)
 
     const ro = new ResizeObserver(() => {
@@ -826,13 +862,31 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       chartRef.current = null
       candleRef.current = null
       volumeRef.current = null
+      priceLineRef.current = null
+      prevPriceRef.current = null
     }
   }, [symbol, tf, pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
   const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
   useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
+  usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef)
   useWsTrade(symbol, tf, flush, destroyedRef)
+  useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, setIsLoadingMore)
+
+  // Set initial price line position from loaded data
+  useEffect(() => {
+    if (isInitialLoading || !priceLineRef.current) return
+    const candles = candlesDataRef.current
+    if (candles.length === 0) return
+    const lastClose = candles[candles.length - 1].close
+    if (isFinite(lastClose) && lastClose > 0) {
+      try {
+        priceLineRef.current.applyOptions({ price: lastClose, color: '#26a65b' })
+        prevPriceRef.current = lastClose
+      } catch {}
+    }
+  }, [isInitialLoading])
 
   useEffect(() => {
     setSelection(null)
@@ -1013,7 +1067,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
 
   const precision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
 
-  // Contextmenu handler for drawing removal via primitive hitTest
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -1037,12 +1090,17 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
       <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} />
       <div ref={containerRef} className="relative flex-1 min-h-0">
-        {isInitialLoading && (
-          <ChartLoadingOverlay label="График загружается" />
+        {isInitialLoading && <ChartCornerSpinner />}
+        {!isInitialLoading && isLoadingMore && (
+          <div className="absolute top-[8px] left-[8px] z-30 pointer-events-none">
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-[4px] bg-[#1a1a1a]/95 border border-[#2a2a2a] shadow-lg">
+              <div className="w-[12px] h-[12px] border-2 border-[#555] border-t-[#ccc] rounded-full animate-spin" />
+              <span className="text-[11px] text-[#aaa] font-medium">Загрузка истории...</span>
+            </div>
+          </div>
         )}
         {status === 'empty' && <ChartMessageOverlay label="Нет данных для этого таймфрейма" />}
         {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных. Попробуйте другой таймфрейм." tone="error" />}
-        {/* SVG overlay for preview line and pending point only */}
         {(pendingPointPixel || previewLine) && (
           <svg
             className="pointer-events-none absolute inset-0 z-20"
@@ -1073,7 +1131,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
           </svg>
         )}
 
-        {/* Drawing tools panel */}
         <DrawingToolsPanel
           activeTool={activeTool}
           setActiveTool={setActiveTool}
@@ -1082,7 +1139,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
           pendingPoint={pendingPoint}
         />
 
-        {/* Measure tool overlay */}
         {selection && Math.abs(selection.endX - selection.startX) > 2 && (
           <div className="pointer-events-none absolute inset-0 z-30">
             <div
@@ -1152,6 +1208,12 @@ export function ChartGrid() {
 
   useInitialCandlesPush()
 
+  // Bulk prefetch: fetch all top symbols in one request instead of 9 individual
+  useEffect(() => {
+    if (topSymbols.length === 0) return
+    getOrFetchBulk(topSymbols, tf, 300)
+  }, [topSymbols, tf])
+
   useEffect(() => {
     setLoadedSet(new Set())
   }, [topSymbols, tf])
@@ -1183,7 +1245,11 @@ export function ChartGrid() {
         ))}
 
         {showOverlay && (
-          <ChartLoadingOverlay label="Графики загружаются" />
+          <div className="chart-loading-overlay absolute inset-0 z-30 flex items-center justify-center pointer-events-none backdrop-blur-[5px]">
+            <span className="chart-loading-text text-[18px] font-semibold text-[#e8e8e8] tracking-wide">
+              Графики загружаются<span className="chart-loading-dots" aria-hidden="true" />
+            </span>
+          </div>
         )}
       </div>
     </div>

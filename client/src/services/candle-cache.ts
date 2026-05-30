@@ -1,11 +1,31 @@
 import type { UnifiedCandle } from '../types'
 
-const MAX_CANDLES_PER_KEY = 500000
+// Reasonable limit: ~5000 candles per symbol+tf pair keeps memory bounded
+// (5000 * 8 fields * 8 bytes ≈ 320KB per key max)
+const MAX_CANDLES_PER_KEY = 5000
+const MAX_TOTAL_CANDLES = 300_000
 
 const cache = new Map<string, UnifiedCandle[]>()
+const lruOrder: string[] = []  // most-recent at end
+let totalCandleCount = 0
 
 function key(symbol: string, tf: string): string {
   return `${symbol}:${tf}`
+}
+
+function touchLru(k: string) {
+  const idx = lruOrder.indexOf(k)
+  if (idx !== -1) lruOrder.splice(idx, 1)
+  lruOrder.push(k)
+}
+
+function evictIfNeeded() {
+  while (totalCandleCount > MAX_TOTAL_CANDLES && lruOrder.length > 0) {
+    const oldest = lruOrder.shift()!
+    const arr = cache.get(oldest)
+    if (arr) totalCandleCount -= arr.length
+    cache.delete(oldest)
+  }
 }
 
 function dedupSort(candles: UnifiedCandle[]): UnifiedCandle[] {
@@ -15,31 +35,53 @@ function dedupSort(candles: UnifiedCandle[]): UnifiedCandle[] {
   return Array.from(byTime.values()).sort((a, b) => a.time - b.time)
 }
 
+function trimToLimit(candles: UnifiedCandle[]): UnifiedCandle[] {
+  return candles.length > MAX_CANDLES_PER_KEY
+    ? candles.slice(-MAX_CANDLES_PER_KEY)
+    : candles
+}
+
 export function getCandles(symbol: string, tf: string): UnifiedCandle[] | undefined {
-  return cache.get(key(symbol, tf))
+  const k = key(symbol, tf)
+  const data = cache.get(k)
+  if (data) touchLru(k)
+  return data
 }
 
 export function setCandles(symbol: string, tf: string, candles: UnifiedCandle[]): void {
   const k = key(symbol, tf)
   const existing = cache.get(k)
-  if (!existing) {
+  if (existing) {
+    totalCandleCount -= existing.length
+    const merged = dedupSort([...existing, ...candles])
+    const trimmed = trimToLimit(merged)
+    cache.set(k, trimmed)
+    totalCandleCount += trimmed.length
+  } else {
     const deduped = dedupSort(candles)
-    cache.set(k, deduped.length > MAX_CANDLES_PER_KEY ? deduped.slice(-MAX_CANDLES_PER_KEY) : deduped)
-    return
+    const trimmed = trimToLimit(deduped)
+    cache.set(k, trimmed)
+    totalCandleCount += trimmed.length
   }
-  const merged = dedupSort([...existing, ...candles])
-  cache.set(k, merged.length > MAX_CANDLES_PER_KEY ? merged.slice(-MAX_CANDLES_PER_KEY) : merged)
+  touchLru(k)
+  evictIfNeeded()
 }
 
 export function prependCandles(symbol: string, tf: string, older: UnifiedCandle[]): void {
   if (older.length === 0) return
   const k = key(symbol, tf)
   const existing = cache.get(k) || []
+  totalCandleCount -= existing.length
+
   const byTime = new Map<number, UnifiedCandle>()
   for (const c of older) byTime.set(c.time, c)
   for (const c of existing) byTime.set(c.time, c)
   const merged = Array.from(byTime.values()).sort((a, b) => a.time - b.time)
-  cache.set(k, merged.length > MAX_CANDLES_PER_KEY ? merged.slice(-MAX_CANDLES_PER_KEY) : merged)
+  const trimmed = trimToLimit(merged)
+  cache.set(k, trimmed)
+  totalCandleCount += trimmed.length
+  touchLru(k)
+  evictIfNeeded()
 }
 
 export function updateCandle(symbol: string, tf: string, candle: UnifiedCandle): void {
@@ -51,7 +93,13 @@ export function updateCandle(symbol: string, tf: string, candle: UnifiedCandle):
     arr[arr.length - 1] = candle
   } else if (!last || candle.time > last.time) {
     arr.push(candle)
-    if (arr.length > MAX_CANDLES_PER_KEY) arr.shift()
+    totalCandleCount++
+    if (arr.length > MAX_CANDLES_PER_KEY + 200) {
+      const excess = arr.length - MAX_CANDLES_PER_KEY
+      arr.splice(0, excess)
+      totalCandleCount -= excess
+    }
+    touchLru(k)
   } else {
     const idx = arr.findIndex(c => c.time === candle.time)
     if (idx >= 0) arr[idx] = candle
@@ -61,8 +109,14 @@ export function updateCandle(symbol: string, tf: string, candle: UnifiedCandle):
 export function storeBulk(data: Record<string, UnifiedCandle[]>): void {
   for (const [k, candles] of Object.entries(data)) {
     const deduped = dedupSort(candles)
-    cache.set(k, deduped.length > MAX_CANDLES_PER_KEY ? deduped.slice(-MAX_CANDLES_PER_KEY) : deduped)
+    const trimmed = trimToLimit(deduped)
+    const existing = cache.get(k)
+    if (existing) totalCandleCount -= existing.length
+    cache.set(k, trimmed)
+    totalCandleCount += trimmed.length
+    touchLru(k)
   }
+  evictIfNeeded()
 }
 
 export function hasCandles(symbol: string, tf: string): boolean {
@@ -72,4 +126,6 @@ export function hasCandles(symbol: string, tf: string): boolean {
 
 export function clearAll(): void {
   cache.clear()
+  lruOrder.length = 0
+  totalCandleCount = 0
 }

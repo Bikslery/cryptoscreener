@@ -3,7 +3,7 @@ import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { useCoinListStore } from '../../store'
 import type { UnifiedTicker } from '../../types'
 import { formatCompact, extractBaseAsset } from '../../utils/format'
-import { prefetchHistory } from '../../services/candle-prefetch'
+import { getOrFetchHistory } from '../../services/candle-prefetch'
 
 type ColKey = keyof UnifiedTicker
 
@@ -104,7 +104,7 @@ export function CoinList() {
   const tf = useCoinListStore(s => s.activeTimeframe)
   const virtuosoRef = useRef<VirtuosoHandle>(null)
 
-  const onPrefetch = useCallback((symbol: string) => prefetchHistory(symbol, tf), [tf])
+  const onPrefetch = useCallback((symbol: string) => getOrFetchHistory(symbol, tf), [tf])
 
   const pageSet = useMemo(() => new Set(topChartSymbols), [topChartSymbols])
   const highlightActive = expandedSymbol === null

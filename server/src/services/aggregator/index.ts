@@ -219,17 +219,106 @@ export function setTickersFromRedis(tickers: UnifiedTicker[]) {
   cachedBest = null
 }
 
-export async function fetchCandles(symbol: string, tf: string, limit: number, exchange?: Exchange, startTime?: number, endTime?: number): Promise<UnifiedCandle[]> {
+function adaptersByPriority(): ExchangeAdapter[] {
+  return [...adapters].sort((a, b) =>
+    (EXCHANGE_PRIORITY[b.exchange] ?? 0) - (EXCHANGE_PRIORITY[a.exchange] ?? 0)
+  )
+}
+
+export async function fetchCandles(symbol: string, tf: string, limit: number, exchange?: Exchange, startTime?: number, endTime?: number, options?: import('../exchanges/types.js').FetchCandlesOptions): Promise<UnifiedCandle[]> {
   const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
-  const adapter = adapters.find(a => a.exchange === targetExchange)
-  if (!adapter) return []
-  try {
-    return await adapter.fetchCandles(symbol, tf, limit, startTime, endTime)
-  } catch {
-    const fallback = adapters.find(a => a.exchange !== targetExchange)
-    if (fallback) return await fallback.fetchCandles(symbol, tf, limit, startTime, endTime)
-    return []
+  // Try target first, then all others by priority
+  const ordered = adaptersByPriority()
+  const targetIdx = ordered.findIndex(a => a.exchange === targetExchange)
+  if (targetIdx > 0) { const [t] = ordered.splice(targetIdx, 1); ordered.unshift(t) }
+  if (targetIdx === -1) {
+    // target not found in adapters, just try by priority
   }
+
+  for (const adapter of ordered) {
+    try {
+      const candles = await adapter.fetchCandles(symbol, tf, limit, startTime, endTime, options)
+      if (candles.length > 0) return candles
+    } catch {
+      continue
+    }
+  }
+  return []
+}
+
+/**
+ * Seamless cross-exchange history stitcher (scalpboard.io pattern).
+ * Fetches candles from the primary exchange. When data runs out
+ * (exchange listed the pair recently), automatically fetches older
+ * data from the next-priority exchange and glues the series together.
+ * Returns a single deduplicated, time-sorted candle array.
+ */
+export async function fetchCandlesSeamless(
+  symbol: string,
+  tf: string,
+  limit: number,
+  exchange?: Exchange,
+  startTime?: number,
+  endTime?: number,
+  options?: import('../exchanges/types.js').FetchCandlesOptions,
+): Promise<UnifiedCandle[]> {
+  const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
+  const ordered = adaptersByPriority()
+  const targetIdx = ordered.findIndex(a => a.exchange === targetExchange)
+  if (targetIdx > 0) { const [t] = ordered.splice(targetIdx, 1); ordered.unshift(t) }
+
+  const allCandles: UnifiedCandle[] = []
+  let remaining = limit
+  let currentEnd = endTime
+  let currentStart = startTime
+  const triedExchanges = new Set<string>()
+
+  for (const adapter of ordered) {
+    if (remaining <= 0) break
+    if (triedExchanges.has(adapter.exchange)) continue
+    triedExchanges.add(adapter.exchange)
+
+    try {
+      const candles = await adapter.fetchCandles(symbol, tf, remaining, currentStart, currentEnd, options)
+      if (candles.length === 0) continue
+
+      allCandles.push(...candles)
+
+      const earliestTime = candles[0].time
+      const tfMs = TF_MS_AGGR[tf]
+      if (!tfMs) break
+
+      const requested = remaining
+      remaining -= candles.length
+
+      // Did this exchange return fewer candles than we asked for?
+      // If so, data likely ends here — try next exchange for older history
+      if (candles.length < requested) {
+        // Keep currentEnd in MILLISECONDS (Binance API expects ms)
+        currentEnd = earliestTime * 1000 - tfMs
+        // Clear currentStart so next exchange can fetch as far back as it has
+        currentStart = undefined
+        if (currentEnd <= 0) break
+      } else {
+        // Got full range — no stitching needed
+        break
+      }
+    } catch {
+      continue
+    }
+  }
+
+  // Deduplicate by time, keep highest-priority exchange candle for each timestamp
+  const byTime = new Map<number, UnifiedCandle>()
+  for (const c of allCandles) byTime.set(c.time, c)
+  const sorted = Array.from(byTime.values()).sort((a, b) => a.time - b.time)
+  return sorted.slice(-limit)
+}
+
+const TF_MS_AGGR: Record<string, number> = {
+  '1m': 60_000, '5m': 300_000, '15m': 900_000,
+  '1h': 3_600_000, '4h': 14_400_000,
+  '1d': 86_400_000, '1w': 604_800_000,
 }
 
 export async function fetchDepth(symbol: string, limit: number, exchange?: Exchange): Promise<UnifiedDepth | null> {

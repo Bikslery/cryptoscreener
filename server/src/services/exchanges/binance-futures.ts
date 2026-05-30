@@ -352,7 +352,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     }
   }
 
-  async fetchCandles(symbol: string, tf: string, limit: number, startTime?: number, endTime?: number): Promise<UnifiedCandle[]> {
+  async fetchCandles(symbol: string, tf: string, limit: number, startTime?: number, endTime?: number, options?: import('./types.js').FetchCandlesOptions): Promise<UnifiedCandle[]> {
     const interval = TF_MAP[tf] || '1m'
     const safeLimit = Math.max(1, Math.min(limit, MAX_KLINES_LIMIT))
     const params = new URLSearchParams({ symbol, interval, limit: String(safeLimit) })
@@ -361,7 +361,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     const url = `https://fapi.binance.com/fapi/v1/klines?${params.toString()}`
     await this.rateLimiter.waitIfThrottled()
     try {
-      const res = await fetchWithTimeout(url, 10000, this.fetchDispatcher)
+      const res = await fetchWithTimeout(url, 10000, options?.dispatcher ?? this.fetchDispatcher)
       this.rateLimiter.updateFromHeaders(res.headers)
       if (res.status === 429) { this.rateLimiter.handle429(res.headers); return [] }
       if (res.status === 418) { this.rateLimiter.handle418(res.headers); return [] }

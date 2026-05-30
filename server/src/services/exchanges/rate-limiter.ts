@@ -1,3 +1,5 @@
+import { getRedisData, REDIS_ENABLED } from '../../redis.js'
+
 const WEIGHT_THRESHOLD_RATIO = 0.8
 const CIRCUIT_BREAKER_ERRORS = 5
 const CIRCUIT_BREAKER_COOLDOWN_MS = 60_000
@@ -117,4 +119,66 @@ export class BinanceRateLimiter {
   getLimit(): number {
     return this.limit
   }
+}
+
+const BUDGET_KEY_PREFIX = 'bw:'
+const BUDGET_WINDOW_MS = 60_000
+const BUDGET_FILL_RATIO = 0.8
+
+const localBudgets = new Map<string, number>()
+
+function budgetKey(ipIndex: number): string {
+  const minuteBucket = Math.floor(Date.now() / BUDGET_WINDOW_MS)
+  return `${BUDGET_KEY_PREFIX}${ipIndex}:${minuteBucket}`
+}
+
+function localBudgetKey(ipIndex: number): string {
+  const minuteBucket = Math.floor(Date.now() / BUDGET_WINDOW_MS)
+  return `${ipIndex}:${minuteBucket}`
+}
+
+export async function acquireBudget(
+  market: 'spot' | 'futures',
+  weightCost: number,
+  ipIndex: number,
+  maxWaitMs: number = 30_000,
+): Promise<boolean> {
+  const limit = LIMITS[market]
+  const maxBudget = Math.floor(limit * BUDGET_FILL_RATIO)
+  const deadline = Date.now() + maxWaitMs
+
+  while (Date.now() < deadline) {
+    if (REDIS_ENABLED) {
+      try {
+        const redis = getRedisData()
+        const key = budgetKey(ipIndex)
+        const current = await redis.incrby(key, weightCost)
+        if (current <= maxBudget) {
+          await redis.expire(key, 90)
+          return true
+        }
+        await redis.incrby(key, -weightCost)
+      } catch {
+        const lKey = localBudgetKey(ipIndex)
+        const current = (localBudgets.get(lKey) ?? 0) + weightCost
+        if (current <= maxBudget) {
+          localBudgets.set(lKey, current)
+          return true
+        }
+      }
+    } else {
+      const lKey = localBudgetKey(ipIndex)
+      const current = (localBudgets.get(lKey) ?? 0) + weightCost
+      if (current <= maxBudget) {
+        localBudgets.set(lKey, current)
+        return true
+      }
+    }
+
+    const waitMs = Math.min(1000, deadline - Date.now())
+    if (waitMs <= 0) return false
+    await new Promise(r => setTimeout(r, waitMs))
+  }
+
+  return false
 }

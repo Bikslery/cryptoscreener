@@ -1,7 +1,8 @@
 import { Router } from 'express'
 import rateLimit from 'express-rate-limit'
-import { getTickers, fetchCandles, fetchDepth } from '../services/aggregator/index.js'
+import { fetchCandles, fetchDepth, getTickers } from '../services/aggregator/index.js'
 import { getCachedCandles, setCachedCandlesFromRest } from '../services/candles/candle-cache.js'
+import { getHistory } from '../services/candles/history.js'
 
 const apiLimiter = rateLimit({
   windowMs: 1000,
@@ -58,6 +59,7 @@ router.post('/candles-bulk', async (req, res) => {
   const result: Record<string, any[]> = {}
   const missing: string[] = []
 
+  // Check server in-memory cache first (fastest path)
   for (const symbol of symbols) {
     const cached = getCachedCandles(symbol, tf)
     if (cached && cached.length > 0) {
@@ -67,10 +69,13 @@ router.post('/candles-bulk', async (req, res) => {
     }
   }
 
+  // Fetch missing symbols in parallel with seamless cross-exchange history
   if (missing.length > 0) {
     const fetches = missing.map(async (symbol) => {
       try {
-        const candles = await fetchCandles(symbol, tf, limit)
+        // getHistory now uses fetchCandlesSeamless internally —
+        // automatically stitches data from multiple exchanges
+        const candles = await getHistory(symbol, tf, { limit })
         if (candles.length > 0) {
           setCachedCandlesFromRest(symbol, tf, candles)
           result[symbol] = candles
@@ -92,16 +97,15 @@ router.get('/:symbol/candles', async (req, res) => {
   const tf = (req.query.tf as string) || '1m'
   const limit = normalizeLimit(req.query.limit, 500)
   const exchange = req.query.exchange as string | undefined
-  const startTime = req.query.startTime ? parseInt(req.query.startTime as string) : undefined
-  const endTime = req.query.endTime ? parseInt(req.query.endTime as string) : undefined
+  const before = req.query.before ? parseInt(req.query.before as string) : undefined
 
   if (!SUPPORTED_TIMEFRAMES.has(tf)) {
     res.status(400).json({ error: 'Unsupported timeframe' })
     return
   }
 
-  if (startTime !== undefined || endTime !== undefined) {
-    const candles = await fetchCandles(symbol, tf, limit, exchange as any, startTime, endTime)
+  if (before !== undefined) {
+    const candles = await getHistory(symbol, tf, { before, limit, exchange: exchange as any })
     res.json(candles)
     return
   }
@@ -114,7 +118,7 @@ router.get('/:symbol/candles', async (req, res) => {
     return
   }
 
-  const candles = await fetchCandles(symbol, tf, limit, exchange as any)
+  const candles = await getHistory(symbol, tf, { limit, exchange: exchange as any })
   if (candles.length > 0) {
     setCachedCandlesFromRest(symbol, tf, candles)
   }
