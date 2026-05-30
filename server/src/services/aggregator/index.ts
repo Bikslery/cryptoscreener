@@ -12,18 +12,81 @@ export const adapters: ExchangeAdapter[] = [
 ]
 
 const tickerMap = new Map<string, UnifiedTicker>()
-const EXCHANGE_PRIORITY: Record<string, number> = {
+
+// --- Configurable exchange priority (env overrides hardcoded defaults) ---
+
+const DEFAULT_PRIORITY: Record<string, number> = {
   'binance-futures': 5,
   'bybit-futures': 4,
   'okx-spot': 3,
   'binance-spot': 2,
 }
 
+function parseExchangePriority(envStr: string): Record<string, number> {
+  const result: Record<string, number> = {}
+  for (const pair of envStr.split(',')) {
+    const [ex, pri] = pair.split(':')
+    if (ex && pri) result[ex.trim()] = parseInt(pri.trim(), 10) || 0
+  }
+  return result
+}
+
+function parseBlacklist(envStr: string): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>()
+  for (const segment of envStr.split(';')) {
+    const [ex, symbols] = segment.split(':')
+    if (!ex || !symbols) continue
+    result.set(ex.trim(), new Set(symbols.split(',').map(s => s.trim()).filter(Boolean)))
+  }
+  return result
+}
+
+function parseOverrides(envStr: string): Map<string, Map<string, number>> {
+  const result = new Map<string, Map<string, number>>()
+  try {
+    const obj = JSON.parse(envStr) as Record<string, Record<string, number>>
+    for (const [symbol, exchanges] of Object.entries(obj)) {
+      const inner = new Map<string, number>()
+      for (const [ex, pri] of Object.entries(exchanges)) inner.set(ex, pri)
+      result.set(symbol, inner)
+    }
+  } catch {
+    console.warn('[Aggregator] Failed to parse EXCHANGE_SYMBOL_OVERRIDES — ignoring')
+  }
+  return result
+}
+
+const EXCHANGE_PRIORITY: Record<string, number> = {
+  ...DEFAULT_PRIORITY,
+  ...(process.env.EXCHANGE_PRIORITY ? parseExchangePriority(process.env.EXCHANGE_PRIORITY) : {}),
+}
+
+const SYMBOL_BLACKLIST: Map<string, Set<string>> = process.env.EXCHANGE_SYMBOL_BLACKLIST
+  ? parseBlacklist(process.env.EXCHANGE_SYMBOL_BLACKLIST)
+  : new Map()
+
+const SYMBOL_OVERRIDES: Map<string, Map<string, number>> = process.env.EXCHANGE_SYMBOL_OVERRIDES
+  ? parseOverrides(process.env.EXCHANGE_SYMBOL_OVERRIDES)
+  : new Map()
+
+function isBlacklisted(exchange: string, symbol: string): boolean {
+  return SYMBOL_BLACKLIST.get(exchange)?.has(symbol) ?? false
+}
+
+function getPriority(exchange: string, symbol?: string): number {
+  if (symbol) {
+    const override = SYMBOL_OVERRIDES.get(symbol)?.get(exchange)
+    if (override !== undefined) return override
+  }
+  return EXCHANGE_PRIORITY[exchange] ?? 0
+}
+
 function pickBestFromMap(): Map<string, UnifiedTicker> {
   const best = new Map<string, UnifiedTicker>()
   for (const t of tickerMap.values()) {
+    if (isBlacklisted(t.exchange, t.symbol)) continue
     const existing = best.get(t.symbol)
-    if (!existing || EXCHANGE_PRIORITY[t.exchange] > EXCHANGE_PRIORITY[existing.exchange]) {
+    if (!existing || getPriority(t.exchange, t.symbol) > getPriority(existing.exchange, existing.symbol)) {
       best.set(t.symbol, t)
     }
   }
@@ -34,6 +97,7 @@ const BROADCAST_INTERVAL = 200
 let lastBroadcast = 0
 let loggedFirst = false
 let tickerCount = 0
+let lastBroadcastLog = 0
 const metricsMap = new Map<string, { range1m: number; natr5m: number }>()
 
 let cachedBestMap: Map<string, UnifiedTicker> | null = null
@@ -68,9 +132,14 @@ const ROLE = process.env.ROLE || 'all'
 const isBroadcast = ROLE === 'broadcast' || ROLE === 'all'
 const isIngestion = ROLE === 'ingestion' || ROLE === 'all'
 
+let broadcastCount = 0
+const BROADCAST_LOG_INTERVAL = 30_000
+
 export function startAggregator() {
+  logPriorityConfig()
   for (const adapter of adapters) {
     adapter.onTicker((ticker) => {
+      if (isBlacklisted(ticker.exchange, ticker.symbol)) return
       const m = metricsMap.get(ticker.symbol)
       if (m) {
         ticker.range1m = m.range1m
@@ -97,6 +166,12 @@ export function startAggregator() {
           const delta = computeDelta(best)
           if (delta.length > 0) {
             broadcast({ type: 'ticker', data: arr })
+            broadcastCount++
+          }
+          const now2 = Date.now()
+          if (now2 - lastBroadcastLog > BROADCAST_LOG_INTERVAL) {
+            lastBroadcastLog = now2
+            console.log(`[Aggregator] Broadcast #${broadcastCount}: ${delta.length}/${arr.length} tickers changed, ${tickerCount} total ticks received`)
           }
         }
 
@@ -219,10 +294,31 @@ export function setTickersFromRedis(tickers: UnifiedTicker[]) {
   cachedBest = null
 }
 
+let cachedAdaptersByPriority: ExchangeAdapter[] | null = null
+
 function adaptersByPriority(): ExchangeAdapter[] {
-  return [...adapters].sort((a, b) =>
-    (EXCHANGE_PRIORITY[b.exchange] ?? 0) - (EXCHANGE_PRIORITY[a.exchange] ?? 0)
-  )
+  if (!cachedAdaptersByPriority) {
+    cachedAdaptersByPriority = [...adapters].sort((a, b) =>
+      getPriority(b.exchange) - getPriority(a.exchange)
+    )
+  }
+  return cachedAdaptersByPriority
+}
+
+function logPriorityConfig() {
+  console.log(`[Aggregator] Priority config: ${JSON.stringify(EXCHANGE_PRIORITY)}`)
+  if (SYMBOL_BLACKLIST.size > 0) {
+    const entries: string[] = []
+    for (const [ex, syms] of SYMBOL_BLACKLIST) entries.push(`${ex}: ${[...syms].join(',')}`)
+    console.log(`[Aggregator] Symbol blacklist: ${entries.join('; ')}`)
+  }
+  if (SYMBOL_OVERRIDES.size > 0) {
+    const entries: string[] = []
+    for (const [sym, exMap] of SYMBOL_OVERRIDES) {
+      for (const [ex, pri] of exMap) entries.push(`${sym}@${ex}=${pri}`)
+    }
+    console.log(`[Aggregator] Symbol overrides: ${entries.join(', ')}`)
+  }
 }
 
 export async function fetchCandles(symbol: string, tf: string, limit: number, exchange?: Exchange, startTime?: number, endTime?: number, options?: import('../exchanges/types.js').FetchCandlesOptions): Promise<UnifiedCandle[]> {

@@ -69,7 +69,7 @@ function parseDepthChannel(channel: string): string | null {
   return match[1]
 }
 
-const INITIAL_CANDLES_LIMIT = 300
+const INITIAL_CANDLES_LIMIT = 100
 
 function buildInitialCandlesData(): Record<string, any[]> {
   let topSymbols = getTopCachedSymbols(INITIAL_CANDLES_TF, 9)
@@ -129,6 +129,16 @@ export function setupWsHub(wss: WebSocketServer) {
       }
     } catch (err) {
       console.warn('[Hub] Failed to send initial-candles', err)
+    }
+
+    try {
+      const tickers = getTickers()
+      if (tickers.length > 0) {
+        ws.send(JSON.stringify({ type: 'ticker', data: tickers }))
+        console.log(`[Hub] Sent initial tickers to new client: ${tickers.length} tickers`)
+      }
+    } catch (err) {
+      console.warn('[Hub] Failed to send initial-tickers', err)
     }
 
     ws.on('message', (raw) => {
@@ -203,10 +213,9 @@ export function broadcast(msg: WsMessage) {
 
   if (msg.type === 'ticker') {
     const tickers = msg.data as UnifiedTicker[]
-    const bySymbol = new Map<string, UnifiedTicker>()
-    for (const t of tickers) bySymbol.set(t.symbol, t)
 
     let fullRaw: string | null = null
+    let sentCount = 0
     for (const client of clients.values()) {
       if (client.ws.readyState !== WebSocket.OPEN) continue
       if (client.buffered >= MAX_BUFFERED) continue
@@ -214,10 +223,12 @@ export function broadcast(msg: WsMessage) {
       if (client.tickerSymbols.size === 0) {
         if (fullRaw === null) fullRaw = raw
         client.ws.send(fullRaw, (err) => { if (err) client.buffered++ })
+        sentCount++
       } else {
         const filtered = tickers.filter(t => client.tickerSymbols.has(t.symbol))
         if (filtered.length > 0) {
           client.ws.send(JSON.stringify({ type: 'ticker', data: filtered }), (err) => { if (err) client.buffered++ })
+          sentCount++
         }
       }
     }
