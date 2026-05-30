@@ -141,7 +141,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
 
   async fetchCandles(symbol: string, tf: string, limit: number): Promise<UnifiedCandle[]> {
     const instId = symbol.replace(/USDT$/, '-USDT')
-    const barMap: Record<string, string> = { '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1H', '2h': '2H', '4h': '4H', '1d': '1D', '1w': '1W' }
+    const barMap: Record<string, string> = { '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1H', '4h': '4H', '1d': '1D', '1w': '1W' }
     const bar = barMap[tf] || '1m'
     const url = `https://www.okx.com/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`
     const res = await fetch(url)

@@ -142,7 +142,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
 
   async fetchCandles(symbol: string, tf: string, limit: number): Promise<UnifiedCandle[]> {
     const category = 'linear'
-    const bybitTfMap: Record<string, string> = { '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '2h': '120', '4h': '240', '1d': 'D', '1w': 'W' }
+    const bybitTfMap: Record<string, string> = { '1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1d': 'D', '1w': 'W' }
     const interval = bybitTfMap[tf] || tf
     const url = `https://api.bybit.com/v5/market/kline?category=${category}&symbol=${symbol}&interval=${interval}&limit=${limit}`
     const res = await fetch(url)

@@ -12,6 +12,7 @@ const apiLimiter = rateLimit({
 })
 
 const router = Router()
+const SUPPORTED_TIMEFRAMES = new Set(['1m', '5m', '15m', '1h', '4h', '1d', '1w'])
 
 router.use(apiLimiter)
 
@@ -36,6 +37,10 @@ router.post('/candles-bulk', async (req, res) => {
   const { symbols, tf, limit } = req.body as { symbols: string[]; tf: string; limit: number }
   if (!Array.isArray(symbols) || !tf || !limit) {
     res.status(400).json({ error: 'Missing symbols, tf, or limit' })
+    return
+  }
+  if (!SUPPORTED_TIMEFRAMES.has(tf)) {
+    res.status(400).json({ error: 'Unsupported timeframe' })
     return
   }
   if (symbols.length > 50) {
@@ -81,6 +86,11 @@ router.get('/:symbol/candles', async (req, res) => {
   const exchange = req.query.exchange as string | undefined
   const startTime = req.query.startTime ? parseInt(req.query.startTime as string) : undefined
   const endTime = req.query.endTime ? parseInt(req.query.endTime as string) : undefined
+
+  if (!SUPPORTED_TIMEFRAMES.has(tf)) {
+    res.status(400).json({ error: 'Unsupported timeframe' })
+    return
+  }
 
   if (startTime !== undefined || endTime !== undefined) {
     const candles = await fetchCandles(symbol, tf, limit, exchange as any, startTime, endTime)

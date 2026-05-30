@@ -7,6 +7,17 @@ import { LoginModal } from './components/auth/LoginModal'
 import { ProfileModal } from './components/auth/ProfileModal'
 import { useCoinListStore, useUIStore } from './store'
 import { wsConnect, wsDisconnect } from './services/ws'
+import type { Timeframe } from './types'
+
+const TIMEFRAME_HOTKEYS: Record<string, Timeframe> = {
+  '1': '1m',
+  '2': '5m',
+  '3': '15m',
+  '4': '1h',
+  '5': '4h',
+  '6': '1d',
+  '7': '1w',
+}
 
 function App() {
   const coinListInit = useCoinListStore(s => s.init)
@@ -24,10 +35,11 @@ function App() {
   // Пробел — перейти к следующей странице мини-графиков (на последней останавливается).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const hotkeyTimeframe = TIMEFRAME_HOTKEYS[e.key]
       const isSpace = e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar'
-      if (!isSpace || e.isComposing) return
+      if ((!hotkeyTimeframe && !isSpace) || e.isComposing) return
 
-      // Не перехватываем Пробел, когда в фокусе поле ввода или интерактивный элемент —
+      // Не перехватываем горячие клавиши, когда в фокусе поле ввода или интерактивный элемент —
       // пусть отрабатывает их штатное поведение (ввод текста, активация кнопки/ссылки).
       // Это заодно убирает двойное перелистывание в Firefox, где preventDefault на
       // keydown не отменяет клик сфокусированной кнопки.
@@ -43,6 +55,14 @@ function App() {
       const ui = useUIStore.getState()
       if (ui.showLogin || ui.showProfile) return
       const s = useCoinListStore.getState()
+
+      if (hotkeyTimeframe) {
+        e.preventDefault()
+        if (e.repeat) return
+        s.setTimeframe(hotkeyTimeframe)
+        return
+      }
+
       if (s.expandedSymbol) return
 
       // Фокус не на интерактивном элементе — Пробел листает сетку: гасим прокрутку страницы.

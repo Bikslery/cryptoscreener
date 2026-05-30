@@ -4,15 +4,12 @@ import { LogIn, User, ChevronFirst, ChevronLeft, ChevronRight } from 'lucide-rea
 
 const TF_OPTIONS: { value: Timeframe; label: string }[] = [
   { value: '1m', label: '1М' },
-  { value: '3m', label: '3М' },
   { value: '5m', label: '5М' },
   { value: '15m', label: '15М' },
-  { value: '30m', label: '30М' },
   { value: '1h', label: '1Ч' },
-  { value: '2h', label: '2Ч' },
   { value: '4h', label: '4Ч' },
-  { value: '1d', label: '1Д' },
-  { value: '1w', label: '1Н' },
+  { value: '1d', label: 'Д' },
+  { value: '1w', label: 'Н' },
 ]
 
 const EXCHANGE_FILTERS: { value: FilterExchange; label: string }[] = [
@@ -59,12 +56,11 @@ export function TopBar() {
       {/* Центр: таймфреймы + пагинация */}
       <div className="flex items-center gap-2 shrink-0">
         <div className="flex h-[30px] border border-[#2a2a2a] rounded-[4px] overflow-hidden bg-[#1a1a1a]">
-          {TF_OPTIONS.map((opt, i) => (
+          {TF_OPTIONS.map((opt) => (
             <button
               key={opt.value}
               className={`
-                flex items-center justify-center h-full px-[12px] text-[12px] font-mono font-medium transition-all duration-150 cursor-pointer
-                ${i < TF_OPTIONS.length - 1 ? 'border-r border-[#2a2a2a]' : ''}
+                flex items-center justify-center h-full w-[44px] text-center leading-none text-[12px] font-mono font-medium transition-all duration-150 cursor-pointer
                 ${activeTf === opt.value
                   ? 'bg-[#3a3a3a] text-[#fff]'
                   : 'text-[#888] hover:bg-[#242424] hover:text-[#bbb]'
