@@ -501,10 +501,13 @@ const MiniChart = memo(function MiniChart({
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const priceLineRef = useRef<any>(null)
+  const prevPriceRef = useRef<number | null>(null)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const candlesDataRef = useRef<UnifiedCandle[]>([])
+  const [priceLineVersion, setPriceLineVersion] = useState(0)
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
 
@@ -532,6 +535,7 @@ const MiniChart = memo(function MiniChart({
       borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
       wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
       priceLineVisible: false,
+      lastValueVisible: false,
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
@@ -544,6 +548,15 @@ const MiniChart = memo(function MiniChart({
     chartRef.current = chart
     candleRef.current = candleSeries
     volumeRef.current = volumeSeries
+    priceLineRef.current = candleSeries.createPriceLine({
+      price: 0,
+      color: '#26a65b',
+      lineStyle: 2, // Dashed
+      lineWidth: 1,
+      axisLabelVisible: true,
+      title: '',
+    })
+    setPriceLineVersion(v => v + 1)
 
     const ro = new ResizeObserver(() => {
       if (containerRef.current && !destroyedRef.current) {
@@ -574,6 +587,8 @@ const MiniChart = memo(function MiniChart({
       chartRef.current = null
       candleRef.current = null
       volumeRef.current = null
+      priceLineRef.current = null
+      prevPriceRef.current = null
     }
   }, [symbol, tf, pricePrecision])
 
@@ -584,6 +599,21 @@ const MiniChart = memo(function MiniChart({
   }, [isInitialLoading, symbol, tf, onLoaded])
 
   useWsCandle(symbol, tf, flush, destroyedRef)
+  usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
+
+  // Set initial price line position from loaded data
+  useEffect(() => {
+    if (isInitialLoading || !priceLineRef.current) return
+    const candles = candlesDataRef.current
+    if (candles.length === 0) return
+    const lastClose = candles[candles.length - 1].close
+    if (isFinite(lastClose) && lastClose > 0) {
+      try {
+        priceLineRef.current.applyOptions({ price: lastClose, color: '#26a65b' })
+        prevPriceRef.current = lastClose
+      } catch {}
+    }
+  }, [isInitialLoading, symbol, tf, priceLineVersion])
 
   return (
     <div
@@ -710,48 +740,53 @@ function usePriceLine(
   priceLineRef: React.RefObject<any>,
   prevPriceRef: React.RefObject<number | null>,
   destroyedRef: React.RefObject<boolean>,
+  priceLineVersion: number,
 ) {
+  const livePrice = useLivePrice(symbol)
+
   useEffect(() => {
     prevPriceRef.current = null
   }, [symbol])
 
+  // Update from live price store (most reliable source)
+  useEffect(() => {
+    if (livePrice == null || destroyedRef.current || !priceLineRef.current) return
+    const prev = prevPriceRef.current
+    const isUp = prev == null || livePrice >= prev
+    prevPriceRef.current = livePrice
+    try {
+      priceLineRef.current.applyOptions({
+        price: livePrice,
+        color: isUp ? '#26a65b' : '#e74c3c',
+      })
+    } catch {}
+  }, [livePrice, priceLineVersion])
+
+  // Fallback: subscribe to candle updates for initial price
   useEffect(() => {
     const channel = `candle:${symbol}:1m`
-    const tradeType = `trade:${symbol}`
-
-    const updateLine = (price: number) => {
-      if (destroyedRef.current || !priceLineRef.current || !isFinite(price) || price <= 0) return
-      const prev = prevPriceRef.current
-      const isUp = prev == null || price >= prev
-      prevPriceRef.current = price
-      try {
-        priceLineRef.current.applyOptions({
-          price,
-          color: isUp ? '#26a65b' : '#e74c3c',
-        })
-      } catch {}
-    }
 
     const unsubCandle = wsOnChannel(channel, (msg) => {
+      if (destroyedRef.current || !priceLineRef.current) return
       const c = msg.data as UnifiedCandle
-      if (c?.close) updateLine(c.close)
-    })
-
-    const unsubTrade = wsOnType(tradeType, (msg) => {
-      const trade = msg.data as any
-      if (!trade?.price) return
-      const p = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
-      updateLine(p)
+      if (!c?.close) return
+      // Only update if we don't have a price yet
+      if (prevPriceRef.current === null) {
+        prevPriceRef.current = c.close
+        try {
+          priceLineRef.current.applyOptions({
+            price: c.close,
+            color: '#26a65b',
+          })
+        } catch {}
+      }
     })
 
     wsSubscribe(channel)
-    wsSubscribe(tradeType)
 
     return () => {
       unsubCandle()
-      unsubTrade()
       wsUnsubscribe(channel)
-      wsUnsubscribe(tradeType)
     }
   }, [symbol])
 }
@@ -767,6 +802,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
+  const [priceLineVersion, setPriceLineVersion] = useState(0)
   const [selection, setSelection] = useState<RangeSelection | null>(null)
   const [chartVersion, setChartVersion] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
@@ -811,6 +847,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
       wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
       priceLineVisible: false,
+      lastValueVisible: false,
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
@@ -831,6 +868,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       axisLabelVisible: true,
       title: '',
     })
+    setPriceLineVersion(v => v + 1)
     setChartVersion(v => v + 1)
 
     const ro = new ResizeObserver(() => {
@@ -870,7 +908,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
   const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
   useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
-  usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef)
+  usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
   useWsTrade(symbol, tf, flush, destroyedRef)
   useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, setIsLoadingMore)
 
@@ -886,7 +924,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
         prevPriceRef.current = lastClose
       } catch {}
     }
-  }, [isInitialLoading])
+  }, [isInitialLoading, symbol, tf, priceLineVersion])
 
   useEffect(() => {
     setSelection(null)
