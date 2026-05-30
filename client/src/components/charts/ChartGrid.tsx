@@ -147,7 +147,7 @@ function useLazyScroll(
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   isInitialLoading: boolean,
-  setIsLoadingMore?: (loading: boolean) => void,
+  setIsLoadingMore: ((loading: boolean) => void) | undefined,
   adjustingRef: React.RefObject<boolean>,
 ) {
   const inflightRef = useRef(false)
