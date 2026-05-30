@@ -1,4 +1,11 @@
 import { getRedisData, REDIS_ENABLED } from '../../redis.js'
+import {
+  rateLimitWeightGauge,
+  rateLimitWeightMaxGauge,
+  rateLimitThrottledCounter,
+  rateLimit429Counter,
+  rateLimit418Counter,
+} from '../../metrics.js'
 
 const WEIGHT_THRESHOLD_RATIO = 0.8
 const CIRCUIT_BREAKER_ERRORS = 5
@@ -36,6 +43,7 @@ export class BinanceRateLimiter {
   constructor(market: 'spot' | 'futures') {
     this.market = market
     this.limit = LIMITS[market]
+    rateLimitWeightMaxGauge.set({ market: this.market }, this.limit)
   }
 
   updateFromHeaders(headers: Headers) {
@@ -50,6 +58,8 @@ export class BinanceRateLimiter {
         }
       }
     }
+
+    rateLimitWeightGauge.set({ market: this.market }, this.currentWeight)
 
     const ratio = this.currentWeight / this.limit
     if (ratio >= WEIGHT_THRESHOLD_RATIO && Date.now() - this.lastWarning > 30_000) {
@@ -67,6 +77,7 @@ export class BinanceRateLimiter {
     }
     this.throttledUntil = Date.now() + waitMs
     this.currentWeight = 0
+    rateLimit429Counter.inc({ market: this.market })
     console.error(`[RateLimit:${this.market}] 429 hit! Throttling for ${waitMs / 1000}s`)
   }
 
@@ -79,6 +90,7 @@ export class BinanceRateLimiter {
     }
     this.throttledUntil = Date.now() + waitMs
     this.currentWeight = 0
+    rateLimit418Counter.inc({ market: this.market })
     console.error(`[RateLimit:${this.market}] 418 IP ban! Throttling for ${waitMs / 1000}s`)
   }
 
@@ -95,6 +107,7 @@ export class BinanceRateLimiter {
     while (this.isThrottled()) {
       const waitUntil = Math.max(this.throttledUntil, this.backoffUntil, this.circuitBrokenUntil)
       const delay = Math.max(waitUntil - Date.now(), 100)
+      rateLimitThrottledCounter.inc({ market: this.market })
       console.warn(`[RateLimit:${this.market}] Throttled, waiting ${Math.ceil(delay / 1000)}s...`)
       await new Promise(r => setTimeout(r, delay))
     }

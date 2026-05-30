@@ -103,9 +103,20 @@ export function getOrFetchOlder(symbol: string, tf: string, before: number, limi
   const existing = inflightMap.get(k)
   if (existing) return existing
 
+  // Bug 4: do NOT swallow errors — let the caller distinguish
+  // "empty response" (valid, increment emptyCount) from "server error" (don't block future retries)
   const promise = api.get(`/coins/${symbol}/candles`, { params: { tf, limit, before } })
-    .then(res => (res.data as UnifiedCandle[]) || [])
-    .catch(() => [])
+    .then(res => {
+      const data = res.data as UnifiedCandle[] | undefined
+      return data || []
+    })
+    .catch(err => {
+      // Re-throw with a marker so the caller can tell it's a network/server error
+      // and NOT count it toward emptyCountRef
+      const error = new Error(err?.message || 'fetch failed') as Error & { isNetworkError?: boolean }
+      error.isNetworkError = true
+      throw error
+    })
     .finally(() => inflightMap.delete(k))
 
   inflightMap.set(k, promise)

@@ -104,7 +104,7 @@ function subscribeLivePrice(symbol: string, listener: () => void): () => void {
   }
 }
 
-function setLivePrice(symbol: string, price: number) {
+export function setLivePrice(symbol: string, price: number) {
   const prev = livePrices.get(symbol)
   if (prev === price) return
   livePrices.set(symbol, price)

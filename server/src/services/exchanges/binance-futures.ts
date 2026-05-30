@@ -86,7 +86,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
           console.error('[Binance Futures] Candle parse error:', e)
         }
       },
-      this.wsAgent
+      this.wsAgent,
+      true  // supportsIncrementalSub
     )
 
     this.depthPool = new WsStreamPool(
@@ -100,7 +101,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
           }
         } catch {}
       },
-      this.wsAgent
+      this.wsAgent,
+      true  // supportsIncrementalSub
     )
   }
 

@@ -2,7 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import { WebSocketServer, WebSocket } from 'ws'
 import { createServer } from 'http'
-import { setupWsHub, setCandleManager, startRedisListener, stopWsHub } from './ws/hub.js'
+import { setupWsHub, setCandleManager, startRedisListener, stopWsHub, refreshMetrics } from './ws/hub.js'
 import { startAggregator, adapters } from './services/aggregator/index.js'
 import { startAlertEngine, stopAlertEngine } from './services/alerts/index.js'
 import { startTelegramPolling } from './services/telegram/bot.js'
@@ -16,6 +16,7 @@ import drawingRoutes from './routes/drawings.js'
 import debugRoutes from './routes/debug.js'
 import { prisma } from './db/index.js'
 import { disconnectRedis } from './redis.js'
+import { register } from './metrics.js'
 
 const PORT = parseInt(process.env.PORT || '3001')
 const ROLE = process.env.ROLE || 'all'
@@ -41,6 +42,16 @@ async function main() {
   app.use('/api/debug', debugRoutes)
 
   app.get('/api/health', (_req, res) => res.json({ ok: true, role: ROLE }))
+
+  app.get('/metrics', async (_req, res) => {
+    try {
+      refreshMetrics()
+      res.set('Content-Type', register.contentType)
+      res.end(await register.metrics())
+    } catch (err) {
+      res.status(500).end(err instanceof Error ? err.message : 'metrics error')
+    }
+  })
 
   const server = createServer(app)
 

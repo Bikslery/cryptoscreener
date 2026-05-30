@@ -86,7 +86,9 @@ function pickBestFromMap(): Map<string, UnifiedTicker> {
   for (const t of tickerMap.values()) {
     if (isBlacklisted(t.exchange, t.symbol)) continue
     const existing = best.get(t.symbol)
-    if (!existing || getPriority(t.exchange, t.symbol) > getPriority(existing.exchange, existing.symbol)) {
+    const prioT = getPriority(t.exchange, t.symbol)
+    const prioE = existing ? getPriority(existing.exchange, existing.symbol) : -1
+    if (!existing || prioT > prioE) {
       best.set(t.symbol, t)
     }
   }
@@ -296,13 +298,18 @@ export function setTickersFromRedis(tickers: UnifiedTicker[]) {
 
 let cachedAdaptersByPriority: ExchangeAdapter[] | null = null
 
-function adaptersByPriority(): ExchangeAdapter[] {
-  if (!cachedAdaptersByPriority) {
-    cachedAdaptersByPriority = [...adapters].sort((a, b) =>
-      getPriority(b.exchange) - getPriority(a.exchange)
-    )
+function adaptersByPriority(symbol?: string): ExchangeAdapter[] {
+  if (!symbol) {
+    if (!cachedAdaptersByPriority) {
+      cachedAdaptersByPriority = [...adapters].sort((a, b) =>
+        getPriority(b.exchange) - getPriority(a.exchange)
+      )
+    }
+    return cachedAdaptersByPriority
   }
-  return cachedAdaptersByPriority
+  return [...adapters].sort((a, b) =>
+    getPriority(b.exchange, symbol) - getPriority(a.exchange, symbol)
+  )
 }
 
 function logPriorityConfig() {
@@ -324,7 +331,7 @@ function logPriorityConfig() {
 export async function fetchCandles(symbol: string, tf: string, limit: number, exchange?: Exchange, startTime?: number, endTime?: number, options?: import('../exchanges/types.js').FetchCandlesOptions): Promise<UnifiedCandle[]> {
   const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
   // Try target first, then all others by priority
-  const ordered = adaptersByPriority()
+  const ordered = adaptersByPriority(symbol)
   const targetIdx = ordered.findIndex(a => a.exchange === targetExchange)
   if (targetIdx > 0) { const [t] = ordered.splice(targetIdx, 1); ordered.unshift(t) }
   if (targetIdx === -1) {
@@ -359,7 +366,7 @@ export async function fetchCandlesSeamless(
   options?: import('../exchanges/types.js').FetchCandlesOptions,
 ): Promise<UnifiedCandle[]> {
   const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
-  const ordered = adaptersByPriority()
+  const ordered = adaptersByPriority(symbol)
   const targetIdx = ordered.findIndex(a => a.exchange === targetExchange)
   if (targetIdx > 0) { const [t] = ordered.splice(targetIdx, 1); ordered.unshift(t) }
 

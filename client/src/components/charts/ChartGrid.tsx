@@ -1,8 +1,9 @@
-import { useEffect, useRef, memo, useState, useCallback } from 'react'
+import { useEffect, useRef, memo, useState, useCallback, useMemo } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
-import { useCoinListStore, useLivePrice } from '../../store'
+import { useCoinListStore, useLivePrice, setLivePrice } from '../../store'
 import { useShallow } from 'zustand/shallow'
+import { debounce } from '../../utils/debounce'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import type { Timeframe, UnifiedCandle } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
@@ -147,8 +148,8 @@ function useLazyScroll(
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   isInitialLoading: boolean,
   setIsLoadingMore?: (loading: boolean) => void,
+  adjustingRef: React.RefObject<boolean>,
 ) {
-  const adjustingRef = useRef(false)
   const inflightRef = useRef(false)
   const reachedStartRef = useRef(false)
   const symbolRef = useRef(symbol)
@@ -164,20 +165,15 @@ function useLazyScroll(
     emptyCountRef.current = 0
   }, [symbol, tf])
 
-  useEffect(() => {
-    if (isInitialLoading) return
-    const chart = chartRef.current
-    if (!chart) return
-
-    const ts = chart.timeScale()
-
-    const onRange = (range: { from: number; to: number } | null) => {
+  // Bug 3: debounce onRange — avoid dozens of redundant checks per second during fast scroll
+  const onRangeDebounced = useMemo(
+    () => debounce((range: { from: number; to: number } | null) => {
       if (!range || adjustingRef.current || inflightRef.current || reachedStartRef.current) return
 
       // Dynamic threshold: start loading when approaching edge
-      // Use 30% of visible range or minimum 100 bars (whichever is larger)
+      // Bug 1a: use 60% of visible range or minimum 300 bars (was 30%/100)
       const visibleBars = range.to - range.from
-      const threshold = Math.max(100, visibleBars * 0.3)
+      const threshold = Math.max(300, visibleBars * 0.6)
 
       if (range.from > threshold) return
 
@@ -186,6 +182,16 @@ function useLazyScroll(
 
       inflightRef.current = true
       setIsLoadingMore?.(true)
+
+      // Bug 1c: clamp visible range during inflight — prevents scrolling into empty space
+      // while older data is being fetched
+      {
+        const ts = chartRef.current?.timeScale()
+        const curRange = ts?.getVisibleLogicalRange()
+        if (ts && curRange && curRange.from < 0) {
+          ts.setVisibleLogicalRange({ from: 0, to: curRange.to })
+        }
+      }
 
       const cached = candleCache.getCandles(curSymbol, curTf)
       if (!cached || cached.length === 0) {
@@ -277,16 +283,49 @@ function useLazyScroll(
           adjustingRef.current = false
           inflightRef.current = false
           setIsLoadingMore?.(false)
+
+          // Bug 1b: prefetch next page proactively if still near the edge
+          // This reduces the "empty space" window on continuous fast scroll
+          {
+            const ts = chartRef.current?.timeScale()
+            const curRange = ts?.getVisibleLogicalRange()
+            if (ts && curRange && !reachedStartRef.current) {
+              const vis = curRange.to - curRange.from
+              if (curRange.from < vis * 0.6) {
+                const newCached = candleCache.getCandles(curSymbol, curTf)
+                if (newCached && newCached.length > 0) {
+                  // Fire-and-forget: warm the cache for the next scroll trigger
+                  getOrFetchOlder(curSymbol, curTf, newCached[0].time, 1000).catch(() => {})
+                }
+              }
+            }
+          }
         })
-        .catch(() => {
+        .catch((err: Error & { isNetworkError?: boolean }) => {
+          // Bug 4: don't increment emptyCountRef on network/server errors
+          // Only truly empty responses (HTTP 200 + []) count toward the 3-strike limit
+          if (!err?.isNetworkError) {
+            emptyCountRef.current++
+            if (emptyCountRef.current >= 3) {
+              reachedStartRef.current = true
+            }
+          }
           inflightRef.current = false
           setIsLoadingMore?.(false)
         })
-    }
+    }, 50),
+    [] // stable — reads refs, no reactive deps needed
+  )
 
-    ts.subscribeVisibleLogicalRangeChange(onRange)
-    return () => { ts.unsubscribeVisibleLogicalRangeChange(onRange) }
-  }, [symbol, tf, isInitialLoading])
+  useEffect(() => {
+    if (isInitialLoading) return
+    const chart = chartRef.current
+    if (!chart) return
+    const ts = chart.timeScale()
+
+    ts.subscribeVisibleLogicalRangeChange(onRangeDebounced)
+    return () => { ts.unsubscribeVisibleLogicalRangeChange(onRangeDebounced) }
+  }, [symbol, tf, isInitialLoading, onRangeDebounced])
 }
 
 function useRafFlush(
@@ -327,6 +366,9 @@ function useRafFlush(
 
   return {
     queueCandle(p: { time: Time; open: number; high: number; low: number; close: number }) {
+      // Bug 3b: reject out-of-order — if pending candle is newer, don't overwrite
+      const prev = pendingCandle.current
+      if (prev && p.time < prev.time) return
       pendingCandle.current = p
       schedule()
     },
@@ -343,13 +385,23 @@ function useWsCandle(
   flush: ReturnType<typeof useRafFlush>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
+  adjustingRef?: React.RefObject<boolean>,
 ) {
   useEffect(() => {
     const channel = `candle:${symbol}:${tf}`
     const unsub = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current) return
+      // Bug 2: skip WS updates while useLazyScroll is doing setData
+      if (adjustingRef?.current) return
       const c = msg.data as UnifiedCandle
       if (!c) return
+      // Bug 3a: reject stale/out-of-order candles — if a trade-built candle
+      // already has a later time, a delayed WS candle must not overwrite it
+      if (candlesDataRef?.current) {
+        const arr = candlesDataRef.current
+        const last = arr[arr.length - 1]
+        if (last && c.time < last.time) return
+      }
       candleCache.updateCandle(symbol, tf, c)
       if (candlesDataRef && candlesDataRef.current) {
         const arr = candlesDataRef.current
@@ -386,23 +438,42 @@ function useWsTrade(
   tf: Timeframe,
   flush: ReturnType<typeof useRafFlush>,
   destroyedRef: React.RefObject<boolean>,
+  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
+  adjustingRef?: React.RefObject<boolean>,
 ) {
+  // Bug 5: useRef instead of let — survives re-renders, reset on symbol/tf change
+  const curRef = useRef<UnifiedCandle | null>(null)
+
   useEffect(() => {
+    curRef.current = null
     const tradeType = `trade:${symbol}`
-    let cur: { time: number; open: number; high: number; low: number; close: number; volume: number } | null = null
 
     const unsub = wsOnType(tradeType, (msg) => {
       if (destroyedRef.current) return
+      // Bug 2: skip WS updates while useLazyScroll is doing setData
+      if (adjustingRef?.current) return
       const trade = msg.data as any
       if (!trade?.price) return
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(price)) return
+
+      // Bug 2a: push trade price to live-price store — redundancy for ticker batch lag
+      setLivePrice(symbol, price)
+
       const now = Math.floor(Date.now() / 1000)
       const tfSeconds = getTfSeconds(tf)
       const candleTime = Math.floor(now / tfSeconds) * tfSeconds
 
+      const cur = curRef.current
       if (!cur || cur.time !== candleTime) {
-        cur = { time: candleTime, open: price, high: price, low: price, close: price, volume: trade.volume || 0 }
+        // Bug 3c: include full UnifiedCandle fields (symbol, exchange, timeframe)
+        // so candleCache.updateCandle gets consistent data
+        // Copy exchange from last candle in backing array if available
+        const lastCandle = candlesDataRef?.current?.[candlesDataRef.current.length - 1]
+        curRef.current = {
+          symbol, exchange: lastCandle?.exchange ?? ('agg' as any), timeframe: tf,
+          time: candleTime, open: price, high: price, low: price, close: price, volume: trade.volume || 0,
+        }
       } else {
         if (price > cur.high) cur.high = price
         if (price < cur.low) cur.low = price
@@ -410,12 +481,31 @@ function useWsTrade(
         cur.volume += trade.volume || 0
       }
 
+      const c = curRef.current!
+
+      // Bug 1: write to cache (was missing)
+      candleCache.updateCandle(symbol, tf, c)
+
+      // Bug 1: write to backing array (was missing)
+      if (candlesDataRef?.current) {
+        const arr = candlesDataRef.current
+        const last = arr[arr.length - 1]
+        if (last?.time === c.time) arr[arr.length - 1] = { ...c }
+        else arr.push({ ...c })
+      }
+
       flush.queueCandle({
-        time: cur.time as Time,
-        open: cur.open,
-        high: cur.high,
-        low: cur.low,
-        close: cur.close,
+        time: c.time as Time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      })
+      // Bug 1: queue volume (was missing)
+      flush.queueVolume({
+        time: c.time as Time,
+        value: c.volume,
+        color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
       })
     })
     wsSubscribe(tradeType)
@@ -801,6 +891,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const prevPriceRef = useRef<number | null>(null)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
+  const adjustingRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const [priceLineVersion, setPriceLineVersion] = useState(0)
   const [selection, setSelection] = useState<RangeSelection | null>(null)
@@ -907,10 +998,10 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
   const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
-  useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
+  useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
   usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
-  useWsTrade(symbol, tf, flush, destroyedRef)
-  useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, setIsLoadingMore)
+  useWsTrade(symbol, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
+  useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, setIsLoadingMore, adjustingRef)
 
   // Set initial price line position from loaded data
   useEffect(() => {

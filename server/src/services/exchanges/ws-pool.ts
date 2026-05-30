@@ -77,6 +77,10 @@ export class WsStreamPool {
         conn.generation++
         try { conn.ws.close() } catch {}
         conn.ws = null
+      } else if (!this.supportsIncrementalSub && conn.ws) {
+        // Non-incremental: need full reconnect to update stream set
+        this.scheduleReconnect()
+        return
       }
     }
     this.connections = this.connections.filter(c => c.streams.size > 0)
@@ -131,6 +135,15 @@ export class WsStreamPool {
   /** Debounced full reconnect — used as fallback when incremental not supported,
    *  or when we need the initial connect. */
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+  private sendWsMessage(ws: WebSocket, msg: object) {
+    if (ws.readyState !== WebSocket.OPEN) return
+    try {
+      ws.send(JSON.stringify(msg))
+    } catch (e) {
+      console.error(`[${this.name}] Failed to send WS message:`, e instanceof Error ? e.message : e)
+    }
+  }
 
   private scheduleReconnect() {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
