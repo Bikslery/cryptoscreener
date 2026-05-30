@@ -6,8 +6,9 @@ let ws: WebSocket | null = null
 const wildcardCallbacks = new Set<WsCallback>()
 const typeCallbacks = new Map<string, Set<WsCallback>>()
 const channelCallbacks = new Map<string, Set<WsCallback>>()
-const subscriptions = new Set<string>()
+const subscriptions = new Map<string, number>()
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let intentionalDisconnect = false
 
 function dispatch(msg: WsMessage) {
   const t = msg.type as string | undefined
@@ -25,6 +26,7 @@ function dispatch(msg: WsMessage) {
 }
 
 function connect() {
+  intentionalDisconnect = false
   const token = localStorage.getItem('token') || ''
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const url = `${protocol}//${window.location.host}/ws?token=${token}`
@@ -32,7 +34,7 @@ function connect() {
 
   ws.onopen = () => {
     dispatch({ type: 'open' })
-    for (const ch of subscriptions) {
+    for (const ch of subscriptions.keys()) {
       ws?.send(JSON.stringify({ type: 'subscribe', channel: ch }))
     }
   }
@@ -44,7 +46,9 @@ function connect() {
     } catch {}
   }
 
-  ws.onclose = () => scheduleReconnect()
+  ws.onclose = () => {
+    if (!intentionalDisconnect) scheduleReconnect()
+  }
   ws.onerror = () => ws?.close()
 }
 
@@ -61,18 +65,29 @@ export function wsConnect() {
 }
 
 export function wsDisconnect() {
+  intentionalDisconnect = true
   ws?.close()
+  ws = null
   if (reconnectTimer) clearTimeout(reconnectTimer)
+  reconnectTimer = null
 }
 
 export function wsSubscribe(channel: string) {
-  subscriptions.add(channel)
+  const count = subscriptions.get(channel) || 0
+  subscriptions.set(channel, count + 1)
+  if (count > 0) return
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'subscribe', channel }))
   }
 }
 
 export function wsUnsubscribe(channel: string) {
+  const count = subscriptions.get(channel) || 0
+  if (count === 0) return
+  if (count > 1) {
+    subscriptions.set(channel, count - 1)
+    return
+  }
   subscriptions.delete(channel)
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'unsubscribe', channel }))

@@ -9,10 +9,12 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 const activeSymbols = new Set<string>()
 let isConnecting = false
+let socketGeneration = 0
 
 function connect() {
   if (activeSymbols.size === 0 || isConnecting) return
   isConnecting = true
+  const generation = ++socketGeneration
 
   const streams = Array.from(activeSymbols).map(s => `${s.toLowerCase()}@aggTrade`).join('/')
   const url = `${AGGTRADE_WS_BASE}/stream?streams=${streams}`
@@ -21,14 +23,15 @@ function connect() {
 
   console.log(`[AggTrade] Connecting to ${activeSymbols.size} symbols...`)
 
-  ws = new WebSocket(url, opts)
+  const nextWs = new WebSocket(url, opts)
+  ws = nextWs
 
-  ws.on('open', () => {
+  nextWs.on('open', () => {
     console.log('[AggTrade] WebSocket connected')
-    isConnecting = false
+    if (generation === socketGeneration) isConnecting = false
   })
 
-  ws.on('message', (raw) => {
+  nextWs.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString())
       const data = msg.data || msg
@@ -51,12 +54,13 @@ function connect() {
     }
   })
 
-  ws.on('error', (err) => {
+  nextWs.on('error', (err) => {
     console.error('[AggTrade] WebSocket error:', err.message)
-    isConnecting = false
+    if (generation === socketGeneration) isConnecting = false
   })
 
-  ws.on('close', () => {
+  nextWs.on('close', () => {
+    if (generation !== socketGeneration) return
     console.log('[AggTrade] WebSocket closed, reconnecting in 3s...')
     isConnecting = false
     scheduleReconnect()
@@ -78,6 +82,8 @@ function scheduleReconnectDebounced() {
   debounceTimer = setTimeout(() => {
     debounceTimer = null
     if (ws) {
+      socketGeneration++
+      isConnecting = false
       try { ws.close() } catch {}
       ws = null
     }
@@ -101,6 +107,8 @@ export function unsubscribeAggTrade(symbol: string) {
   activeSymbols.delete(symbol)
   if (activeSymbols.size === 0) {
     if (ws) {
+      socketGeneration++
+      isConnecting = false
       try { ws.close() } catch {}
       ws = null
     }

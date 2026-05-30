@@ -13,6 +13,13 @@ const apiLimiter = rateLimit({
 
 const router = Router()
 const SUPPORTED_TIMEFRAMES = new Set(['1m', '5m', '15m', '1h', '4h', '1d', '1w'])
+const MAX_CANDLE_LIMIT = 1000
+
+function normalizeLimit(value: unknown, fallback: number): number {
+  const parsed = parseInt(String(value ?? ''), 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
+  return Math.min(parsed, MAX_CANDLE_LIMIT)
+}
 
 router.use(apiLimiter)
 
@@ -34,8 +41,9 @@ router.get('/top-symbols', (_req, res) => {
 })
 
 router.post('/candles-bulk', async (req, res) => {
-  const { symbols, tf, limit } = req.body as { symbols: string[]; tf: string; limit: number }
-  if (!Array.isArray(symbols) || !tf || !limit) {
+  const { symbols, tf } = req.body as { symbols: string[]; tf: string; limit: number }
+  const limit = normalizeLimit(req.body?.limit, 500)
+  if (!Array.isArray(symbols) || !tf) {
     res.status(400).json({ error: 'Missing symbols, tf, or limit' })
     return
   }
@@ -82,7 +90,7 @@ router.post('/candles-bulk', async (req, res) => {
 router.get('/:symbol/candles', async (req, res) => {
   const { symbol } = req.params
   const tf = (req.query.tf as string) || '1m'
-  const limit = parseInt(req.query.limit as string) || 500
+  const limit = normalizeLimit(req.query.limit, 500)
   const exchange = req.query.exchange as string | undefined
   const startTime = req.query.startTime ? parseInt(req.query.startTime as string) : undefined
   const endTime = req.query.endTime ? parseInt(req.query.endTime as string) : undefined

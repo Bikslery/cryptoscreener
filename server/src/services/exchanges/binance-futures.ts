@@ -9,6 +9,7 @@ import { getWsAgent, getFetchDispatcher } from './proxy.js'
 import type { ProxyAgent } from 'undici'
 
 const WS_SILENCE_TIMEOUT = 10_000
+const MAX_KLINES_LIMIT = 1000
 
 async function fetchWithTimeout(url: string, ms = 10000, dispatcher?: ProxyAgent): Promise<Response> {
   const ctrl = new AbortController()
@@ -353,7 +354,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
 
   async fetchCandles(symbol: string, tf: string, limit: number, startTime?: number, endTime?: number): Promise<UnifiedCandle[]> {
     const interval = TF_MAP[tf] || '1m'
-    const params = new URLSearchParams({ symbol, interval, limit: String(limit) })
+    const safeLimit = Math.max(1, Math.min(limit, MAX_KLINES_LIMIT))
+    const params = new URLSearchParams({ symbol, interval, limit: String(safeLimit) })
     if (startTime !== undefined) params.set('startTime', String(startTime))
     if (endTime !== undefined) params.set('endTime', String(endTime))
     const url = `https://fapi.binance.com/fapi/v1/klines?${params.toString()}`

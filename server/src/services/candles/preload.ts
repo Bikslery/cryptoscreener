@@ -2,15 +2,47 @@ import type { ExchangeAdapter } from '../exchanges/types.js'
 import { setCachedCandlesFromRest, getCachedCandles } from './candle-cache.js'
 import { getTickers } from '../aggregator/index.js'
 
-export const PRELOAD_TFS = ['5m', '15m', '1h'] as const
+export const PRELOAD_TFS = ['5m', '15m', '1h', '4h'] as const
 export const INITIAL_CANDLES_TF = '5m'
 const TOP_SYMBOLS_COUNT = 100
 const P1_CONCURRENCY = 10
 const RATE_LIMIT_MS = 50
 const PERIODIC_REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes
+const PRELOAD_MATRIX: Record<string, { symbols: number; candles: number }> = {
+  '5m': { symbols: 100, candles: 1000 },
+  '15m': { symbols: 100, candles: 1000 },
+  '1h': { symbols: 100, candles: 1000 },
+  '4h': { symbols: 75, candles: 750 },
+}
+const WS_TFS = ['5m', '1m', '1h', '4h'] as const
+const REFRESH_TFS = ['5m', '1m', '15m', '1h', '4h'] as const
 
 let preloaded = false
-let preloadStats = { symbols: 0, timeframes: 0, candles: 0, startTime: 0 }
+let preloadStats = {
+  symbols: 0,
+  timeframes: 0,
+  candles: 0,
+  startTime: 0,
+  byTimeframe: {} as Record<string, { symbols: number; candles: number; failures: number }>,
+  wsSubscriptions: 0,
+  lastRefreshAt: 0,
+  refreshCount: 0,
+}
+
+function recordPreload(tf: string, candleCount: number) {
+  const stats = preloadStats.byTimeframe[tf] || { symbols: 0, candles: 0, failures: 0 }
+  stats.symbols++
+  stats.candles += candleCount
+  preloadStats.byTimeframe[tf] = stats
+  preloadStats.candles += candleCount
+  preloadStats.timeframes++
+}
+
+function recordFailure(tf: string) {
+  const stats = preloadStats.byTimeframe[tf] || { symbols: 0, candles: 0, failures: 0 }
+  stats.failures++
+  preloadStats.byTimeframe[tf] = stats
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -55,25 +87,29 @@ async function phase1(
     const batch = topSymbols.slice(i, i + P1_CONCURRENCY)
     const promises = batch.map(async (symbol) => {
       for (const tf of PRELOAD_TFS) {
+        const cfg = PRELOAD_MATRIX[tf]
+        if (i + batch.indexOf(symbol) >= cfg.symbols) continue
         try {
           // Try the first adapter (typically spot)
           const adapter = adapters[0]
-          let candles = await adapter.fetchCandles(symbol, tf, 1500)
+          let candles = await adapter.fetchCandles(symbol, tf, cfg.candles)
 
           // On empty, try alternate adapter
           if (candles.length === 0) {
             const alt = getAlternateAdapter(adapter, adapters)
             if (alt) {
-              candles = await alt.fetchCandles(symbol, tf, 1500)
+              candles = await alt.fetchCandles(symbol, tf, cfg.candles)
             }
           }
 
           if (candles.length > 0) {
             setCachedCandlesFromRest(symbol, tf, candles)
-            preloadStats.candles += candles.length
-            preloadStats.timeframes++
+            recordPreload(tf, candles.length)
+          } else {
+            recordFailure(tf)
           }
         } catch (err) {
+          recordFailure(tf)
           console.warn(`[Preload] Failed to fetch ${symbol}:${tf}`, err)
         }
         await sleep(RATE_LIMIT_MS)
@@ -88,37 +124,36 @@ function setupWsSubscriptions(
   topSymbols: string[],
   candleManager: { subscribeCandle: (symbol: string, tf: string) => void }
 ): void {
-  const wsTfs = ['5m', '1m']
   for (const symbol of topSymbols) {
-    for (const tf of wsTfs) {
+    for (const tf of WS_TFS) {
       try {
         candleManager.subscribeCandle(symbol, tf)
+        preloadStats.wsSubscriptions++
       } catch (err) {
         console.warn(`[Preload] WS subscribe failed for ${symbol}:${tf}`, err)
       }
     }
   }
-  console.log(`[Preload] WS subscriptions set up for ${topSymbols.length} symbols on 5m/1m`)
+  console.log(`[Preload] WS subscriptions set up for ${topSymbols.length} symbols on ${WS_TFS.join('/')}`)
 }
 
 function periodicRefresh(
   topSymbols: string[],
   adapters: ExchangeAdapter[]
 ): void {
-  const refreshTfs = ['5m', '1m', '15m']
-
   async function doRefresh() {
-    console.log('[Preload] Periodic refresh: re-fetching 5m/1m/15m for top symbols')
+    console.log(`[Preload] Periodic refresh: re-fetching ${REFRESH_TFS.join('/')} for top symbols`)
     for (let i = 0; i < topSymbols.length; i += P1_CONCURRENCY) {
       const batch = topSymbols.slice(i, i + P1_CONCURRENCY)
       const promises = batch.map(async (symbol) => {
-        for (const tf of refreshTfs) {
+        for (const tf of REFRESH_TFS) {
           try {
             const adapter = adapters[0]
-            let candles = await adapter.fetchCandles(symbol, tf, 1500)
+            const limit = PRELOAD_MATRIX[tf]?.candles || 1000
+            let candles = await adapter.fetchCandles(symbol, tf, limit)
             if (candles.length === 0) {
               const alt = getAlternateAdapter(adapter, adapters)
-              if (alt) candles = await alt.fetchCandles(symbol, tf, 1500)
+              if (alt) candles = await alt.fetchCandles(symbol, tf, limit)
             }
             if (candles.length > 0) {
               setCachedCandlesFromRest(symbol, tf, candles)
@@ -129,6 +164,8 @@ function periodicRefresh(
       })
       await Promise.all(promises)
     }
+    preloadStats.lastRefreshAt = Date.now()
+    preloadStats.refreshCount++
     console.log('[Preload] Periodic refresh complete')
     setTimeout(doRefresh, PERIODIC_REFRESH_INTERVAL)
   }
@@ -158,6 +195,7 @@ export async function startPreload(
   preloaded = true
   const elapsed = ((Date.now() - preloadStats.startTime) / 1000).toFixed(1)
   console.log(`[Preload] Complete in ${elapsed}s - ${preloadStats.symbols} symbols, ${preloadStats.timeframes} timeframes, ${preloadStats.candles} candles cached`)
+  console.log(`[Preload] By timeframe: ${Object.entries(preloadStats.byTimeframe).map(([tf, s]) => `${tf}=${s.symbols}/${s.candles}`).join(', ')}`)
 }
 
 export function isPreloaded(): boolean {
@@ -165,5 +203,16 @@ export function isPreloaded(): boolean {
 }
 
 export function getPreloadStats() {
-  return { ...preloadStats }
+  return {
+    ...preloadStats,
+    byTimeframe: { ...preloadStats.byTimeframe },
+    preloaded,
+    configured: {
+      preload: PRELOAD_MATRIX,
+      ws: [...WS_TFS],
+      refresh: [...REFRESH_TFS],
+      topSymbols: TOP_SYMBOLS_COUNT,
+      periodicRefreshIntervalMs: PERIODIC_REFRESH_INTERVAL,
+    },
+  }
 }

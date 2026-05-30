@@ -2,7 +2,6 @@ export function getPrecisionFromTickSize(tickSize: string | number): number {
   const str = String(tickSize)
   const dotIndex = str.indexOf('.')
   if (dotIndex === -1) return 0
-  const decimals = str.length - dotIndex - 1
   const trimmed = str.replace(/0+$/, '')
   const trimmedDotIndex = trimmed.indexOf('.')
   if (trimmedDotIndex === -1) return 0

@@ -149,12 +149,12 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
 
   setFilterExchange: (fe) => {
     const s = get()
-    set({ filterExchange: fe, pageIndex: 0, ...recompute({ ...s, filterExchange: fe, pageIndex: 0 }) })
+    set({ filterExchange: fe, ...recompute({ ...s, filterExchange: fe, pageIndex: 0 }) })
   },
 
   setPageIndex: (n) => {
     const s = get()
-    set({ pageIndex: n, ...recompute({ ...s, pageIndex: n }) })
+    set(recompute({ ...s, pageIndex: n }))
   },
 
   init: () => {

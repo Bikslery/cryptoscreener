@@ -8,6 +8,24 @@ import { subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
 const activeCandleSubs = new Map<string, { adapter: ExchangeAdapter; count: number }>()
 const activeDepthSubs = new Map<string, { adapter: ExchangeAdapter; count: number }>()
 
+export function getCandleManagerStats() {
+  const byTimeframe: Record<string, { subscriptions: number; clients: number }> = {}
+  for (const [key, sub] of activeCandleSubs) {
+    const tf = key.split(':')[1] || 'unknown'
+    const stats = byTimeframe[tf] || { subscriptions: 0, clients: 0 }
+    stats.subscriptions++
+    stats.clients += sub.count
+    byTimeframe[tf] = stats
+  }
+  return {
+    candles: activeCandleSubs.size,
+    depth: activeDepthSubs.size,
+    candleClients: Array.from(activeCandleSubs.values()).reduce((sum, sub) => sum + sub.count, 0),
+    depthClients: Array.from(activeDepthSubs.values()).reduce((sum, sub) => sum + sub.count, 0),
+    byTimeframe,
+  }
+}
+
 function getChannelKey(symbol: string, tf: string) {
   return `${symbol}:${tf}`
 }

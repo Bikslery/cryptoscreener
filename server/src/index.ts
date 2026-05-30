@@ -13,6 +13,7 @@ import coinRoutes from './routes/coins.js'
 import watchlistRoutes from './routes/watchlists.js'
 import alertRoutes from './routes/alerts.js'
 import drawingRoutes from './routes/drawings.js'
+import debugRoutes from './routes/debug.js'
 import { prisma } from './db/index.js'
 import { disconnectRedis } from './redis.js'
 
@@ -36,6 +37,7 @@ async function main() {
   app.use('/api/watchlists', watchlistRoutes)
   app.use('/api/alerts', alertRoutes)
   app.use('/api/drawings', drawingRoutes)
+  app.use('/api/debug', debugRoutes)
 
   app.get('/api/health', (_req, res) => res.json({ ok: true, role: ROLE }))
 

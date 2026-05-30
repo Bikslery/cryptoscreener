@@ -23,20 +23,29 @@ function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
 
 function ChartLoadingOverlay({ label }: { label: string }) {
   return (
-    <div className="chart-loading-overlay absolute inset-0 z-30 flex items-center justify-center pointer-events-none bg-[#0a0a0a]/80">
-      <div className="chart-loading-card flex items-center gap-3 rounded-[6px] border border-[#2a2a2a] bg-[#101010]/95 px-4 py-3 shadow-[0_12px_30px_rgba(0,0,0,0.35)]">
-        <span className="chart-loading-bars" aria-hidden="true">
-          <span />
-          <span />
-          <span />
-        </span>
-        <span className="text-[12px] font-medium text-[#d8d8d8] tracking-wide">{label}</span>
+    <div className="chart-loading-overlay absolute inset-0 z-30 flex items-center justify-center pointer-events-none backdrop-blur-[5px]">
+      <span className="chart-loading-text text-[18px] font-semibold text-[#e8e8e8] tracking-wide">
+        {label}<span className="chart-loading-dots" aria-hidden="true" />
+      </span>
+    </div>
+  )
+}
+
+function ChartMessageOverlay({ label, tone = 'muted' }: { label: string; tone?: 'muted' | 'error' }) {
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none bg-[#0a0a0a]/70">
+      <div className={`rounded-[6px] border px-4 py-3 text-[12px] font-medium shadow-[0_12px_30px_rgba(0,0,0,0.35)] ${
+        tone === 'error'
+          ? 'border-[#e74c3c]/40 bg-[#1a1010]/95 text-[#f0b0aa]'
+          : 'border-[#2a2a2a] bg-[#101010]/95 text-[#aaa]'
+      }`}>
+        {label}
       </div>
     </div>
   )
 }
 
-const BATCH_SIZE = 1500
+const BATCH_SIZE = 1000
 const BACKFILL_CONCURRENCY = 5
 const BACKFILL_DELAY_MS = 50
 const RETRY_CONCURRENCY = 2
@@ -87,15 +96,17 @@ function useFullHistory(
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   options?: { limit?: number; enableBackfill?: boolean },
-): { isInitialLoading: boolean } {
+): { isInitialLoading: boolean; status: 'loading' | 'ready' | 'empty' | 'error' } {
   const limit = options?.limit ?? 5000
   const enableBackfill = options?.enableBackfill ?? true
   const [isInitialLoading, setIsInitialLoading] = useState(true)
+  const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading')
 
   useEffect(() => {
     const cancelled = { value: false }
     const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
     setIsInitialLoading(true)
+    setStatus('loading')
 
     const renderCandles = (candles: UnifiedCandle[], fitContent: boolean) => {
       if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
@@ -129,6 +140,7 @@ function useFullHistory(
       if (hadCache && candles!.length > 0) {
         renderCandles(candles!, true)
         setIsInitialLoading(false)
+        setStatus('ready')
       }
 
       if (!hadCache || candles!.length < limit) {
@@ -143,6 +155,7 @@ function useFullHistory(
         } catch {
           if (!hadCache) {
             setIsInitialLoading(false)
+            setStatus('error')
             return
           }
         }
@@ -150,6 +163,7 @@ function useFullHistory(
 
       if (!candles || candles.length === 0) {
         setIsInitialLoading(false)
+        setStatus('empty')
         return
       }
       if (cancelled.value || destroyedRef.current) return
@@ -157,6 +171,7 @@ function useFullHistory(
       if (!hadCache) {
         renderCandles(candles, true)
         setIsInitialLoading(false)
+        setStatus('ready')
       } else {
         const cached = candleCache.getCandles(symbol, tf)
         if (cached && cached !== candles) {
@@ -165,6 +180,7 @@ function useFullHistory(
       }
 
       if (!enableBackfill) {
+        setStatus('ready')
         return
       }
 
@@ -181,6 +197,7 @@ function useFullHistory(
       batches.length = Math.min(batches.length, maxBatches)
       if (batches.length === 0) {
         setIsInitialLoading(false)
+        setStatus('ready')
         return
       }
 
@@ -290,6 +307,7 @@ function useFullHistory(
       if (!cancelled.value && !destroyedRef.current) {
         flushCollected()
       }
+      setStatus('ready')
     }
 
     run()
@@ -299,7 +317,7 @@ function useFullHistory(
     }
   }, [symbol, tf])
 
-  return { isInitialLoading }
+  return { isInitialLoading, status }
 }
 
 // RAF-throttled candle/volume updates: only the latest pending payload per frame
@@ -526,7 +544,7 @@ const MiniChart = memo(function MiniChart({
       grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { visible: true, color: '#4d4d4d' }, horzLine: { visible: true, color: '#4d4d4d' } },
       rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.1, bottom: 0.25 }, textColor: '#666666' },
-      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, textColor: '#666666', barSpacing: 6 },
+      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6 },
       handleScroll: true,
       handleScale: {
         axisPressedMouseMove: { time: true, price: true },
@@ -585,7 +603,7 @@ const MiniChart = memo(function MiniChart({
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300, enableBackfill: false })
+  const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300, enableBackfill: false })
 
   useEffect(() => {
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
@@ -606,6 +624,8 @@ const MiniChart = memo(function MiniChart({
       </div>
       <MiniChartHeader symbol={symbol} />
       <div ref={containerRef} className="relative z-0 flex-1 min-h-0" />
+      {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
+      {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
     </div>
   )
 })
@@ -749,7 +769,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' }, horzLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' } },
       rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.05, bottom: 0.15 }, textColor: '#666666' },
-      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, textColor: '#666666', barSpacing: 6 },
+      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6 },
       handleScroll: true,
       handleScale: {
         axisPressedMouseMove: { time: true, price: true },
@@ -810,7 +830,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [symbol, tf, pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-  const { isInitialLoading } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef)
+  const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
   useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
   useWsTrade(symbol, tf, flush, destroyedRef)
 
@@ -1018,8 +1038,10 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} />
       <div ref={containerRef} className="relative flex-1 min-h-0">
         {isInitialLoading && (
-          <ChartLoadingOverlay label="Подготавливаем график" />
+          <ChartLoadingOverlay label="График загружается" />
         )}
+        {status === 'empty' && <ChartMessageOverlay label="Нет данных для этого таймфрейма" />}
+        {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных. Попробуйте другой таймфрейм." tone="error" />}
         {/* SVG overlay for preview line and pending point only */}
         {(pendingPointPixel || previewLine) && (
           <svg
@@ -1161,7 +1183,7 @@ export function ChartGrid() {
         ))}
 
         {showOverlay && (
-          <ChartLoadingOverlay label="Подготавливаем графики" />
+          <ChartLoadingOverlay label="Графики загружаются" />
         )}
       </div>
     </div>

@@ -183,3 +183,23 @@ return symbols
 export function getCacheKeys(): string[] {
 return Array.from(cache.keys())
 }
+
+export function getCacheStats() {
+const byTimeframe: Record<string, { symbols: number; candles: number; restCached: number }> = {}
+for (const [key, candles] of cache) {
+  const parts = key.split(':')
+  const tf = parts[1] || 'unknown'
+  const stats = byTimeframe[tf] || { symbols: 0, candles: 0, restCached: 0 }
+  stats.symbols++
+  stats.candles += candles.length
+  if (restKeys.has(key)) stats.restCached++
+  byTimeframe[tf] = stats
+}
+return {
+  totalCandles: totalCandleCount,
+  totalKeys: cache.size,
+  maxTotalCandles: MAX_TOTAL_CANDLES,
+  maxCandlesPerKey: MAX_CANDLES_PER_KEY,
+  byTimeframe,
+}
+}
