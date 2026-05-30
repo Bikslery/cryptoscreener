@@ -1,73 +1,56 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: cryptoscreener
       POSTGRES_USER: screener
-      POSTGRES_PASSWORD: screener_pass
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-screener_pass}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     volumes:
       - redisdata:/data
+    restart: unless-stopped
 
   server:
     build: ./server
     environment:
-      DATABASE_URL: postgresql://screener:screener_pass@postgres:5432/cryptoscreener
+      DATABASE_URL: postgresql://screener:${POSTGRES_PASSWORD:-screener_pass}@postgres:5432/cryptoscreener
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      BINANCE_PROXY: ${BINANCE_PROXY:-}
       PORT: 3001
       ROLE: all
-    ports:
-      - "3001:3001"
     depends_on:
       - postgres
       - redis
+    restart: unless-stopped
+
+  client:
+    build: ./client
+    ports:
+      - "80:80"
+    depends_on:
+      - server
+    restart: unless-stopped
 
   broadcast-worker:
     build: ./server
     environment:
-      DATABASE_URL: postgresql://screener:screener_pass@postgres:5432/cryptoscreener
+      DATABASE_URL: postgresql://screener:${POSTGRES_PASSWORD:-screener_pass}@postgres:5432/cryptoscreener
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
-      BINANCE_PROXY: ${BINANCE_PROXY:-}
       PORT: 3002
       ROLE: broadcast
-    ports:
-      - "3002:3002"
     depends_on:
       - postgres
       - redis
     profiles:
       - scaled
-
-  broadcast-worker-2:
-    build: ./server
-    environment:
-      DATABASE_URL: postgresql://screener:screener_pass@postgres:5432/cryptoscreener
-      REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
-      BINANCE_PROXY: ${BINANCE_PROXY:-}
-      PORT: 3003
-      ROLE: broadcast
-    ports:
-      - "3003:3003"
-    depends_on:
-      - postgres
-      - redis
-    profiles:
-      - scaled
+    restart: unless-stopped
 
 volumes:
   pgdata:
