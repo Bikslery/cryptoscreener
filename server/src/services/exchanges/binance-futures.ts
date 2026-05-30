@@ -8,7 +8,7 @@ import { WsStreamPool } from './ws-pool.js'
 import { getWsAgent, getFetchDispatcher } from './proxy.js'
 import type { ProxyAgent } from 'undici'
 
-const WS_SILENCE_TIMEOUT = 10_000
+const WS_SILENCE_TIMEOUT = 30_000
 const MAX_KLINES_LIMIT = 1000
 
 async function fetchWithTimeout(url: string, ms = 10000, dispatcher?: ProxyAgent): Promise<Response> {
@@ -32,7 +32,7 @@ const STABLECOIN_BASES = new Set([
   'USDC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'EUR', 'AEUR', 'EURI', 'USDSB', 'PYUSD',
 ])
 
-const TICKER_WS_URL = 'wss://fstream.binance.com/ws/!ticker@arr'
+const TICKER_WS_URL = 'wss://fstream.binance.com/ws/!miniTicker@arr'
 const TICKER_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/24hr'
 const TICKER_WS_PING_INTERVAL = 20_000
 const TICKER_WS_RECONNECT_BASE = 1000
@@ -112,7 +112,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     this.fetchExchangeInfo().then(() => {
       this.connectTickerWs()
     })
-    console.log(`[${this.name}] Connected (WebSocket !ticker@arr)`)
+    console.log(`[${this.name}] Connected (WebSocket !miniTicker@arr)`)
   }
 
   private async fetchExchangeInfo() {
@@ -164,7 +164,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     this.tickerWs = new WebSocket(TICKER_WS_URL, this.wsOpts())
 
     this.tickerWs.on('open', () => {
-      console.log(`[${this.name}] Ticker WS connected (!ticker@arr)`)
+      console.log(`[${this.name}] Ticker WS connected (!miniTicker@arr)`)
       this.tickerWsReconnectDelay = TICKER_WS_RECONNECT_BASE
       if (this.usingRestFallback) {
         this.usingRestFallback = false
@@ -280,7 +280,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       high24h: parseFloat(isWs ? t.h : t.highPrice),
       low24h: parseFloat(isWs ? t.l : t.lowPrice),
       volume24h: parseFloat(isWs ? t.v : t.volume),
-      trades24h: parseInt(isWs ? t.n : t.count),
+      trades24h: parseInt(isWs ? (t.n ?? '0') : t.count),
       quoteVolume24h: parseFloat(isWs ? t.q : t.quoteVolume),
       range1m: 0,
       natr5m: 0,
