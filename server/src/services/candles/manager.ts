@@ -75,7 +75,7 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
 
       adapter.subscribeCandle(symbol, tf, candleCallback)
       activeCandleSubs.set(key, { adapter, count: 1 })
-      subscribeAggTrade(symbol)
+      subscribeAggTrade(symbol, adapter.exchange)
       console.log(`[CandleManager] Subscribed to ${key} via ${adapter.name}`)
     },
 
@@ -88,7 +88,7 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
       if (existing.count <= 0) {
         existing.adapter.unsubscribeCandle(symbol, tf)
         activeCandleSubs.delete(key)
-        unsubscribeAggTrade(symbol)
+        unsubscribeAggTrade(symbol, existing.adapter.exchange)
         console.log(`[CandleManager] Unsubscribed from ${key}`)
       }
     },

@@ -277,6 +277,48 @@ async function computeMetrics() {
   setInterval(compute, 30000)
 }
 
+export function updateTickerPrice(symbol: string, exchange: Exchange, price: number) {
+  const key = `${symbol}:${exchange}`
+  const existing = tickerMap.get(key)
+  if (!existing) return
+  if (existing.price === price) return
+  const open = existing.price / (1 + existing.change24h / 100)
+  existing.price = price
+  if (open > 0) {
+    existing.change24h = ((price - open) / open) * 100
+  }
+  existing.timestamp = Date.now()
+  cachedBestMap = null
+  cachedBest = null
+  tickerCount++
+  const now = Date.now()
+  if (now - lastBroadcast > BROADCAST_INTERVAL) {
+    lastBroadcast = now
+    const best = getBestMap()
+    const arr = Array.from(best.values())
+
+    if (isIngestion && REDIS_ENABLED) {
+      try {
+        const redis = getRedisPub()
+        redis.publish('tickers', JSON.stringify(arr)).catch(() => {})
+      } catch {}
+    }
+
+    if (isBroadcast) {
+      const delta = computeDelta(best)
+      if (delta.length > 0) {
+        broadcast({ type: 'ticker', data: arr })
+        broadcastCount++
+      }
+      const now2 = Date.now()
+      if (now2 - lastBroadcastLog > BROADCAST_LOG_INTERVAL) {
+        lastBroadcastLog = now2
+        console.log(`[Aggregator] Broadcast #${broadcastCount}: ${delta.length}/${arr.length} tickers changed, ${tickerCount} total ticks received`)
+      }
+    }
+  }
+}
+
 export function getTickers(): UnifiedTicker[] {
   if (!cachedBest) {
     cachedBest = Array.from(getBestMap().values())
