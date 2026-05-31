@@ -107,6 +107,7 @@ function useFullHistory(
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   options?: { limit?: number },
+  lastUpdateRef?: React.RefObject<number>,
 ): { isInitialLoading: boolean; status: 'loading' | 'ready' | 'empty' | 'error' } {
   const limit = options?.limit ?? 1000
   const [isInitialLoading, setIsInitialLoading] = useState(true)
@@ -152,6 +153,10 @@ function useFullHistory(
         renderCandles(cached)
         setIsInitialLoading(false)
         setStatus('ready')
+        // Update lastUpdateRef after successful data load
+        if (lastUpdateRef) {
+          lastUpdateRef.current = Date.now()
+        }
         return
       }
 
@@ -163,6 +168,10 @@ function useFullHistory(
           renderCandles(fetched)
           setIsInitialLoading(false)
           setStatus('ready')
+          // Update lastUpdateRef after successful data load
+          if (lastUpdateRef) {
+            lastUpdateRef.current = Date.now()
+          }
         } else {
           setIsInitialLoading(false)
           setStatus('empty')
@@ -989,7 +998,7 @@ const MiniChart = memo(function MiniChart({
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 })
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 }, lastUpdateRef)
 
   useEffect(() => {
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
@@ -1356,7 +1365,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [symbol, tf, pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, priceLineRef, lastCandleTsRef, destroyedRef, candlesDataRef)
-  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef)
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
   const flashEffect = useFlashEffect(candlesDataRef)
