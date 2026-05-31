@@ -3,7 +3,7 @@ import type { ISeriesApi, Time } from 'lightweight-charts'
 import { setLivePrice } from '../../store'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import * as candleCache from '../../services/candle-cache'
-import type { Timeframe, UnifiedCandle } from '../../types'
+import type { Timeframe, UnifiedCandle, Exchange } from '../../types'
 
 const TF_SECONDS: Record<string, number> = {
   '1m': 60, '5m': 300, '15m': 900,
@@ -19,11 +19,18 @@ function candleTimeFor(tf: Timeframe, timestampSec: number): number {
   return Math.floor(timestampSec / tfSec) * tfSec
 }
 
-const UP_COLOR = 'rgba(38,166,91,0.27)'
-const DOWN_COLOR = 'rgba(231,76,60,0.27)'
+function getCssVar(name: string, fallback: string): string {
+  if (typeof document === 'undefined') return fallback
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+}
+
+const UP_COLOR_VOL = () => getCssVar('--chart--candle-up-vol', 'rgba(38,166,91,0.27)')
+const DOWN_COLOR_VOL = () => getCssVar('--chart--candle-down-vol', 'rgba(231,76,60,0.27)')
+const UP_COLOR = () => getCssVar('--chart--candle-up', '#26a65b')
+const DOWN_COLOR = () => getCssVar('--chart--candle-down', '#e74c3c')
 
 function volumeColor(close: number, open: number): string {
-  return close >= open ? UP_COLOR : DOWN_COLOR
+  return close >= open ? UP_COLOR_VOL() : DOWN_COLOR_VOL()
 }
 
 export interface FormingCandleControl {
@@ -33,6 +40,7 @@ export interface FormingCandleControl {
 
 export function useFormingCandle(
   symbol: string,
+  exchange: Exchange | undefined,
   tf: Timeframe,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
@@ -65,6 +73,9 @@ export function useFormingCandle(
         value: c.volume,
         color: volumeColor(c.close, c.open),
       })
+      candleRef.current?.applyOptions({
+        priceLineColor: c.close >= c.open ? UP_COLOR() : DOWN_COLOR(),
+      })
     } catch {}
   }, [])
 
@@ -82,6 +93,9 @@ export function useFormingCandle(
       try {
         candleRef.current?.update(p.candle)
         volumeRef.current?.update(p.volume)
+        candleRef.current?.applyOptions({
+          priceLineColor: p.candle.close >= p.candle.open ? UP_COLOR() : DOWN_COLOR(),
+        })
       } catch {}
     })
   }, [])
@@ -148,7 +162,7 @@ export function useFormingCandle(
       const lastCandle = candlesDataRef.current?.[candlesDataRef.current.length - 1]
       cur = {
         symbol,
-        exchange: lastCandle?.exchange ?? ('agg' as any),
+        exchange: exchange ?? lastCandle?.exchange ?? ('agg' as any),
         timeframe: tf,
         time: ct,
         open: price,
@@ -156,6 +170,7 @@ export function useFormingCandle(
         low: price,
         close: price,
         volume: trade.volume || 0,
+        source: 'trade' as const,
       }
       curRef.current = cur
     } else {
@@ -187,7 +202,7 @@ export function useFormingCandle(
           arr.push({ ...c })
         }
       }
-      candleCache.updateCandle(symbol, tf, c)
+      candleCache.updateCandle(exchange!, symbol, tf, { ...c, source: 'kline' })
       updateSeries(c)
       return
     }
@@ -210,6 +225,7 @@ export function useFormingCandle(
         low: c.low,
         close: c.close,
         volume: c.volume,
+        source: 'kline' as const,
       }
       queueRaf(curRef.current)
       return
@@ -226,11 +242,12 @@ export function useFormingCandle(
   }, [symbol, tf, closeCurrentCandle, queueRaf, updateSeries])
 
   useEffect(() => {
+    if (!exchange) return
     curRef.current = null
     pausedRef.current = false
 
-    const candleChannel = `candle:${symbol}:${tf}`
-    const tradeChannel = `trade:${symbol}`
+    const candleChannel = `candle:${exchange}:${symbol}:${tf}`
+    const tradeChannel = `trade:${exchange}:${symbol}`
 
     const unsubCandle = wsOnChannel(candleChannel, (msg) => {
       const c = msg.data as UnifiedCandle
@@ -269,14 +286,14 @@ export function useFormingCandle(
       }
       curRef.current = null
     }
-  }, [symbol, tf, handleCandle, handleTrade, startPeriodTimer])
+  }, [symbol, exchange, tf, handleCandle, handleTrade, startPeriodTimer])
 
   const pause = useCallback(() => { pausedRef.current = true }, [])
   const resume = useCallback(() => {
     pausedRef.current = false
     const cur = curRef.current
-    if (cur) queueRaf(cur)
-  }, [queueRaf])
+    if (cur) updateSeries(cur)
+  }, [updateSeries])
 
   return { pause, resume }
 }

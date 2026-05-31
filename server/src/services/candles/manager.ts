@@ -1,17 +1,19 @@
 import type { CandleCallback, ExchangeAdapter } from '../exchanges/types.js'
 import { broadcastToChannel } from '../../ws/hub.js'
 import { getTicker } from '../aggregator/index.js'
-import type { UnifiedCandle } from '../../types.js'
+import type { UnifiedCandle, Exchange } from '../../types.js'
 import { subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
 
-// Track which exchange adapter is subscribed to which symbol+timeframe
+// Track which exchange adapter is subscribed to which exchange+symbol+timeframe
 const activeCandleSubs = new Map<string, { adapter: ExchangeAdapter; count: number }>()
 const activeDepthSubs = new Map<string, { adapter: ExchangeAdapter; count: number }>()
 
 export function getCandleManagerStats() {
   const byTimeframe: Record<string, { subscriptions: number; clients: number }> = {}
   for (const [key, sub] of activeCandleSubs) {
-    const tf = key.split(':')[1] || 'unknown'
+    // Key format is now exchange:symbol:tf
+    const parts = key.split(':')
+    const tf = parts[2] || 'unknown'
     const stats = byTimeframe[tf] || { subscriptions: 0, clients: 0 }
     stats.subscriptions++
     stats.clients += sub.count
@@ -26,30 +28,35 @@ export function getCandleManagerStats() {
   }
 }
 
-function getChannelKey(symbol: string, tf: string) {
-  return `${symbol}:${tf}`
+function getChannelKey(exchange: string, symbol: string, tf: string) {
+  return `${exchange}:${symbol}:${tf}`
 }
 
 function getDepthKey(symbol: string) {
   return symbol
 }
 
-function getBestAdapter(symbol: string, adapters: ExchangeAdapter[]): ExchangeAdapter | null {
-  // Prefer spot adapter for WebSocket (Binance spot WS works, futures may be blocked)
-  const spotAdapter = adapters.find(a => a.type === 'spot')
-  if (spotAdapter) return spotAdapter
-  // Fallback: use adapter matching ticker exchange
+function getBestAdapter(symbol: string, adapters: ExchangeAdapter[], preferredExchange?: Exchange): ExchangeAdapter | null {
+  // If preferred exchange is specified, use it
+  if (preferredExchange) {
+    const preferred = adapters.find(a => a.exchange === preferredExchange)
+    if (preferred) return preferred
+  }
+  // Fallback: use exchange from ticker (consistency with displayed price)
   const ticker = getTicker(symbol)
   if (ticker) {
     const adapter = adapters.find(a => a.exchange === ticker.exchange)
     if (adapter) return adapter
   }
+  // Last resort: spot (more reliable WS)
+  const spotAdapter = adapters.find(a => a.type === 'spot')
+  if (spotAdapter) return spotAdapter
   return adapters[0] || null
 }
 
 export function createCandleManager(adapters: ExchangeAdapter[]) {
   const candleCallback: CandleCallback = (candle: UnifiedCandle) => {
-    const channel = `candle:${candle.symbol}:${candle.timeframe}`
+    const channel = `candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`
     broadcastToChannel(channel, candle, true)
   }
 
@@ -59,17 +66,18 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
   }
 
   return {
-    subscribeCandle(symbol: string, tf: string) {
-      const key = getChannelKey(symbol, tf)
+    subscribeCandle(exchange: string, symbol: string, tf: string) {
+      const key = getChannelKey(exchange, symbol, tf)
       const existing = activeCandleSubs.get(key)
       if (existing) {
         existing.count++
         return
       }
 
-      const adapter = getBestAdapter(symbol, adapters)
+      // Use the specified exchange, or fall back to best adapter
+      const adapter = getBestAdapter(symbol, adapters, exchange as Exchange)
       if (!adapter) {
-        console.error(`[CandleManager] No adapter available for ${symbol}`)
+        console.error(`[CandleManager] No adapter available for ${exchange}:${symbol}`)
         return
       }
 
@@ -79,8 +87,8 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
       console.log(`[CandleManager] Subscribed to ${key} via ${adapter.name}`)
     },
 
-    unsubscribeCandle(symbol: string, tf: string) {
-      const key = getChannelKey(symbol, tf)
+    unsubscribeCandle(exchange: string, symbol: string, tf: string) {
+      const key = getChannelKey(exchange, symbol, tf)
       const existing = activeCandleSubs.get(key)
       if (!existing) return
 

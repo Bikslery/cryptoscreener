@@ -1,4 +1,4 @@
-import type { UnifiedCandle } from '../types'
+import type { UnifiedCandle, Exchange } from '../types'
 
 // Reasonable limit: ~5000 candles per symbol+tf pair keeps memory bounded
 // (5000 * 8 fields * 8 bytes ≈ 320KB per key max)
@@ -9,8 +9,8 @@ const cache = new Map<string, UnifiedCandle[]>()
 const lruOrder: string[] = []  // most-recent at end
 let totalCandleCount = 0
 
-function key(symbol: string, tf: string): string {
-  return `${symbol}:${tf}`
+function key(exchange: Exchange, symbol: string, tf: string): string {
+  return `${exchange}:${symbol}:${tf}`
 }
 
 function touchLru(k: string) {
@@ -28,10 +28,27 @@ function evictIfNeeded() {
   }
 }
 
+function validateCandle(c: UnifiedCandle): boolean {
+  // Validate all OHLC fields are finite numbers
+  if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
+    return false
+  }
+  // Validate OHLC relationships
+  if (c.high < c.low) return false
+  if (c.high < c.open || c.high < c.close) return false
+  if (c.low > c.open || c.low > c.close) return false
+  // Validate volume and time
+  if (!isFinite(c.volume) || c.volume < 0) return false
+  if (!c.time || c.time <= 0) return false
+  return true
+}
+
 function dedupSort(candles: UnifiedCandle[]): UnifiedCandle[] {
   if (candles.length <= 1) return candles
+  // Filter out invalid candles before dedup
+  const valid = candles.filter(validateCandle)
   const byTime = new Map<number, UnifiedCandle>()
-  for (const c of candles) byTime.set(c.time, c)
+  for (const c of valid) byTime.set(c.time, c)
   return Array.from(byTime.values()).sort((a, b) => a.time - b.time)
 }
 
@@ -41,15 +58,15 @@ function trimToLimit(candles: UnifiedCandle[]): UnifiedCandle[] {
     : candles
 }
 
-export function getCandles(symbol: string, tf: string): UnifiedCandle[] | undefined {
-  const k = key(symbol, tf)
+export function getCandles(exchange: Exchange, symbol: string, tf: string): UnifiedCandle[] | undefined {
+  const k = key(exchange, symbol, tf)
   const data = cache.get(k)
   if (data) touchLru(k)
   return data
 }
 
-export function setCandles(symbol: string, tf: string, candles: UnifiedCandle[]): void {
-  const k = key(symbol, tf)
+export function setCandles(exchange: Exchange, symbol: string, tf: string, candles: UnifiedCandle[]): void {
+  const k = key(exchange, symbol, tf)
   const existing = cache.get(k)
   if (existing) {
     totalCandleCount -= existing.length
@@ -67,15 +84,21 @@ export function setCandles(symbol: string, tf: string, candles: UnifiedCandle[])
   evictIfNeeded()
 }
 
-export function prependCandles(symbol: string, tf: string, older: UnifiedCandle[]): void {
+export function prependCandles(exchange: Exchange, symbol: string, tf: string, older: UnifiedCandle[]): void {
   if (older.length === 0) return
-  const k = key(symbol, tf)
-  const existing = cache.get(k) || []
-  totalCandleCount -= existing.length
+  const k = key(exchange, symbol, tf)
+
+  // Read current array RIGHT before merge to capture any updateCandle
+  // mutations that happened since this function was called. updateCandle
+  // mutates the cached array in-place, so re-reading is essential.
+  const current = cache.get(k) || []
+  totalCandleCount -= current.length
 
   const byTime = new Map<number, UnifiedCandle>()
   for (const c of older) byTime.set(c.time, c)
-  for (const c of existing) byTime.set(c.time, c)
+  // current entries overwrite older at same timestamp (current is authoritative)
+  // and include any in-place mutations from updateCandle
+  for (const c of current) byTime.set(c.time, c)
   const merged = Array.from(byTime.values()).sort((a, b) => a.time - b.time)
   const trimmed = trimToLimit(merged)
   cache.set(k, trimmed)
@@ -84,8 +107,14 @@ export function prependCandles(symbol: string, tf: string, older: UnifiedCandle[
   evictIfNeeded()
 }
 
-export function updateCandle(symbol: string, tf: string, candle: UnifiedCandle): void {
-  const k = key(symbol, tf)
+export function updateCandle(exchange: Exchange, symbol: string, tf: string, candle: UnifiedCandle): void {
+  // Validate before updating cache
+  if (!validateCandle(candle)) {
+    console.warn('[candle-cache] Invalid candle rejected', { exchange, symbol, tf, time: candle.time })
+    return
+  }
+
+  const k = key(exchange, symbol, tf)
   const arr = cache.get(k)
   if (!arr) return
   const last = arr[arr.length - 1]
@@ -119,8 +148,8 @@ export function storeBulk(data: Record<string, UnifiedCandle[]>): void {
   evictIfNeeded()
 }
 
-export function hasCandles(symbol: string, tf: string): boolean {
-  const arr = cache.get(key(symbol, tf))
+export function hasCandles(exchange: Exchange, symbol: string, tf: string): boolean {
+  const arr = cache.get(key(exchange, symbol, tf))
   return !!arr && arr.length > 0
 }
 

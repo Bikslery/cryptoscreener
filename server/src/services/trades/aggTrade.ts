@@ -70,8 +70,9 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
 
         updateTickerPrice(symbol, exchange, price)
 
-        broadcastToChannel(`trade:${symbol}`, {
+        broadcastToChannel(`trade:${exchange}:${symbol}`, {
           symbol,
+          exchange,
           price,
           volume,
           time: data.T / 1000,

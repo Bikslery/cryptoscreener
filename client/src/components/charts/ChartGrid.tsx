@@ -5,7 +5,7 @@ import { useCoinListStore, useLivePrice } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { debounce } from '../../utils/debounce'
 import { wsOnType } from '../../services/ws'
-import type { Timeframe, UnifiedCandle } from '../../types'
+import type { Timeframe, UnifiedCandle, Exchange } from '../../types'
 import { useFormingCandle, type FormingCandleControl } from './useFormingCandle'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
@@ -14,8 +14,17 @@ import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk } from '../../servic
 import { useDrawings, type DrawingTool } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
 
-const UP_COLOR = '#26a65b'
-const DOWN_COLOR = '#e74c3c'
+// CSS-variable driven colors (Step 5)
+function getCssVar(name: string, fallback: string): string {
+  if (typeof document === 'undefined') return fallback
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+}
+const UP_COLOR = () => getCssVar('--chart--candle-up', '#26a65b')
+const DOWN_COLOR = () => getCssVar('--chart--candle-down', '#e74c3c')
+const UP_COLOR_VOL = () => getCssVar('--chart--candle-up-vol', 'rgba(38,166,91,0.27)')
+const DOWN_COLOR_VOL = () => getCssVar('--chart--candle-down-vol', 'rgba(231,76,60,0.27)')
+const UP_BORDER = () => getCssVar('--chart--candle-border-up', '#26a65b')
+const DOWN_BORDER = () => getCssVar('--chart--candle-border-down', '#e74c3c')
 
 function ChartMessageOverlay({ label, tone = 'muted' }: { label: string; tone?: 'muted' | 'error' }) {
   return (
@@ -35,6 +44,41 @@ function ChartCornerSpinner() {
   return (
     <div className="absolute top-[8px] right-[8px] z-30 pointer-events-none">
       <div className="w-[14px] h-[14px] border-2 border-[#555] border-t-[#ccc] rounded-full animate-spin" />
+    </div>
+  )
+}
+
+function LiveIndicator({ isLive, lastUpdate }: { isLive: boolean; lastUpdate: number }) {
+  const timeSinceUpdate = Date.now() - lastUpdate
+  const showWarning = timeSinceUpdate > 3000
+
+  return (
+    <div className="absolute top-[8px] right-[8px] z-30 pointer-events-none flex items-center gap-[6px] px-[8px] py-[4px] rounded-[4px] bg-[#141414]/95 border border-[#2a2a2a] shadow-lg">
+      <div
+        className={`w-[6px] h-[6px] rounded-full ${
+          isLive && !showWarning
+            ? 'bg-[#26a65b] live-indicator-pulse'
+            : 'bg-[#666]'
+        }`}
+      />
+      <span className={`text-[9px] font-bold tracking-wide ${
+        isLive && !showWarning ? 'text-[#26a65b]' : 'text-[#666]'
+      }`}>
+        {isLive && !showWarning ? 'LIVE' : 'PAUSED'}
+      </span>
+    </div>
+  )
+}
+
+function StaleDataOverlay({ visible }: { visible: boolean }) {
+  if (!visible) return null
+
+  return (
+    <div className="stale-data-overlay absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-[#0a0a0a]/60 backdrop-blur-[3px]">
+      <div className="rounded-[6px] border border-[#e74c3c]/40 bg-[#1a1010]/95 px-4 py-3 text-[12px] font-medium shadow-[0_12px_30px_rgba(0,0,0,0.35)] flex items-center gap-3">
+        <div className="w-[14px] h-[14px] border-2 border-[#e74c3c]/40 border-t-[#e74c3c] rounded-full animate-spin" />
+        <span className="text-[#f0b0aa]">Переподключение к серверу...</span>
+      </div>
     </div>
   )
 }
@@ -59,6 +103,7 @@ function useInitialCandlesPush() {
 
 function useFullHistory(
   symbol: string,
+  exchange: Exchange | undefined,
   tf: Timeframe,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
@@ -66,12 +111,14 @@ function useFullHistory(
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   options?: { limit?: number },
+  lastUpdateRef?: React.RefObject<number>,
 ): { isInitialLoading: boolean; status: 'loading' | 'ready' | 'empty' | 'error' } {
   const limit = options?.limit ?? 1000
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading')
 
   useEffect(() => {
+    if (!exchange) return
     const cancelled = { value: false }
     setIsInitialLoading(true)
     setStatus('loading')
@@ -79,12 +126,17 @@ function useFullHistory(
     const renderCandles = (candles: UnifiedCandle[]) => {
       if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
       candlesDataRef.current = candles
-      const candleData = candles.map(c => ({
+      // Filter out invalid candles before rendering
+      const validCandles = candles.filter(c =>
+        isFinite(c.open) && isFinite(c.high) && isFinite(c.low) && isFinite(c.close) &&
+        isFinite(c.volume) && c.volume >= 0 && c.time > 0
+      )
+      const candleData = validCandles.map(c => ({
         time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
       }))
-      const volumeData = candles.map(c => ({
+      const volumeData = validCandles.map(c => ({
         time: c.time as Time, value: c.volume,
-        color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
+        color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
       }))
       try {
         candleRef.current.setData(candleData)
@@ -100,11 +152,17 @@ function useFullHistory(
 
     const run = async () => {
       // Fast path: check client cache
-      const cached = candleCache.getCandles(symbol, tf)
+      const cached = candleCache.getCandles(exchange, symbol, tf)
       if (cached && cached.length > 0) {
-        renderCandles(cached)
-        setIsInitialLoading(false)
-        setStatus('ready')
+        if (!cancelled.value && !destroyedRef.current) {
+          renderCandles(cached)
+          setIsInitialLoading(false)
+          setStatus('ready')
+          // Update lastUpdateRef after successful data load
+          if (lastUpdateRef) {
+            lastUpdateRef.current = Date.now()
+          }
+        }
         return
       }
 
@@ -116,6 +174,11 @@ function useFullHistory(
           renderCandles(fetched)
           setIsInitialLoading(false)
           setStatus('ready')
+          // Update lastUpdateRef after successful data load
+          if (lastUpdateRef) {
+            lastUpdateRef.current = Date.now()
+            console.log('[useFullHistory] Initial load from server', { symbol, tf, candles: fetched.length })
+          }
         } else {
           setIsInitialLoading(false)
           setStatus('empty')
@@ -128,13 +191,14 @@ function useFullHistory(
 
     run()
     return () => { cancelled.value = true }
-  }, [symbol, tf])
+  }, [symbol, exchange, tf])
 
   return { isInitialLoading, status }
 }
 
 function useLazyScroll(
   symbol: string,
+  exchange: Exchange | undefined,
   tf: Timeframe,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
@@ -142,23 +206,25 @@ function useLazyScroll(
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   isInitialLoading: boolean,
-  setIsLoadingMore: ((loading: boolean) => void) | undefined,
   formingControl: FormingCandleControl,
+  setIsLoadingMore?: (loading: boolean) => void,
 ) {
   const inflightRef = useRef(false)
   const reachedStartRef = useRef(false)
   const symbolRef = useRef(symbol)
+  const exchangeRef = useRef(exchange)
   const tfRef = useRef(tf)
   const emptyCountRef = useRef(0)
 
   useEffect(() => {
     symbolRef.current = symbol
+    exchangeRef.current = exchange
     tfRef.current = tf
     reachedStartRef.current = false
     inflightRef.current = false
     formingControl.resume()
     emptyCountRef.current = 0
-  }, [symbol, tf])
+  }, [symbol, exchange, tf])
 
   // Bug 3: debounce onRange — avoid dozens of redundant checks per second during fast scroll
   const onRangeDebounced = useMemo(
@@ -173,7 +239,14 @@ function useLazyScroll(
       if (range.from > threshold) return
 
       const curSymbol = symbolRef.current
+      const curExchange = exchangeRef.current
       const curTf = tfRef.current
+
+      if (!curExchange) {
+        inflightRef.current = false
+        setIsLoadingMore?.(false)
+        return
+      }
 
       inflightRef.current = true
       setIsLoadingMore?.(true)
@@ -188,7 +261,7 @@ function useLazyScroll(
         }
       }
 
-      const cached = candleCache.getCandles(curSymbol, curTf)
+      const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
       if (!cached || cached.length === 0) {
         inflightRef.current = false
         setIsLoadingMore?.(false)
@@ -221,8 +294,8 @@ function useLazyScroll(
           // Got new data — reset empty counter
           emptyCountRef.current = 0
 
-          candleCache.prependCandles(curSymbol, curTf, newCandles)
-          const merged = candleCache.getCandles(curSymbol, curTf)
+          candleCache.prependCandles(curExchange, curSymbol, curTf, newCandles)
+          const merged = candleCache.getCandles(curExchange, curSymbol, curTf)
           if (!merged || merged.length === 0) {
             inflightRef.current = false
             setIsLoadingMore?.(false)
@@ -258,7 +331,7 @@ function useLazyScroll(
             }))
             const volumeData = merged.map(c => ({
               time: c.time as Time, value: c.volume,
-              color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
+              color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
             }))
             candleRef.current?.setData(candleData)
             volumeRef.current?.setData(volumeData)
@@ -273,9 +346,11 @@ function useLazyScroll(
                 to: prevRange.to + added,
               })
             }
-          } catch {}
-
-          formingControl.resume()
+          } catch (err) {
+            console.error('[ChartGrid] setData failed during lazy scroll', { symbol, tf, error: err })
+          } finally {
+            formingControl.resume()
+          }
           inflightRef.current = false
           setIsLoadingMore?.(false)
 
@@ -284,10 +359,10 @@ function useLazyScroll(
           {
             const ts = chartRef.current?.timeScale()
             const curRange = ts?.getVisibleLogicalRange()
-            if (ts && curRange && !reachedStartRef.current) {
+            if (ts && curRange && !reachedStartRef.current && curExchange) {
               const vis = curRange.to - curRange.from
               if (curRange.from < vis * 0.6) {
-                const newCached = candleCache.getCandles(curSymbol, curTf)
+                const newCached = candleCache.getCandles(curExchange, curSymbol, curTf)
                 if (newCached && newCached.length > 0) {
                   // Fire-and-forget: warm the cache for the next scroll trigger
                   getOrFetchOlder(curSymbol, curTf, newCached[0].time, 1000).catch(() => {})
@@ -323,6 +398,90 @@ function useLazyScroll(
   }, [symbol, tf, isInitialLoading, onRangeDebounced])
 }
 
+function useLiveIndicator(
+  lastUpdateRef: React.RefObject<number>
+): { isLive: boolean; lastUpdate: number } {
+  const [state, setState] = useState({ isLive: true, lastUpdate: Date.now() })
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now()
+      const timeSinceUpdate = now - lastUpdateRef.current
+      setState({
+        isLive: timeSinceUpdate < 3000,
+        lastUpdate: lastUpdateRef.current
+      })
+    }, 500) // Check twice per second
+
+    return () => clearInterval(interval)
+  }, [])
+
+  return state
+}
+
+function useStaleDataDetection(
+  lastUpdateRef: React.RefObject<number>,
+  threshold = 30000 // Увеличено до 30 секунд для низколиквидных пар
+): boolean {
+  const [isStale, setIsStale] = useState(false)
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - lastUpdateRef.current
+      const shouldBeStale = elapsed > threshold
+
+      // Debug logging
+      if (shouldBeStale !== isStale) {
+        console.log('[StaleDetection]', {
+          elapsed: Math.round(elapsed / 1000) + 's',
+          threshold: Math.round(threshold / 1000) + 's',
+          isStale: shouldBeStale,
+          lastUpdate: new Date(lastUpdateRef.current).toLocaleTimeString()
+        })
+      }
+
+      setIsStale(shouldBeStale)
+    }, 1000)
+
+    return () => clearInterval(interval)
+  }, [threshold])
+
+  return isStale
+}
+
+function useFlashEffect(
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  threshold = 0.005 // 0.5%
+): 'up' | 'down' | null {
+  const [flash, setFlash] = useState<'up' | 'down' | null>(null)
+  const prevCloseRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const candles = candlesDataRef.current
+    if (!candles || candles.length === 0) return
+
+    const lastCandle = candles[candles.length - 1]
+    const prevClose = prevCloseRef.current
+
+    if (prevClose !== null && isFinite(lastCandle.close) && isFinite(prevClose)) {
+      const change = Math.abs(lastCandle.close - prevClose) / prevClose
+
+      if (change > threshold) {
+        const direction = lastCandle.close > prevClose ? 'up' : 'down'
+        setFlash(direction)
+
+        const timer = setTimeout(() => setFlash(null), 300)
+        return () => clearTimeout(timer)
+      }
+    }
+
+    prevCloseRef.current = lastCandle.close
+  }, [candlesDataRef.current?.[candlesDataRef.current.length - 1]?.close, threshold])
+
+  return flash
+}
+
+
 
 function exchangeBadge(ex: string): string {
   if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
@@ -334,6 +493,7 @@ function exchangeBadge(ex: string): string {
 }
 
 const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: string }) {
+  const prevPriceRef = useRef<number | null>(null)
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
     if (!c) return null
@@ -347,7 +507,6 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
   }))
   const livePrice = useLivePrice(symbol)
   const [flash, setFlash] = useState<'green' | 'red' | null>(null)
-  const prevPriceRef = useRef<number | null>(null)
 
   useEffect(() => {
     if (livePrice == null) return
@@ -398,43 +557,103 @@ const MiniChart = memo(function MiniChart({
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
-  const priceLineRef = useRef<any>(null)
-  const prevPriceRef = useRef<number | null>(null)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
+  const exchange = useCoinListStore(s => s.coinMap.get(symbol)?.exchange)
   const candlesDataRef = useRef<UnifiedCandle[]>([])
-  const [priceLineVersion, setPriceLineVersion] = useState(0)
+  const lastUpdateRef = useRef<number>(Date.now())
 
-  const formingControl = useFormingCandle(symbol, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
-
-  const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 })
+  const formingControl = useFormingCandle(symbol, exchange, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
+  const liveIndicator = useLiveIndicator(lastUpdateRef)
+  const isStale = useStaleDataDetection(lastUpdateRef)
+  const flashEffect = useFlashEffect(candlesDataRef)
 
   useEffect(() => {
+    destroyedRef.current = false
+    if (!containerRef.current) return
+
+    const chart = createChart(containerRef.current, {
+      layout: { background: { type: ColorType.Solid, color: '#0e0e0e' }, textColor: '#666666', fontSize: 9, fontFamily: "'JetBrains Mono', monospace" },
+      grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
+      crosshair: { mode: CrosshairMode.Normal, vertLine: { visible: true, color: '#4d4d4d' }, horzLine: { visible: true, color: '#4d4d4d' } },
+      rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.1, bottom: 0.25 }, textColor: '#666666' },
+      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6, rightOffset: 12, fixLeftEdge: false, fixRightEdge: false },
+      handleScroll: true,
+      handleScale: {
+        axisPressedMouseMove: { time: true, price: true },
+        pinch: true,
+        mouseWheel: true,
+      },
+      kineticScroll: { touch: false, mouse: false },
+    })
+
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: UP_COLOR(), downColor: DOWN_COLOR(),
+      borderUpColor: UP_BORDER(), borderDownColor: DOWN_BORDER(),
+      wickUpColor: UP_COLOR(), wickDownColor: DOWN_COLOR(),
+      priceLineVisible: true,
+      lastValueVisible: false,
+      priceLineColor: UP_COLOR(),
+      priceFormat: {
+        type: 'price',
+        precision: pricePrecision,
+        minMove: Math.pow(10, -pricePrecision),
+      },
+    })
+    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', priceLineVisible: false })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, textColor: '#666666' })
+
+    chartRef.current = chart
+    candleRef.current = candleSeries
+    volumeRef.current = volumeSeries
+
+
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current && !destroyedRef.current) {
+        chart.applyOptions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight })
+      }
+    })
+    ro.observe(containerRef.current)
+
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        e.stopPropagation()
+        const ts = chart.timeScale()
+        const options = ts.options()
+        const currentSpacing = (options as any).barSpacing || 6
+        const delta = e.deltaY > 0 ? -0.5 : 0.5
+        const newSpacing = Math.max(1, Math.min(30, currentSpacing + delta))
+        ts.applyOptions({ barSpacing: newSpacing })
+      }
+    }
+    containerRef.current.addEventListener('wheel', onWheel, { passive: false })
+
+    return () => {
+      destroyedRef.current = true
+      containerRef.current?.removeEventListener('wheel', onWheel)
+      ro.disconnect()
+      chart.remove()
+      chartRef.current = null
+      candleRef.current = null
+      volumeRef.current = null
+    }
+  }, [symbol, tf, pricePrecision])
+
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 }, lastUpdateRef)
+
+ useEffect(() => {
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
   }, [isInitialLoading, symbol, tf, onLoaded])
 
-  usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
 
-  // Set initial price line position from loaded data
-  useEffect(() => {
-    if (isInitialLoading || !priceLineRef.current) return
-    const candles = candlesDataRef.current
-    if (candles.length === 0) return
-    const lastClose = candles[candles.length - 1].close
-    if (isFinite(lastClose) && lastClose > 0) {
-      try {
-        priceLineRef.current.applyOptions({ price: lastClose, color: '#26a65b' })
-        prevPriceRef.current = lastClose
-      } catch {}
-    }
-  }, [isInitialLoading, symbol, tf, priceLineVersion])
 
   return (
     <div
       className={`relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px] transition-all duration-300 ease-out ${
         visible ? 'opacity-100 scale-100' : 'opacity-0 scale-[0.99]'
-      }`}
+      } ${flashEffect ? `flash-border-${flashEffect}` : ''}`}
     >
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
         <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
@@ -442,7 +661,10 @@ const MiniChart = memo(function MiniChart({
         </span>
       </div>
       <MiniChartHeader symbol={symbol} />
-      <div ref={containerRef} className="relative z-0 flex-1 min-h-0" />
+      <div ref={containerRef} className="relative z-0 flex-1 min-h-0">
+        {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} />}
+        {isStale && <StaleDataOverlay visible={true} />}
+      </div>
       {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
       {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
     </div>
@@ -550,49 +772,20 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
   )
 })
 
-function usePriceLine(
-  symbol: string,
-  priceLineRef: React.RefObject<any>,
-  prevPriceRef: React.RefObject<number | null>,
-  destroyedRef: React.RefObject<boolean>,
-  priceLineVersion: number,
-) {
-  const livePrice = useLivePrice(symbol)
-
-  useEffect(() => {
-    prevPriceRef.current = null
-  }, [symbol])
-
-  // Update from live price store (most reliable source)
-  useEffect(() => {
-    if (livePrice == null || destroyedRef.current || !priceLineRef.current) return
-    const prev = prevPriceRef.current
-    const isUp = prev == null || livePrice >= prev
-    prevPriceRef.current = livePrice
-    try {
-      priceLineRef.current.applyOptions({
-        price: livePrice,
-        color: isUp ? '#26a65b' : '#e74c3c',
-      })
-    } catch {}
-  }, [livePrice, priceLineVersion])
-}
-
 function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const candlesDataRef = useRef<UnifiedCandle[]>([])
-  const priceLineRef = useRef<any>(null)
-  const prevPriceRef = useRef<number | null>(null)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
-  const [priceLineVersion, setPriceLineVersion] = useState(0)
+  const exchange = useCoinListStore(s => s.coinMap.get(symbol)?.exchange)
   const [selection, setSelection] = useState<RangeSelection | null>(null)
   const [chartVersion, setChartVersion] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const lastUpdateRef = useRef<number>(Date.now())
 
   const {
     activeTool,
@@ -619,7 +812,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' }, horzLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' } },
       rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.05, bottom: 0.15 }, textColor: '#666666' },
-      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6 },
+      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6, rightOffset: 12, fixLeftEdge: false, fixRightEdge: false },
       handleScroll: true,
       handleScale: {
         axisPressedMouseMove: { time: true, price: true },
@@ -630,11 +823,12 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     })
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: UP_COLOR, downColor: DOWN_COLOR,
-      borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
-      wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
-      priceLineVisible: false,
+      upColor: UP_COLOR(), downColor: DOWN_COLOR(),
+      borderUpColor: UP_BORDER(), borderDownColor: DOWN_BORDER(),
+      wickUpColor: UP_COLOR(), wickDownColor: DOWN_COLOR(),
+      priceLineVisible: true,
       lastValueVisible: false,
+      priceLineColor: UP_COLOR(),
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
@@ -647,15 +841,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     chartRef.current = chart
     candleRef.current = candleSeries
     volumeRef.current = volumeSeries
-    priceLineRef.current = candleSeries.createPriceLine({
-      price: 0,
-      color: '#26a65b',
-      lineStyle: 2, // Dashed
-      lineWidth: 1,
-      axisLabelVisible: true,
-      title: '',
-    })
-    setPriceLineVersion(v => v + 1)
+
     setChartVersion(v => v + 1)
 
     const ro = new ResizeObserver(() => {
@@ -687,29 +873,18 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       chartRef.current = null
       candleRef.current = null
       volumeRef.current = null
-      priceLineRef.current = null
-      prevPriceRef.current = null
     }
   }, [symbol, tf, pricePrecision])
 
-  const formingControl = useFormingCandle(symbol, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
-  const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
-  usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
-  useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, setIsLoadingMore, formingControl)
+  const formingControl = useFormingCandle(symbol, exchange, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef)
+  const liveIndicator = useLiveIndicator(lastUpdateRef)
+  const isStale = useStaleDataDetection(lastUpdateRef)
+  const flashEffect = useFlashEffect(candlesDataRef)
 
-  // Set initial price line position from loaded data
-  useEffect(() => {
-    if (isInitialLoading || !priceLineRef.current) return
-    const candles = candlesDataRef.current
-    if (candles.length === 0) return
-    const lastClose = candles[candles.length - 1].close
-    if (isFinite(lastClose) && lastClose > 0) {
-      try {
-        priceLineRef.current.applyOptions({ price: lastClose, color: '#26a65b' })
-        prevPriceRef.current = lastClose
-      } catch {}
-    }
-  }, [isInitialLoading, symbol, tf, priceLineVersion])
+  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, formingControl, setIsLoadingMore)
+
+
 
   useEffect(() => {
     setSelection(null)
@@ -910,10 +1085,11 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [primitiveRef])
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
+    <div className={`flex-1 flex flex-col h-full bg-[#0e0e0e] ${flashEffect ? `flash-border-${flashEffect}` : ''}`}>
       <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} />
       <div ref={containerRef} className="relative flex-1 min-h-0">
         {isInitialLoading && <ChartCornerSpinner />}
+        {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} />}
         {!isInitialLoading && isLoadingMore && (
           <div className="absolute top-[8px] left-[8px] z-30 pointer-events-none">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-[4px] bg-[#1a1a1a]/95 border border-[#2a2a2a] shadow-lg">
@@ -922,6 +1098,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
             </div>
           </div>
         )}
+        {isStale && <StaleDataOverlay visible={true} />}
         {status === 'empty' && <ChartMessageOverlay label="Нет данных для этого таймфрейма" />}
         {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных. Попробуйте другой таймфрейм." tone="error" />}
         {(pendingPointPixel || previewLine) && (

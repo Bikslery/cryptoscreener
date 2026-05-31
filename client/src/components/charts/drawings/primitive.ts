@@ -210,6 +210,7 @@ export class DrawingsPrimitive implements IPanePrimitive {
   private _items: DrawItem[] = []
   private _cw = 0
   private _ch = 0
+  private _disposed = false
 
   constructor() {
     this._renderer = new DrawingsRenderer()
@@ -248,9 +249,11 @@ export class DrawingsPrimitive implements IPanePrimitive {
   attached?(param: PaneAttachedParameter<Time>) {
     this._chart = param.chart as IChartApi
     this._requestUpdate = param.requestUpdate
+    this._disposed = false
   }
 
   detached?() {
+    this._disposed = true
     this._chart = null
     this._requestUpdate = null
   }
@@ -277,6 +280,7 @@ export class DrawingsPrimitive implements IPanePrimitive {
   }
 
   requestUpdate() {
+    if (this._disposed) return
     if (this._requestUpdate) {
       this._requestUpdate()
     }
