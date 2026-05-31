@@ -351,7 +351,7 @@ export function startRedisListener() {
           broadcast({ type: 'ticker', data: tickers })
         } else if (channel === 'candles') {
           const candle = JSON.parse(message) as UnifiedCandle
-          broadcastToChannel(`candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`, candle)
+          broadcastToChannel(`candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`, candle, true)
         } else if (channel === 'depth') {
           const depth = JSON.parse(message)
           broadcastToChannel(`depth:${depth.symbol}`, depth)

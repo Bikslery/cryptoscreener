@@ -87,12 +87,18 @@ export function setCandles(exchange: Exchange, symbol: string, tf: string, candl
 export function prependCandles(exchange: Exchange, symbol: string, tf: string, older: UnifiedCandle[]): void {
   if (older.length === 0) return
   const k = key(exchange, symbol, tf)
-  const existing = cache.get(k) || []
-  totalCandleCount -= existing.length
+
+  // Read current array RIGHT before merge to capture any updateCandle
+  // mutations that happened since this function was called. updateCandle
+  // mutates the cached array in-place, so re-reading is essential.
+  const current = cache.get(k) || []
+  totalCandleCount -= current.length
 
   const byTime = new Map<number, UnifiedCandle>()
   for (const c of older) byTime.set(c.time, c)
-  for (const c of existing) byTime.set(c.time, c)
+  // current entries overwrite older at same timestamp (current is authoritative)
+  // and include any in-place mutations from updateCandle
+  for (const c of current) byTime.set(c.time, c)
   const merged = Array.from(byTime.values()).sort((a, b) => a.time - b.time)
   const trimmed = trimToLimit(merged)
   cache.set(k, trimmed)
