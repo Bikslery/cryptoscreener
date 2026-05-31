@@ -18,18 +18,28 @@ function getCssVar(name: string, fallback: string): string {
   if (typeof document === 'undefined') return fallback
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
 }
-const UP_COLOR = () => getCssVar('--chart-candle-up', '#26a65b')
-const DOWN_COLOR = () => getCssVar('--chart-candle-down', '#e74c3c')
-const UP_COLOR_VOL = () => getCssVar('--chart-candle-up-vol', 'rgba(38,166,91,0.27)')
-const DOWN_COLOR_VOL = () => getCssVar('--chart-candle-down-vol', 'rgba(231,76,60,0.27)')
-const UP_BORDER = () => getCssVar('--chart-candle-border-up', '#26a65b')
-const DOWN_BORDER = () => getCssVar('--chart-candle-border-down', '#e74c3c')
+const UP_COLOR = () => getCssVar('--chart--candle-up', '#26a65b')
+const DOWN_COLOR = () => getCssVar('--chart--candle-down', '#e74c3c')
+const UP_COLOR_VOL = () => getCssVar('--chart--candle-up-vol', 'rgba(38,166,91,0.27)')
+const DOWN_COLOR_VOL = () => getCssVar('--chart--candle-down-vol', 'rgba(231,76,60,0.27)')
+const UP_BORDER = () => getCssVar('--chart--candle-border-up', '#26a65b')
+const DOWN_BORDER = () => getCssVar('--chart--candle-border-down', '#e74c3c')
 
 const TF_SECONDS: Record<string, number> = {
   '1m': 60, '5m': 300, '15m': 900,
   '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
 }
 function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
+
+// ScalpBoard-style mutable last bar (Step 2)
+interface LastBar {
+  time: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
 
 function ChartMessageOverlay({ label, tone = 'muted' }: { label: string; tone?: 'muted' | 'error' }) {
   return (
@@ -490,7 +500,8 @@ function useWsCandle(
   symbol: string,
   exchange: Exchange | undefined,
   tf: Timeframe,
-  direct: ReturnType<typeof useDirectUpdate>,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
   lastBarRef: React.RefObject<LastBar | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
@@ -558,21 +569,28 @@ function useWsCandle(
         }
       }
 
-      // Step 1: direct series.update() — no RAF batching
+      // ScalpBoard-style: direct series.update() — no RAF, no indirection
       const bar = lastBarRef.current
-      direct.updateCandle({
-        time: bar.time as Time,
-        open: bar.open,
-        high: bar.high,
-        low: bar.low,
-        close: bar.close,
+      if (candleRef.current) {
+        candleRef.current.update({
+          time: bar.time as Time,
+          open: bar.open,
+          high: bar.high,
+          low: bar.low,
+          close: bar.close,
+        })
+      }
+      if (volumeRef.current) {
+        volumeRef.current.update({
+          time: bar.time as Time,
+          value: bar.volume,
+          color: bar.close >= bar.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
+        })
+      }
+      // ScalpBoard-style: update price line color on direction change
+      candleRef.current?.applyOptions({
+        priceLineColor: bar.close >= bar.open ? UP_COLOR() : DOWN_COLOR(),
       })
-      direct.updateVolume({
-        time: bar.time as Time,
-        value: bar.volume,
-        color: bar.close >= bar.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-      })
-      direct.updatePriceLine(bar.close, bar.close >= bar.open ? UP_COLOR() : DOWN_COLOR())
     })
     wsSubscribe(channel)
     return () => {
@@ -586,7 +604,8 @@ function useWsTrade(
   symbol: string,
   exchange: Exchange | undefined,
   tf: Timeframe,
-  direct: ReturnType<typeof useDirectUpdate>,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
   lastBarRef: React.RefObject<LastBar | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
@@ -625,20 +644,13 @@ function useWsTrade(
       const tfSeconds = getTfSeconds(tf)
       let candleTime = Math.floor(tradeSec / tfSeconds) * tfSeconds
 
-      // Clamp forward — never build a candle that predates the last bar
-      if (candlesDataRef?.current) {
-        const arr = candlesDataRef.current
-        const lastBar = arr[arr.length - 1]
-        if (lastBar && candleTime < (lastBar.time as number)) {
-          candleTime = lastBar.time as number
-        }
-      }
 
       const bar = lastBarRef.current
 
       // Step 4: validate interval — new candle if beyond current period
       // Step 2: mutate lastBarRef instead of creating new objects
-      if (!bar || bar.time !== candleTime || (bar.time + tfSeconds <= candleTime)) {
+      // ScalpBoard-style: trade must be strictly inside current candle period
+      if (!bar || tradeSec <= bar.time || tradeSec >= bar.time + tfSeconds) {
         lastBarRef.current = {
           time: candleTime,
           open: bar && bar.time === candleTime ? bar.open : price,
@@ -679,20 +691,27 @@ function useWsTrade(
         else arr.push(unifiedCandle)
       }
 
-      // Step 1: direct series.update() — no RAF batching
-      direct.updateCandle({
-        time: cur.time as Time,
-        open: cur.open,
-        high: cur.high,
-        low: cur.low,
-        close: cur.close,
+      // ScalpBoard-style: direct series.update() — no RAF, no indirection
+      if (candleRef.current) {
+        candleRef.current.update({
+          time: cur.time as Time,
+          open: cur.open,
+          high: cur.high,
+          low: cur.low,
+          close: cur.close,
+        })
+      }
+      if (volumeRef.current) {
+        volumeRef.current.update({
+          time: cur.time as Time,
+          value: cur.volume,
+          color: cur.close >= cur.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
+        })
+      }
+      // ScalpBoard-style: update price line color on direction change
+      candleRef.current?.applyOptions({
+        priceLineColor: cur.close >= cur.open ? UP_COLOR() : DOWN_COLOR(),
       })
-      direct.updateVolume({
-        time: cur.time as Time,
-        value: cur.volume,
-        color: cur.close >= cur.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-      })
-      direct.updatePriceLine(cur.close, cur.close >= cur.open ? UP_COLOR() : DOWN_COLOR())
     })
     wsSubscribe(tradeType)
 
@@ -714,6 +733,7 @@ function exchangeBadge(ex: string): string {
 }
 
 const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: string }) {
+  const prevPriceRef = useRef<number | null>(null)
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
     if (!c) return null
@@ -727,7 +747,6 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
   }))
   const livePrice = useLivePrice(symbol)
   const [flash, setFlash] = useState<'green' | 'red' | null>(null)
-  const prevPriceRef = useRef<number | null>(null)
 
   useEffect(() => {
     if (livePrice == null) return
@@ -778,18 +797,13 @@ const MiniChart = memo(function MiniChart({
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
-  const priceLineRef = useRef<any>(null)
-  const prevPriceRef = useRef<number | null>(null)
-  const lastCandleTsRef = useRef<number>(0)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const exchange = useCoinListStore(s => s.coinMap.get(symbol)?.exchange)
   const candlesDataRef = useRef<UnifiedCandle[]>([])
-  const [priceLineVersion, setPriceLineVersion] = useState(0)
   const lastUpdateRef = useRef<number>(Date.now())
 
-  const direct = useDirectUpdate(candleRef, volumeRef, priceLineRef, lastCandleTsRef, destroyedRef)
   const lastBarRef = useRef<LastBar | null>(null)
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
@@ -818,8 +832,9 @@ const MiniChart = memo(function MiniChart({
       upColor: UP_COLOR(), downColor: DOWN_COLOR(),
       borderUpColor: UP_BORDER(), borderDownColor: DOWN_BORDER(),
       wickUpColor: UP_COLOR(), wickDownColor: DOWN_COLOR(),
-      priceLineVisible: false,
+      priceLineVisible: true,
       lastValueVisible: false,
+      priceLineColor: UP_COLOR(),
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
@@ -832,15 +847,7 @@ const MiniChart = memo(function MiniChart({
     chartRef.current = chart
     candleRef.current = candleSeries
     volumeRef.current = volumeSeries
-    priceLineRef.current = candleSeries.createPriceLine({
-      price: 0,
-      color: UP_COLOR(),
-      lineStyle: 2, // Dashed
-      lineWidth: 1,
-      axisLabelVisible: true,
-      title: '',
-    })
-    setPriceLineVersion(v => v + 1)
+
 
     const ro = new ResizeObserver(() => {
       if (containerRef.current && !destroyedRef.current) {
@@ -871,8 +878,6 @@ const MiniChart = memo(function MiniChart({
       chartRef.current = null
       candleRef.current = null
       volumeRef.current = null
-      priceLineRef.current = null
-      prevPriceRef.current = null
     }
   }, [symbol, tf, pricePrecision])
 
@@ -882,24 +887,10 @@ const MiniChart = memo(function MiniChart({
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
   }, [isInitialLoading, symbol, tf, onLoaded])
 
-  useWsCandle(symbol, exchange, tf, direct, lastBarRef, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
-  useWsTrade(symbol, exchange, tf, direct, lastBarRef, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
-  usePriceLine(symbol, exchange, tf, priceLineRef, prevPriceRef, lastCandleTsRef, destroyedRef, priceLineVersion, candlesDataRef)
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lastBarRef, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lastBarRef, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
 
-  // Set initial price line position from loaded data
-  useEffect(() => {
-    if (isInitialLoading || !priceLineRef.current) return
-    const candles = candlesDataRef.current
-    if (candles.length === 0) return
-    const last = candles[candles.length - 1]
-    if (isFinite(last.close) && last.close > 0) {
-      const color = last.close >= last.open ? UP_COLOR() : DOWN_COLOR()
-      try {
-        priceLineRef.current.applyOptions({ price: last.close, color })
-        prevPriceRef.current = last.close
-      } catch {}
-    }
-  }, [isInitialLoading, symbol, tf, priceLineVersion])
+
 
   return (
     <div
@@ -1024,121 +1015,17 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
   )
 })
 
-function usePriceLine(
-  symbol: string,
-  exchange: Exchange | undefined,
-  tf: Timeframe,
-  priceLineRef: React.RefObject<any>,
-  prevPriceRef: React.RefObject<number | null>,
-  lastCandleTsRef: React.RefObject<number>,
-  destroyedRef: React.RefObject<boolean>,
-  priceLineVersion: number,
-  candlesDataRef: React.RefObject<UnifiedCandle[]>,
-) {
-  const livePrice = useLivePrice(symbol)
-  const updateTimerRef = useRef<number | null>(null)
-  const pendingPriceRef = useRef<number | null>(null)
-  const lastCandleColorRef = useRef<string>(UP_COLOR())
-
-  const deriveCandleColor = (c: UnifiedCandle) => c.close >= c.open ? UP_COLOR() : DOWN_COLOR()
-
-  useEffect(() => {
-    prevPriceRef.current = null
-    lastCandleColorRef.current = UP_COLOR()
-    const candles = candlesDataRef.current
-    if (candles.length > 0) {
-      const last = candles[candles.length - 1]
-      if (last.close != null && last.open != null) {
-        lastCandleColorRef.current = deriveCandleColor(last)
-      }
-    }
-    return () => {
-      if (updateTimerRef.current) {
-        clearTimeout(updateTimerRef.current)
-        updateTimerRef.current = null
-      }
-    }
-  }, [symbol, exchange, tf])
-
-  useEffect(() => {
-    if (livePrice == null || destroyedRef.current || !priceLineRef.current) return
-
-    pendingPriceRef.current = livePrice
-
-    if (updateTimerRef.current) return
-
-    updateTimerRef.current = window.setTimeout(() => {
-      updateTimerRef.current = null
-      const price = pendingPriceRef.current
-      if (price == null || destroyedRef.current || !priceLineRef.current) return
-
-      // The candle-synced RAF path (useWsCandle/useWsTrade) is authoritative —
-      // it keeps the price line in lockstep with the last candle's close.
-      // Only fall back to the ticker price when no candle-driven update has
-      // arrived recently (e.g. illiquid symbols with sparse trade streams),
-      // so the two writers never fight and cause flicker/divergence.
-      const sinceCandle = performance.now() - lastCandleTsRef.current
-      if (sinceCandle < 1000) return
-
-      prevPriceRef.current = price
-
-      try {
-        priceLineRef.current.applyOptions({
-          price: price,
-          color: lastCandleColorRef.current,
-        })
-      } catch {}
-    }, 16)  // Reduced from 100ms to 16ms to match RAF timing
-
-    // Cleanup timer on unmount or when dependencies change
-    return () => {
-      if (updateTimerRef.current) {
-        clearTimeout(updateTimerRef.current)
-        updateTimerRef.current = null
-      }
-    }
-  }, [livePrice, priceLineVersion])
-
-  useEffect(() => {
-    if (!exchange) return
-    const channel = `candle:${exchange}:${symbol}:${tf}`
-
-    // series.update() in useWsCandle/useWsTrade is now the single writer that
-    // applies price+color to the price line (atomic with the candle update).
-    // Here we only track the latest candle color so the ticker fallback
-    // (above) can colour its updates correctly, and seed prevPriceRef once.
-    const unsubCandle = wsOnChannel(channel, (msg) => {
-      if (destroyedRef.current) return
-      const c = msg.data as UnifiedCandle
-      if (!c?.close) return
-      lastCandleColorRef.current = deriveCandleColor(c)
-      if (prevPriceRef.current === null) prevPriceRef.current = c.close
-    })
-
-    wsSubscribe(channel)
-
-    return () => {
-      unsubCandle()
-      wsUnsubscribe(channel)
-    }
-  }, [symbol, exchange, tf])
-}
-
 function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const candlesDataRef = useRef<UnifiedCandle[]>([])
-  const priceLineRef = useRef<any>(null)
-  const prevPriceRef = useRef<number | null>(null)
-  const lastCandleTsRef = useRef<number>(0)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const adjustingRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const exchange = useCoinListStore(s => s.coinMap.get(symbol)?.exchange)
-  const [priceLineVersion, setPriceLineVersion] = useState(0)
   const [selection, setSelection] = useState<RangeSelection | null>(null)
   const [chartVersion, setChartVersion] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
@@ -1183,8 +1070,9 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       upColor: UP_COLOR(), downColor: DOWN_COLOR(),
       borderUpColor: UP_BORDER(), borderDownColor: DOWN_BORDER(),
       wickUpColor: UP_COLOR(), wickDownColor: DOWN_COLOR(),
-      priceLineVisible: false,
+      priceLineVisible: true,
       lastValueVisible: false,
+      priceLineColor: UP_COLOR(),
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
@@ -1197,15 +1085,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     chartRef.current = chart
     candleRef.current = candleSeries
     volumeRef.current = volumeSeries
-    priceLineRef.current = candleSeries.createPriceLine({
-      price: 0,
-      color: UP_COLOR(),
-      lineStyle: 2, // Dashed
-      lineWidth: 1,
-      axisLabelVisible: true,
-      title: '',
-    })
-    setPriceLineVersion(v => v + 1)
+
     setChartVersion(v => v + 1)
 
     const ro = new ResizeObserver(() => {
@@ -1237,37 +1117,20 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       chartRef.current = null
       candleRef.current = null
       volumeRef.current = null
-      priceLineRef.current = null
-      prevPriceRef.current = null
     }
   }, [symbol, tf, pricePrecision])
 
-  const direct = useDirectUpdate(candleRef, volumeRef, priceLineRef, lastCandleTsRef, destroyedRef)
   const lastBarRef = useRef<LastBar | null>(null)
   const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef)
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
   const flashEffect = useFlashEffect(candlesDataRef)
 
-  useWsCandle(symbol, exchange, tf, direct, lastBarRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-  usePriceLine(symbol, exchange, tf, priceLineRef, prevPriceRef, lastCandleTsRef, destroyedRef, priceLineVersion, candlesDataRef)
-  useWsTrade(symbol, exchange, tf, direct, lastBarRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lastBarRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lastBarRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore)
 
-  // Set initial price line position from loaded data
-  useEffect(() => {
-    if (isInitialLoading || !priceLineRef.current) return
-    const candles = candlesDataRef.current
-    if (candles.length === 0) return
-    const last = candles[candles.length - 1]
-    if (isFinite(last.close) && last.close > 0) {
-      const color = last.close >= last.open ? UP_COLOR() : DOWN_COLOR()
-      try {
-        priceLineRef.current.applyOptions({ price: last.close, color })
-        prevPriceRef.current = last.close
-      } catch {}
-    }
-  }, [isInitialLoading, symbol, tf, priceLineVersion])
+
 
   useEffect(() => {
     setSelection(null)
