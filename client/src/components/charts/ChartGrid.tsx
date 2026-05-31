@@ -361,7 +361,9 @@ function useRafFlush(
     rafId.current = null
     const now = performance.now()
     // Throttle: minimum 16ms between flushes (60fps) to reduce flickering while maintaining smooth updates
-    if (now - lastFlushTime.current < 16) {
+    // BUT: skip throttle if this is the first flush or if enough time has passed
+    const timeSinceLastFlush = now - lastFlushTime.current
+    if (timeSinceLastFlush < 16 && lastFlushTime.current > 0) {
       rafId.current = requestAnimationFrame(flush)
       return
     }
@@ -953,7 +955,7 @@ function usePriceLine(
           color: lastCandleColorRef.current,
         })
       } catch {}
-    }, 100)
+    }, 16)  // Reduced from 100ms to 16ms to match RAF timing
 
     // Cleanup timer on unmount or when dependencies change
     return () => {
