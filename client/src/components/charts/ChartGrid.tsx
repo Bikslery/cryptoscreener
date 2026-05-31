@@ -713,18 +713,19 @@ const MiniChart = memo(function MiniChart({
 
   useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
   useWsTrade(symbol, tf, flush, destroyedRef, candlesDataRef)
-  usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
+  usePriceLine(symbol, tf, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion, candlesDataRef)
 
   // Set initial price line position from loaded data
   useEffect(() => {
     if (isInitialLoading || !priceLineRef.current) return
     const candles = candlesDataRef.current
     if (candles.length === 0) return
-    const lastClose = candles[candles.length - 1].close
-    if (isFinite(lastClose) && lastClose > 0) {
+    const last = candles[candles.length - 1]
+    if (isFinite(last.close) && last.close > 0) {
+      const color = last.close >= last.open ? '#26a65b' : '#e74c3c'
       try {
-        priceLineRef.current.applyOptions({ price: lastClose, color: '#26a65b' })
-        prevPriceRef.current = lastClose
+        priceLineRef.current.applyOptions({ price: last.close, color })
+        prevPriceRef.current = last.close
       } catch {}
     }
   }, [isInitialLoading, symbol, tf, priceLineVersion])
@@ -851,29 +852,40 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
 
 function usePriceLine(
   symbol: string,
+  tf: Timeframe,
   priceLineRef: React.RefObject<any>,
   prevPriceRef: React.RefObject<number | null>,
   destroyedRef: React.RefObject<boolean>,
   priceLineVersion: number,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
 ) {
   const livePrice = useLivePrice(symbol)
   const updateTimerRef = useRef<number | null>(null)
   const pendingPriceRef = useRef<number | null>(null)
+  const lastCandleColorRef = useRef<string>('#26a65b')
+
+  const deriveCandleColor = (c: UnifiedCandle) => c.close >= c.open ? '#26a65b' : '#e74c3c'
 
   useEffect(() => {
     prevPriceRef.current = null
+    lastCandleColorRef.current = '#26a65b'
+    const candles = candlesDataRef.current
+    if (candles.length > 0) {
+      const last = candles[candles.length - 1]
+      if (last.close != null && last.open != null) {
+        lastCandleColorRef.current = deriveCandleColor(last)
+      }
+    }
     return () => {
       if (updateTimerRef.current) clearTimeout(updateTimerRef.current)
     }
-  }, [symbol])
+  }, [symbol, tf])
 
-  // Update from live price store with throttling to prevent jumping
   useEffect(() => {
     if (livePrice == null || destroyedRef.current || !priceLineRef.current) return
 
     pendingPriceRef.current = livePrice
 
-    // Throttle updates to max 10 per second (100ms)
     if (updateTimerRef.current) return
 
     updateTimerRef.current = window.setTimeout(() => {
@@ -881,34 +893,39 @@ function usePriceLine(
       const price = pendingPriceRef.current
       if (price == null || destroyedRef.current || !priceLineRef.current) return
 
-      const prev = prevPriceRef.current
-      const isUp = prev == null || price >= prev
       prevPriceRef.current = price
 
       try {
         priceLineRef.current.applyOptions({
           price: price,
-          color: isUp ? '#26a65b' : '#e74c3c',
+          color: lastCandleColorRef.current,
         })
       } catch {}
     }, 100)
   }, [livePrice, priceLineVersion])
 
-  // Fallback: subscribe to candle updates for initial price
   useEffect(() => {
-    const channel = `candle:${symbol}:1m`
+    const channel = `candle:${symbol}:${tf}`
 
     const unsubCandle = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current || !priceLineRef.current) return
       const c = msg.data as UnifiedCandle
       if (!c?.close) return
-      // Only update if we don't have a price yet
+
+      lastCandleColorRef.current = deriveCandleColor(c)
+
       if (prevPriceRef.current === null) {
         prevPriceRef.current = c.close
         try {
           priceLineRef.current.applyOptions({
             price: c.close,
-            color: '#26a65b',
+            color: lastCandleColorRef.current,
+          })
+        } catch {}
+      } else {
+        try {
+          priceLineRef.current.applyOptions({
+            color: lastCandleColorRef.current,
           })
         } catch {}
       }
@@ -920,7 +937,7 @@ function usePriceLine(
       unsubCandle()
       wsUnsubscribe(channel)
     }
-  }, [symbol])
+  }, [symbol, tf])
 }
 
 function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void }) {
@@ -1041,7 +1058,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
   const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
   useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
-  usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
+  usePriceLine(symbol, tf, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion, candlesDataRef)
   useWsTrade(symbol, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
   useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore)
 
@@ -1050,11 +1067,12 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     if (isInitialLoading || !priceLineRef.current) return
     const candles = candlesDataRef.current
     if (candles.length === 0) return
-    const lastClose = candles[candles.length - 1].close
-    if (isFinite(lastClose) && lastClose > 0) {
+    const last = candles[candles.length - 1]
+    if (isFinite(last.close) && last.close > 0) {
+      const color = last.close >= last.open ? '#26a65b' : '#e74c3c'
       try {
-        priceLineRef.current.applyOptions({ price: lastClose, color: '#26a65b' })
-        prevPriceRef.current = lastClose
+        priceLineRef.current.applyOptions({ price: last.close, color })
+        prevPriceRef.current = last.close
       } catch {}
     }
   }, [isInitialLoading, symbol, tf, priceLineVersion])
