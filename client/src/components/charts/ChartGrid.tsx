@@ -150,13 +150,14 @@ function useFullHistory(
       // Fast path: check client cache
       const cached = candleCache.getCandles(exchange, symbol, tf)
       if (cached && cached.length > 0) {
-        renderCandles(cached)
-        setIsInitialLoading(false)
-        setStatus('ready')
-        // Update lastUpdateRef after successful data load
-        if (lastUpdateRef) {
-          lastUpdateRef.current = Date.now()
-          console.log('[useFullHistory] Initial load from cache', { symbol, tf, candles: cached.length })
+        if (!cancelled.value && !destroyedRef.current) {
+          renderCandles(cached)
+          setIsInitialLoading(false)
+          setStatus('ready')
+          // Update lastUpdateRef after successful data load
+          if (lastUpdateRef) {
+            lastUpdateRef.current = Date.now()
+          }
         }
         return
       }
@@ -453,7 +454,7 @@ function useLiveIndicator(
 
 function useStaleDataDetection(
   lastUpdateRef: React.RefObject<number>,
-  threshold = 10000 // Увеличено с 5000 до 10000ms (10 секунд)
+  threshold = 30000 // Увеличено до 30 секунд для низколиквидных пар
 ): boolean {
   const [isStale, setIsStale] = useState(false)
 
@@ -653,7 +654,6 @@ function useWsCandle(
       // Update last update timestamp for live indicator
       if (lastUpdateRef) {
         lastUpdateRef.current = Date.now()
-        console.debug('[useWsCandle] Update received', { symbol, tf, time: c.time, isFinal: c.isFinal })
       }
 
       // Validate OHLC fields before processing
@@ -749,7 +749,6 @@ function useWsTrade(
       // Update last update timestamp for live indicator
       if (lastUpdateRef) {
         lastUpdateRef.current = Date.now()
-        console.debug('[useWsTrade] Trade received', { symbol, price: typeof trade.price === 'number' ? trade.price : parseFloat(trade.price) })
       }
 
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
