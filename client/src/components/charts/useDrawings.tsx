@@ -144,8 +144,13 @@ export function useDrawings(
     }
 
     return () => {
-      if (pane) {
-        pane.detachPrimitive(primitive)
+      if (pane && primitive) {
+        try {
+          pane.detachPrimitive(primitive)
+        } catch (err) {
+          // Chart may already be disposed, ignore error
+          console.debug('[useDrawings] Failed to detach primitive (chart disposed)', err)
+        }
       }
       primitiveRef.current = null
     }
