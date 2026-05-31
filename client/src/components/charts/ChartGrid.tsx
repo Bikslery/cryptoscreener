@@ -411,8 +411,9 @@ function useRafFlush(
       const prev = pendingCandle.current
       if (prev && p.time < prev.time) return
       // Merge with pending candle if same time to avoid overwriting newer data
+      let winning: { time: Time; open: number; high: number; low: number; close: number }
       if (prev && p.time === prev.time) {
-        const merged = {
+        winning = {
           time: p.time,
           open: prev.open, // Keep original open
           high: Math.max(prev.high, p.high),
@@ -420,24 +421,29 @@ function useRafFlush(
           close: p.close, // Use latest close
         }
         // Validate merged candle OHLC relationships
-        if (merged.high < merged.low) {
-          console.warn('[queueCandle] Invalid merge detected', { prev, p, merged })
+        if (winning.high < winning.low) {
+          console.warn('[queueCandle] Invalid merge detected', { prev, p, merged: winning })
           // Fix by ensuring high >= low
-          merged.high = Math.max(prev.high, p.high, prev.low, p.low)
-          merged.low = Math.min(prev.high, p.high, prev.low, p.low)
+          winning.high = Math.max(prev.high, p.high, prev.low, p.low)
+          winning.low = Math.min(prev.high, p.high, prev.low, p.low)
         }
-        pendingCandle.current = merged
       } else {
-        pendingCandle.current = p
+        winning = p
+      }
+      pendingCandle.current = winning
+      // Price line is a byproduct of the winning candle — never a separate
+      // queued value. This guarantees the rendered close and the price-line
+      // label are the SAME number, even when the kline and trade streams race
+      // during sharp moves (a rejected candle can no longer leave a stale
+      // price behind it).
+      pendingPriceLine.current = {
+        price: winning.close,
+        color: winning.close >= winning.open ? '#26a65b' : '#e74c3c',
       }
       schedule()
     },
     queueVolume(p: { time: Time; value: number; color: string }) {
       pendingVolume.current = p
-      schedule()
-    },
-    queuePriceLine(price: number, color: string) {
-      pendingPriceLine.current = { price, color }
       schedule()
     },
   }
@@ -500,9 +506,8 @@ function useWsCandle(
         value: c.volume,
         color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
       })
-      // Atomic: queue price line update in same RAF frame as candle
-      const candleColor = c.close >= c.open ? '#26a65b' : '#e74c3c'
-      flush.queuePriceLine(c.close, candleColor)
+      // Price line is updated atomically inside queueCandle (derived from the
+      // winning candle's close) — no separate queue, so it can never diverge.
     })
     wsSubscribe(channel)
     return () => {
@@ -546,9 +551,27 @@ function useWsTrade(
       // Bug 2a: push trade price to live-price store — redundancy for ticker batch lag
       setLivePrice(symbol, price)
 
-      const now = Math.floor(Date.now() / 1000)
+      // Bucket on the exchange's trade timestamp (set server-side from the
+      // aggTrade event time), NOT the client's local clock — a skewed local
+      // clock could otherwise place the trade-built candle in a different
+      // bucket than the authoritative kline bar, causing label/candle drift
+      // near boundaries. Fall back to local time only if absent.
+      const tradeSec = typeof trade.time === 'number' && isFinite(trade.time)
+        ? trade.time
+        : Math.floor(Date.now() / 1000)
       const tfSeconds = getTfSeconds(tf)
-      const candleTime = Math.floor(now / tfSeconds) * tfSeconds
+      let candleTime = Math.floor(tradeSec / tfSeconds) * tfSeconds
+
+      // Never build a candle that predates the last authoritative bar — clamp
+      // forward so the trade stream can only ever update the current/newest
+      // bucket, never resurrect an older one.
+      if (candlesDataRef?.current) {
+        const arr = candlesDataRef.current
+        const lastBar = arr[arr.length - 1]
+        if (lastBar && candleTime < (lastBar.time as number)) {
+          candleTime = lastBar.time as number
+        }
+      }
 
       const cur = curRef.current
       if (!cur || cur.time !== candleTime) {
@@ -597,9 +620,8 @@ function useWsTrade(
         value: c.volume,
         color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
       })
-      // Atomic: queue price line update in same RAF frame as candle
-      const candleColor = c.close >= c.open ? '#26a65b' : '#e74c3c'
-      flush.queuePriceLine(c.close, candleColor)
+      // Price line is updated atomically inside queueCandle (derived from the
+      // winning candle's close) — no separate queue, so it can never diverge.
     })
     wsSubscribe(tradeType)
 
