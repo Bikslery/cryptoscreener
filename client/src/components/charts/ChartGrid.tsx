@@ -336,9 +336,18 @@ function useRafFlush(
   const pendingCandle = useRef<{ time: Time; open: number; high: number; low: number; close: number } | null>(null)
   const pendingVolume = useRef<{ time: Time; value: number; color: string } | null>(null)
   const rafId = useRef<number | null>(null)
+  const lastFlushTime = useRef<number>(0)
 
   const flush = () => {
     rafId.current = null
+    const now = performance.now()
+    // Throttle: minimum 50ms between flushes to reduce flickering
+    if (now - lastFlushTime.current < 50) {
+      rafId.current = requestAnimationFrame(flush)
+      return
+    }
+    lastFlushTime.current = now
+
     if (destroyedRef.current) {
       pendingCandle.current = null
       pendingVolume.current = null
@@ -369,7 +378,18 @@ function useRafFlush(
       // Bug 3b: reject out-of-order — if pending candle is newer, don't overwrite
       const prev = pendingCandle.current
       if (prev && p.time < prev.time) return
-      pendingCandle.current = p
+      // Merge with pending candle if same time to avoid overwriting newer data
+      if (prev && p.time === prev.time) {
+        pendingCandle.current = {
+          time: p.time,
+          open: prev.open, // Keep original open
+          high: Math.max(prev.high, p.high),
+          low: Math.min(prev.low, p.low),
+          close: p.close, // Use latest close
+        }
+      } else {
+        pendingCandle.current = p
+      }
       schedule()
     },
     queueVolume(p: { time: Time; value: number; color: string }) {
@@ -837,23 +857,41 @@ function usePriceLine(
   priceLineVersion: number,
 ) {
   const livePrice = useLivePrice(symbol)
+  const updateTimerRef = useRef<number | null>(null)
+  const pendingPriceRef = useRef<number | null>(null)
 
   useEffect(() => {
     prevPriceRef.current = null
+    return () => {
+      if (updateTimerRef.current) clearTimeout(updateTimerRef.current)
+    }
   }, [symbol])
 
-  // Update from live price store (most reliable source)
+  // Update from live price store with throttling to prevent jumping
   useEffect(() => {
     if (livePrice == null || destroyedRef.current || !priceLineRef.current) return
-    const prev = prevPriceRef.current
-    const isUp = prev == null || livePrice >= prev
-    prevPriceRef.current = livePrice
-    try {
-      priceLineRef.current.applyOptions({
-        price: livePrice,
-        color: isUp ? '#26a65b' : '#e74c3c',
-      })
-    } catch {}
+
+    pendingPriceRef.current = livePrice
+
+    // Throttle updates to max 10 per second (100ms)
+    if (updateTimerRef.current) return
+
+    updateTimerRef.current = window.setTimeout(() => {
+      updateTimerRef.current = null
+      const price = pendingPriceRef.current
+      if (price == null || destroyedRef.current || !priceLineRef.current) return
+
+      const prev = prevPriceRef.current
+      const isUp = prev == null || price >= prev
+      prevPriceRef.current = price
+
+      try {
+        priceLineRef.current.applyOptions({
+          price: price,
+          color: isUp ? '#26a65b' : '#e74c3c',
+        })
+      } catch {}
+    }, 100)
   }, [livePrice, priceLineVersion])
 
   // Fallback: subscribe to candle updates for initial price
