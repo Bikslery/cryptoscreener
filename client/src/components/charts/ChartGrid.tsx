@@ -156,6 +156,7 @@ function useFullHistory(
         // Update lastUpdateRef after successful data load
         if (lastUpdateRef) {
           lastUpdateRef.current = Date.now()
+          console.log('[useFullHistory] Initial load from cache', { symbol, tf, candles: cached.length })
         }
         return
       }
@@ -171,6 +172,7 @@ function useFullHistory(
           // Update lastUpdateRef after successful data load
           if (lastUpdateRef) {
             lastUpdateRef.current = Date.now()
+            console.log('[useFullHistory] Initial load from server', { symbol, tf, candles: fetched.length })
           }
         } else {
           setIsInitialLoading(false)
@@ -451,14 +453,26 @@ function useLiveIndicator(
 
 function useStaleDataDetection(
   lastUpdateRef: React.RefObject<number>,
-  threshold = 5000
+  threshold = 10000 // Увеличено с 5000 до 10000ms (10 секунд)
 ): boolean {
   const [isStale, setIsStale] = useState(false)
 
   useEffect(() => {
     const interval = setInterval(() => {
       const elapsed = Date.now() - lastUpdateRef.current
-      setIsStale(elapsed > threshold)
+      const shouldBeStale = elapsed > threshold
+
+      // Debug logging
+      if (shouldBeStale !== isStale) {
+        console.log('[StaleDetection]', {
+          elapsed: Math.round(elapsed / 1000) + 's',
+          threshold: Math.round(threshold / 1000) + 's',
+          isStale: shouldBeStale,
+          lastUpdate: new Date(lastUpdateRef.current).toLocaleTimeString()
+        })
+      }
+
+      setIsStale(shouldBeStale)
     }, 1000)
 
     return () => clearInterval(interval)
@@ -639,6 +653,7 @@ function useWsCandle(
       // Update last update timestamp for live indicator
       if (lastUpdateRef) {
         lastUpdateRef.current = Date.now()
+        console.debug('[useWsCandle] Update received', { symbol, tf, time: c.time, isFinal: c.isFinal })
       }
 
       // Validate OHLC fields before processing
@@ -728,12 +743,15 @@ function useWsTrade(
       // Bug 2: skip WS updates while useLazyScroll is doing setData
       if (adjustingRef?.current) return
 
+      const trade = msg.data as any
+      if (!trade?.price) return
+
       // Update last update timestamp for live indicator
       if (lastUpdateRef) {
         lastUpdateRef.current = Date.now()
+        console.debug('[useWsTrade] Trade received', { symbol, price: typeof trade.price === 'number' ? trade.price : parseFloat(trade.price) })
       }
-      const trade = msg.data as any
-      if (!trade?.price) return
+
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(price)) return
 
