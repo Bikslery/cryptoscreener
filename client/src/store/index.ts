@@ -166,6 +166,9 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
       const s = get()
       const coins = msg.data as UnifiedTicker[]
       const now = Date.now()
+      for (const c of coins) {
+        setLivePrice(c.symbol, c.price)
+      }
       if (now - lastSortUpdate > SORT_INTERVAL) {
         lastSortUpdate = now
         set({ coins, ...recompute({ ...s, coins }) })

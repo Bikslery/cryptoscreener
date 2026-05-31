@@ -76,7 +76,7 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
           volume,
           time: data.T / 1000,
           isBuyerMaker,
-        })
+        }, true)
       }
     } catch (e) {
       console.error(`[AggTrade${label}] Parse error:`, e)

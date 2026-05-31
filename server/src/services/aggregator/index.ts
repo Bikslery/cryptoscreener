@@ -5,6 +5,7 @@ import type { ExchangeAdapter } from '../exchanges/types.js'
 import { broadcast, broadcastToChannel } from '../../ws/hub.js'
 import { updateCachedCandle, getCachedCandles } from '../candles/candle-cache.js'
 import { getRedisPub, getRedisData, REDIS_ENABLED } from '../../redis.js'
+import { subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
 
 export const adapters: ExchangeAdapter[] = [
   new BinanceSpotAdapter(),
@@ -180,6 +181,7 @@ export function startAggregator() {
         if (!loggedFirst) {
           loggedFirst = true
           console.log(`[Aggregator] First broadcast: ${arr.length} coins (received ${tickerCount} ticks), top: ${arr.slice(0, 3).map(t => t.symbol).join(', ')}`)
+          subscribeTopAggTrades(arr)
         }
       }
     })
@@ -214,6 +216,34 @@ export function startAggregator() {
   }
 
   computeMetrics()
+}
+
+const AGGTRADE_TOP_COUNT = 50
+const subscribedAggTradeSymbols = new Set<string>()
+
+function subscribeTopAggTrades(tickers: UnifiedTicker[]) {
+  const top = tickers
+    .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+    .slice(0, AGGTRADE_TOP_COUNT)
+
+  const newSymbols = new Set<string>()
+  for (const t of top) {
+    newSymbols.add(`${t.symbol}:${t.exchange}`)
+    if (!subscribedAggTradeSymbols.has(`${t.symbol}:${t.exchange}`)) {
+      subscribeAggTrade(t.symbol, t.exchange)
+    }
+  }
+
+  for (const key of subscribedAggTradeSymbols) {
+    if (!newSymbols.has(key)) {
+      const [sym, ex] = key.split(':') as [string, Exchange]
+      unsubscribeAggTrade(sym, ex)
+    }
+  }
+
+  subscribedAggTradeSymbols.clear()
+  for (const s of newSymbols) subscribedAggTradeSymbols.add(s)
+  console.log(`[Aggregator] Subscribed aggTrade for top ${top.length} tickers`)
 }
 
 async function computeMetrics() {

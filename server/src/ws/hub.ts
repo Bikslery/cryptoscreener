@@ -318,8 +318,18 @@ export function broadcast(msg: WsMessage) {
   }
 }
 
-export function broadcastToChannel(channel: string, data: unknown) {
-  wsBatchBuffer.set(channel, data)
+export function broadcastToChannel(channel: string, data: unknown, immediate = false) {
+  if (immediate) {
+    const msg: WsMessage = { type: channel as any, channel, data }
+    const raw = JSON.stringify(msg)
+    for (const client of clients.values()) {
+      if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN && client.buffered < MAX_BUFFERED) {
+        client.ws.send(raw, (err) => { if (err) client.buffered++ })
+      }
+    }
+  } else {
+    wsBatchBuffer.set(channel, data)
+  }
 }
 
 export function startRedisListener() {

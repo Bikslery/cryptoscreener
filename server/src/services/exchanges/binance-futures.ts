@@ -339,6 +339,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       low: parseFloat(k.l),
       close: parseFloat(k.c),
       volume: parseFloat(k.v),
+      isFinal: !!k.x,
     }
   }
 

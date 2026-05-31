@@ -402,6 +402,9 @@ function useWsCandle(
         const last = arr[arr.length - 1]
         if (last && c.time < last.time) return
       }
+      if (!c.isFinal) {
+        setLivePrice(symbol, c.close)
+      }
       candleCache.updateCandle(symbol, tf, c)
       if (candlesDataRef && candlesDataRef.current) {
         const arr = candlesDataRef.current
@@ -688,7 +691,8 @@ const MiniChart = memo(function MiniChart({
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
   }, [isInitialLoading, symbol, tf, onLoaded])
 
-  useWsCandle(symbol, tf, flush, destroyedRef)
+  useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
+  useWsTrade(symbol, tf, flush, destroyedRef, candlesDataRef)
   usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
 
   // Set initial price line position from loaded data

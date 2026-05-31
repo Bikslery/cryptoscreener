@@ -50,12 +50,12 @@ function getBestAdapter(symbol: string, adapters: ExchangeAdapter[]): ExchangeAd
 export function createCandleManager(adapters: ExchangeAdapter[]) {
   const candleCallback: CandleCallback = (candle: UnifiedCandle) => {
     const channel = `candle:${candle.symbol}:${candle.timeframe}`
-    broadcastToChannel(channel, candle)
+    broadcastToChannel(channel, candle, true)
   }
 
   const depthCallback = (depth: any) => {
     const channel = `depth:${depth.symbol}`
-    broadcastToChannel(channel, depth)
+    broadcastToChannel(channel, depth, true)
   }
 
   return {
