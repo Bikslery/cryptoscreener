@@ -147,8 +147,8 @@ function useLazyScroll(
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   isInitialLoading: boolean,
-  setIsLoadingMore: ((loading: boolean) => void) | undefined,
   adjustingRef: React.RefObject<boolean>,
+  setIsLoadingMore?: (loading: boolean) => void,
 ) {
   const inflightRef = useRef(false)
   const reachedStartRef = useRef(false)
@@ -613,7 +613,7 @@ const MiniChart = memo(function MiniChart({
       grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { visible: true, color: '#4d4d4d' }, horzLine: { visible: true, color: '#4d4d4d' } },
       rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.1, bottom: 0.25 }, textColor: '#666666' },
-      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6 },
+      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6, rightOffset: 12, fixLeftEdge: false, fixRightEdge: false },
       handleScroll: true,
       handleScale: {
         axisPressedMouseMove: { time: true, price: true },
@@ -927,7 +927,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' }, horzLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' } },
       rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.05, bottom: 0.15 }, textColor: '#666666' },
-      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6 },
+      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6, rightOffset: 12, fixLeftEdge: false, fixRightEdge: false },
       handleScroll: true,
       handleScale: {
         axisPressedMouseMove: { time: true, price: true },
@@ -1005,7 +1005,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
   usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
   useWsTrade(symbol, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
-  useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, setIsLoadingMore, adjustingRef)
+  useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore)
 
   // Set initial price line position from loaded data
   useEffect(() => {
