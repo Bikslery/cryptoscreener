@@ -1,4 +1,4 @@
-import type { UnifiedCandle } from '../types'
+import type { UnifiedCandle, Exchange } from '../types'
 
 // Reasonable limit: ~5000 candles per symbol+tf pair keeps memory bounded
 // (5000 * 8 fields * 8 bytes ≈ 320KB per key max)
@@ -9,8 +9,8 @@ const cache = new Map<string, UnifiedCandle[]>()
 const lruOrder: string[] = []  // most-recent at end
 let totalCandleCount = 0
 
-function key(symbol: string, tf: string): string {
-  return `${symbol}:${tf}`
+function key(exchange: Exchange, symbol: string, tf: string): string {
+  return `${exchange}:${symbol}:${tf}`
 }
 
 function touchLru(k: string) {
@@ -58,15 +58,15 @@ function trimToLimit(candles: UnifiedCandle[]): UnifiedCandle[] {
     : candles
 }
 
-export function getCandles(symbol: string, tf: string): UnifiedCandle[] | undefined {
-  const k = key(symbol, tf)
+export function getCandles(exchange: Exchange, symbol: string, tf: string): UnifiedCandle[] | undefined {
+  const k = key(exchange, symbol, tf)
   const data = cache.get(k)
   if (data) touchLru(k)
   return data
 }
 
-export function setCandles(symbol: string, tf: string, candles: UnifiedCandle[]): void {
-  const k = key(symbol, tf)
+export function setCandles(exchange: Exchange, symbol: string, tf: string, candles: UnifiedCandle[]): void {
+  const k = key(exchange, symbol, tf)
   const existing = cache.get(k)
   if (existing) {
     totalCandleCount -= existing.length
@@ -84,9 +84,9 @@ export function setCandles(symbol: string, tf: string, candles: UnifiedCandle[])
   evictIfNeeded()
 }
 
-export function prependCandles(symbol: string, tf: string, older: UnifiedCandle[]): void {
+export function prependCandles(exchange: Exchange, symbol: string, tf: string, older: UnifiedCandle[]): void {
   if (older.length === 0) return
-  const k = key(symbol, tf)
+  const k = key(exchange, symbol, tf)
   const existing = cache.get(k) || []
   totalCandleCount -= existing.length
 
@@ -101,14 +101,14 @@ export function prependCandles(symbol: string, tf: string, older: UnifiedCandle[
   evictIfNeeded()
 }
 
-export function updateCandle(symbol: string, tf: string, candle: UnifiedCandle): void {
+export function updateCandle(exchange: Exchange, symbol: string, tf: string, candle: UnifiedCandle): void {
   // Validate before updating cache
   if (!validateCandle(candle)) {
-    console.warn('[candle-cache] Invalid candle rejected', { symbol, tf, time: candle.time })
+    console.warn('[candle-cache] Invalid candle rejected', { exchange, symbol, tf, time: candle.time })
     return
   }
 
-  const k = key(symbol, tf)
+  const k = key(exchange, symbol, tf)
   const arr = cache.get(k)
   if (!arr) return
   const last = arr[arr.length - 1]
@@ -142,8 +142,8 @@ export function storeBulk(data: Record<string, UnifiedCandle[]>): void {
   evictIfNeeded()
 }
 
-export function hasCandles(symbol: string, tf: string): boolean {
-  const arr = cache.get(key(symbol, tf))
+export function hasCandles(exchange: Exchange, symbol: string, tf: string): boolean {
+  const arr = cache.get(key(exchange, symbol, tf))
   return !!arr && arr.length > 0
 }
 

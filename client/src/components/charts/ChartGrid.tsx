@@ -5,7 +5,7 @@ import { useCoinListStore, useLivePrice, setLivePrice } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { debounce } from '../../utils/debounce'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
-import type { Timeframe, UnifiedCandle } from '../../types'
+import type { Timeframe, UnifiedCandle, Exchange } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
@@ -64,6 +64,7 @@ function useInitialCandlesPush() {
 
 function useFullHistory(
   symbol: string,
+  exchange: Exchange | undefined,
   tf: Timeframe,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
@@ -77,6 +78,7 @@ function useFullHistory(
   const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading')
 
   useEffect(() => {
+    if (!exchange) return
     const cancelled = { value: false }
     setIsInitialLoading(true)
     setStatus('loading')
@@ -110,7 +112,7 @@ function useFullHistory(
 
     const run = async () => {
       // Fast path: check client cache
-      const cached = candleCache.getCandles(symbol, tf)
+      const cached = candleCache.getCandles(exchange, symbol, tf)
       if (cached && cached.length > 0) {
         renderCandles(cached)
         setIsInitialLoading(false)
@@ -138,13 +140,14 @@ function useFullHistory(
 
     run()
     return () => { cancelled.value = true }
-  }, [symbol, tf])
+  }, [symbol, exchange, tf])
 
   return { isInitialLoading, status }
 }
 
 function useLazyScroll(
   symbol: string,
+  exchange: Exchange | undefined,
   tf: Timeframe,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
@@ -158,17 +161,19 @@ function useLazyScroll(
   const inflightRef = useRef(false)
   const reachedStartRef = useRef(false)
   const symbolRef = useRef(symbol)
+  const exchangeRef = useRef(exchange)
   const tfRef = useRef(tf)
   const emptyCountRef = useRef(0)
 
   useEffect(() => {
     symbolRef.current = symbol
+    exchangeRef.current = exchange
     tfRef.current = tf
     reachedStartRef.current = false
     inflightRef.current = false
     adjustingRef.current = false
     emptyCountRef.current = 0
-  }, [symbol, tf])
+  }, [symbol, exchange, tf])
 
   // Bug 3: debounce onRange — avoid dozens of redundant checks per second during fast scroll
   const onRangeDebounced = useMemo(
@@ -183,7 +188,14 @@ function useLazyScroll(
       if (range.from > threshold) return
 
       const curSymbol = symbolRef.current
+      const curExchange = exchangeRef.current
       const curTf = tfRef.current
+
+      if (!curExchange) {
+        inflightRef.current = false
+        setIsLoadingMore?.(false)
+        return
+      }
 
       inflightRef.current = true
       setIsLoadingMore?.(true)
@@ -198,7 +210,7 @@ function useLazyScroll(
         }
       }
 
-      const cached = candleCache.getCandles(curSymbol, curTf)
+      const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
       if (!cached || cached.length === 0) {
         inflightRef.current = false
         setIsLoadingMore?.(false)
@@ -231,8 +243,8 @@ function useLazyScroll(
           // Got new data — reset empty counter
           emptyCountRef.current = 0
 
-          candleCache.prependCandles(curSymbol, curTf, newCandles)
-          const merged = candleCache.getCandles(curSymbol, curTf)
+          candleCache.prependCandles(curExchange, curSymbol, curTf, newCandles)
+          const merged = candleCache.getCandles(curExchange, curSymbol, curTf)
           if (!merged || merged.length === 0) {
             inflightRef.current = false
             setIsLoadingMore?.(false)
@@ -296,10 +308,10 @@ function useLazyScroll(
           {
             const ts = chartRef.current?.timeScale()
             const curRange = ts?.getVisibleLogicalRange()
-            if (ts && curRange && !reachedStartRef.current) {
+            if (ts && curRange && !reachedStartRef.current && curExchange) {
               const vis = curRange.to - curRange.from
               if (curRange.from < vis * 0.6) {
-                const newCached = candleCache.getCandles(curSymbol, curTf)
+                const newCached = candleCache.getCandles(curExchange, curSymbol, curTf)
                 if (newCached && newCached.length > 0) {
                   // Fire-and-forget: warm the cache for the next scroll trigger
                   getOrFetchOlder(curSymbol, curTf, newCached[0].time, 1000).catch(() => {})
@@ -416,6 +428,7 @@ function useRafFlush(
 
 function useWsCandle(
   symbol: string,
+  exchange: Exchange | undefined,
   tf: Timeframe,
   flush: ReturnType<typeof useRafFlush>,
   destroyedRef: React.RefObject<boolean>,
@@ -423,7 +436,8 @@ function useWsCandle(
   adjustingRef?: React.RefObject<boolean>,
 ) {
   useEffect(() => {
-    const channel = `candle:${symbol}:${tf}`
+    if (!exchange) return
+    const channel = `candle:${exchange}:${symbol}:${tf}`
     const unsub = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current) return
       // Bug 2: skip WS updates while useLazyScroll is doing setData
@@ -433,7 +447,7 @@ function useWsCandle(
 
       // Validate OHLC fields before processing
       if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
-        console.warn('[useWsCandle] Invalid OHLC data', { symbol, tf, time: c.time })
+        console.warn('[useWsCandle] Invalid OHLC data', { exchange, symbol, tf, time: c.time })
         return
       }
 
@@ -447,7 +461,7 @@ function useWsCandle(
       if (!c.isFinal) {
         setLivePrice(symbol, c.close)
       }
-      candleCache.updateCandle(symbol, tf, c)
+      candleCache.updateCandle(exchange, symbol, tf, c)
       if (candlesDataRef && candlesDataRef.current) {
         const arr = candlesDataRef.current
         const last = arr[arr.length - 1]
@@ -480,6 +494,7 @@ function useWsCandle(
 
 function useWsTrade(
   symbol: string,
+  exchange: Exchange | undefined,
   tf: Timeframe,
   flush: ReturnType<typeof useRafFlush>,
   destroyedRef: React.RefObject<boolean>,
@@ -490,8 +505,9 @@ function useWsTrade(
   const curRef = useRef<UnifiedCandle | null>(null)
 
   useEffect(() => {
+    if (!exchange) return
     curRef.current = null
-    const tradeType = `trade:${symbol}`
+    const tradeType = `trade:${exchange}:${symbol}`
 
     const unsub = wsOnType(tradeType, (msg) => {
       if (destroyedRef.current) return
@@ -518,10 +534,8 @@ function useWsTrade(
       if (!cur || cur.time !== candleTime) {
         // Bug 3c: include full UnifiedCandle fields (symbol, exchange, timeframe)
         // so candleCache.updateCandle gets consistent data
-        // Copy exchange from last candle in backing array if available
-        const lastCandle = candlesDataRef?.current?.[candlesDataRef.current.length - 1]
         curRef.current = {
-          symbol, exchange: lastCandle?.exchange ?? ('agg' as any), timeframe: tf,
+          symbol, exchange, timeframe: tf,
           time: candleTime, open: price, high: price, low: price, close: price, volume,
         }
       } else {
@@ -535,12 +549,12 @@ function useWsTrade(
 
       // Validate constructed candle before processing
       if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
-        console.warn('[useWsTrade] Invalid constructed candle', { symbol, tf, time: c.time })
+        console.warn('[useWsTrade] Invalid constructed candle', { exchange, symbol, tf, time: c.time })
         return
       }
 
       // Bug 1: write to cache (was missing)
-      candleCache.updateCandle(symbol, tf, c)
+      candleCache.updateCandle(exchange, symbol, tf, c)
 
       // Bug 1: write to backing array (was missing)
       if (candlesDataRef?.current) {
@@ -652,6 +666,7 @@ const MiniChart = memo(function MiniChart({
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
+  const exchange = useCoinListStore(s => s.coinMap.get(symbol)?.exchange)
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const [priceLineVersion, setPriceLineVersion] = useState(0)
 
@@ -738,15 +753,15 @@ const MiniChart = memo(function MiniChart({
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 })
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 })
 
   useEffect(() => {
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
   }, [isInitialLoading, symbol, tf, onLoaded])
 
-  useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
-  useWsTrade(symbol, tf, flush, destroyedRef, candlesDataRef)
-  usePriceLine(symbol, tf, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion, candlesDataRef)
+  useWsCandle(symbol, exchange, tf, flush, destroyedRef, candlesDataRef)
+  useWsTrade(symbol, exchange, tf, flush, destroyedRef, candlesDataRef)
+  usePriceLine(symbol, exchange, tf, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion, candlesDataRef)
 
   // Set initial price line position from loaded data
   useEffect(() => {
@@ -885,6 +900,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
 
 function usePriceLine(
   symbol: string,
+  exchange: Exchange | undefined,
   tf: Timeframe,
   priceLineRef: React.RefObject<any>,
   prevPriceRef: React.RefObject<number | null>,
@@ -915,7 +931,7 @@ function usePriceLine(
         updateTimerRef.current = null
       }
     }
-  }, [symbol, tf])
+  }, [symbol, exchange, tf])
 
   useEffect(() => {
     if (livePrice == null || destroyedRef.current || !priceLineRef.current) return
@@ -949,7 +965,8 @@ function usePriceLine(
   }, [livePrice, priceLineVersion])
 
   useEffect(() => {
-    const channel = `candle:${symbol}:${tf}`
+    if (!exchange) return
+    const channel = `candle:${exchange}:${symbol}:${tf}`
 
     const unsubCandle = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current || !priceLineRef.current) return
@@ -981,7 +998,7 @@ function usePriceLine(
       unsubCandle()
       wsUnsubscribe(channel)
     }
-  }, [symbol, tf])
+  }, [symbol, exchange, tf])
 }
 
 function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void }) {
@@ -996,6 +1013,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const destroyedRef = useRef(false)
   const adjustingRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
+  const exchange = useCoinListStore(s => s.coinMap.get(symbol)?.exchange)
   const [priceLineVersion, setPriceLineVersion] = useState(0)
   const [selection, setSelection] = useState<RangeSelection | null>(null)
   const [chartVersion, setChartVersion] = useState(0)
@@ -1100,11 +1118,11 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [symbol, tf, pricePrecision])
 
   const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-  const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
-  useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
-  usePriceLine(symbol, tf, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion, candlesDataRef)
-  useWsTrade(symbol, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
-  useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore)
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
+  useWsCandle(symbol, exchange, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
+  usePriceLine(symbol, exchange, tf, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion, candlesDataRef)
+  useWsTrade(symbol, exchange, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
+  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore)
 
   // Set initial price line position from loaded data
   useEffect(() => {

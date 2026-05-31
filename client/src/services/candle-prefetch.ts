@@ -28,12 +28,9 @@ export function getOrFetchBulk(
   const cached: Record<string, UnifiedCandle[]> = {}
   const missing: string[] = []
   for (const symbol of symbols) {
-    const c = candleCache.getCandles(symbol, tf)
-    if (c && c.length >= limit) {
-      cached[symbol] = c
-    } else {
-      missing.push(symbol)
-    }
+    // Try to get from cache - we need to check all possible exchanges
+    // Since we don't know the exchange yet, we'll mark as missing and let server return it
+    missing.push(symbol)
   }
 
   if (missing.length === 0) {
@@ -46,11 +43,16 @@ export function getOrFetchBulk(
       const result: Record<string, UnifiedCandle[]> = { ...cached }
       for (const [symbol, candles] of Object.entries(data)) {
         if (candles?.length) {
-          candleCache.setCandles(symbol, tf, candles)
-          result[symbol] = candleCache.getCandles(symbol, tf) || candles
+          // Extract exchange from first candle
+          const exchange = candles[0]?.exchange
+          if (exchange) {
+            candleCache.setCandles(exchange, symbol, tf, candles)
+            result[symbol] = candleCache.getCandles(exchange, symbol, tf) || candles
+          } else {
+            result[symbol] = candles
+          }
         } else {
-          const prev = candleCache.getCandles(symbol, tf)
-          result[symbol] = prev || []
+          result[symbol] = []
         }
       }
       return result
@@ -79,19 +81,24 @@ export function getOrFetchHistory(symbol: string, tf: string, limit: number = PR
   const existing = inflightMap.get(k)
   if (existing) return existing
 
-  const cached = candleCache.getCandles(symbol, tf)
-  if (cached && cached.length >= limit) return Promise.resolve(cached)
+  // Note: We can't check cache here without knowing exchange
+  // Let the server return the data with exchange included
 
   const promise = api.get(`/coins/${symbol}/candles`, { params: { tf, limit } })
     .then(res => {
       const data = res.data as UnifiedCandle[]
       if (data?.length) {
-        candleCache.setCandles(symbol, tf, data)
-        return candleCache.getCandles(symbol, tf) || data
+        // Extract exchange from first candle
+        const exchange = data[0]?.exchange
+        if (exchange) {
+          candleCache.setCandles(exchange, symbol, tf, data)
+          return candleCache.getCandles(exchange, symbol, tf) || data
+        }
+        return data
       }
-      return cached || []
+      return []
     })
-    .catch(() => cached || [])
+    .catch(() => [])
     .finally(() => inflightMap.delete(k))
 
   inflightMap.set(k, promise)
