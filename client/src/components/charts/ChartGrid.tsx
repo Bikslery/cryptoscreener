@@ -84,10 +84,15 @@ function useFullHistory(
     const renderCandles = (candles: UnifiedCandle[]) => {
       if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
       candlesDataRef.current = candles
-      const candleData = candles.map(c => ({
+      // Filter out invalid candles before rendering
+      const validCandles = candles.filter(c =>
+        isFinite(c.open) && isFinite(c.high) && isFinite(c.low) && isFinite(c.close) &&
+        isFinite(c.volume) && c.volume >= 0 && c.time > 0
+      )
+      const candleData = validCandles.map(c => ({
         time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
       }))
-      const volumeData = candles.map(c => ({
+      const volumeData = validCandles.map(c => ({
         time: c.time as Time, value: c.volume,
         color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
       }))
@@ -278,9 +283,11 @@ function useLazyScroll(
                 to: prevRange.to + added,
               })
             }
-          } catch {}
-
-          adjustingRef.current = false
+          } catch (err) {
+            console.error('[ChartGrid] setData failed during lazy scroll', { symbol, tf, error: err })
+          } finally {
+            adjustingRef.current = false
+          }
           inflightRef.current = false
           setIsLoadingMore?.(false)
 
@@ -341,8 +348,8 @@ function useRafFlush(
   const flush = () => {
     rafId.current = null
     const now = performance.now()
-    // Throttle: minimum 50ms between flushes to reduce flickering
-    if (now - lastFlushTime.current < 50) {
+    // Throttle: minimum 16ms between flushes (60fps) to reduce flickering while maintaining smooth updates
+    if (now - lastFlushTime.current < 16) {
       rafId.current = requestAnimationFrame(flush)
       return
     }
@@ -380,13 +387,21 @@ function useRafFlush(
       if (prev && p.time < prev.time) return
       // Merge with pending candle if same time to avoid overwriting newer data
       if (prev && p.time === prev.time) {
-        pendingCandle.current = {
+        const merged = {
           time: p.time,
           open: prev.open, // Keep original open
           high: Math.max(prev.high, p.high),
           low: Math.min(prev.low, p.low),
           close: p.close, // Use latest close
         }
+        // Validate merged candle OHLC relationships
+        if (merged.high < merged.low) {
+          console.warn('[queueCandle] Invalid merge detected', { prev, p, merged })
+          // Fix by ensuring high >= low
+          merged.high = Math.max(prev.high, p.high, prev.low, p.low)
+          merged.low = Math.min(prev.high, p.high, prev.low, p.low)
+        }
+        pendingCandle.current = merged
       } else {
         pendingCandle.current = p
       }
@@ -415,6 +430,13 @@ function useWsCandle(
       if (adjustingRef?.current) return
       const c = msg.data as UnifiedCandle
       if (!c) return
+
+      // Validate OHLC fields before processing
+      if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
+        console.warn('[useWsCandle] Invalid OHLC data', { symbol, tf, time: c.time })
+        return
+      }
+
       // Bug 3a: reject stale/out-of-order candles — if a trade-built candle
       // already has a later time, a delayed WS candle must not overwrite it
       if (candlesDataRef?.current) {
@@ -480,6 +502,11 @@ function useWsTrade(
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(price)) return
 
+      // Validate and sanitize trade volume
+      const volume = typeof trade.volume === 'number' && isFinite(trade.volume) && trade.volume >= 0
+        ? trade.volume
+        : 0
+
       // Bug 2a: push trade price to live-price store — redundancy for ticker batch lag
       setLivePrice(symbol, price)
 
@@ -495,16 +522,22 @@ function useWsTrade(
         const lastCandle = candlesDataRef?.current?.[candlesDataRef.current.length - 1]
         curRef.current = {
           symbol, exchange: lastCandle?.exchange ?? ('agg' as any), timeframe: tf,
-          time: candleTime, open: price, high: price, low: price, close: price, volume: trade.volume || 0,
+          time: candleTime, open: price, high: price, low: price, close: price, volume,
         }
       } else {
         if (price > cur.high) cur.high = price
         if (price < cur.low) cur.low = price
         cur.close = price
-        cur.volume += trade.volume || 0
+        cur.volume += volume
       }
 
       const c = curRef.current!
+
+      // Validate constructed candle before processing
+      if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
+        console.warn('[useWsTrade] Invalid constructed candle', { symbol, tf, time: c.time })
+        return
+      }
 
       // Bug 1: write to cache (was missing)
       candleCache.updateCandle(symbol, tf, c)
@@ -877,7 +910,10 @@ function usePriceLine(
       }
     }
     return () => {
-      if (updateTimerRef.current) clearTimeout(updateTimerRef.current)
+      if (updateTimerRef.current) {
+        clearTimeout(updateTimerRef.current)
+        updateTimerRef.current = null
+      }
     }
   }, [symbol, tf])
 
@@ -902,6 +938,14 @@ function usePriceLine(
         })
       } catch {}
     }, 100)
+
+    // Cleanup timer on unmount or when dependencies change
+    return () => {
+      if (updateTimerRef.current) {
+        clearTimeout(updateTimerRef.current)
+        updateTimerRef.current = null
+      }
+    }
   }, [livePrice, priceLineVersion])
 
   useEffect(() => {

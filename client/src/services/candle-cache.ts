@@ -28,10 +28,27 @@ function evictIfNeeded() {
   }
 }
 
+function validateCandle(c: UnifiedCandle): boolean {
+  // Validate all OHLC fields are finite numbers
+  if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
+    return false
+  }
+  // Validate OHLC relationships
+  if (c.high < c.low) return false
+  if (c.high < c.open || c.high < c.close) return false
+  if (c.low > c.open || c.low > c.close) return false
+  // Validate volume and time
+  if (!isFinite(c.volume) || c.volume < 0) return false
+  if (!c.time || c.time <= 0) return false
+  return true
+}
+
 function dedupSort(candles: UnifiedCandle[]): UnifiedCandle[] {
   if (candles.length <= 1) return candles
+  // Filter out invalid candles before dedup
+  const valid = candles.filter(validateCandle)
   const byTime = new Map<number, UnifiedCandle>()
-  for (const c of candles) byTime.set(c.time, c)
+  for (const c of valid) byTime.set(c.time, c)
   return Array.from(byTime.values()).sort((a, b) => a.time - b.time)
 }
 
@@ -85,6 +102,12 @@ export function prependCandles(symbol: string, tf: string, older: UnifiedCandle[
 }
 
 export function updateCandle(symbol: string, tf: string, candle: UnifiedCandle): void {
+  // Validate before updating cache
+  if (!validateCandle(candle)) {
+    console.warn('[candle-cache] Invalid candle rejected', { symbol, tf, time: candle.time })
+    return
+  }
+
   const k = key(symbol, tf)
   const arr = cache.get(k)
   if (!arr) return

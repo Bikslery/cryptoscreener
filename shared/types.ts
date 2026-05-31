@@ -26,6 +26,7 @@ export interface UnifiedCandle {
   low: number
   close: number
   volume: number
+  isFinal?: boolean
 }
 
 export interface UnifiedDepth {
