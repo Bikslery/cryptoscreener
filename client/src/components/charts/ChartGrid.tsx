@@ -564,7 +564,7 @@ const MiniChart = memo(function MiniChart({
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const lastUpdateRef = useRef<number>(Date.now())
 
-  const formingControl = useFormingCandle(symbol, exchange, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
+  useFormingCandle(symbol, exchange, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
   const flashEffect = useFlashEffect(candlesDataRef)
