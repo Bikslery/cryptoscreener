@@ -1,11 +1,12 @@
 import { useEffect, useRef, memo, useState, useCallback, useMemo } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
-import { useCoinListStore, useLivePrice, setLivePrice } from '../../store'
+import { useCoinListStore, useLivePrice } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { debounce } from '../../utils/debounce'
-import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
+import { wsOnType } from '../../services/ws'
 import type { Timeframe, UnifiedCandle } from '../../types'
+import { useFormingCandle, type FormingCandleControl } from './useFormingCandle'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
@@ -15,12 +16,6 @@ import DrawingToolsPanel from './DrawingToolsPanel'
 
 const UP_COLOR = '#26a65b'
 const DOWN_COLOR = '#e74c3c'
-
-const TF_SECONDS: Record<string, number> = {
-  '1m': 60, '5m': 300, '15m': 900,
-  '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
-}
-function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
 
 function ChartMessageOverlay({ label, tone = 'muted' }: { label: string; tone?: 'muted' | 'error' }) {
   return (
@@ -148,7 +143,7 @@ function useLazyScroll(
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   isInitialLoading: boolean,
   setIsLoadingMore: ((loading: boolean) => void) | undefined,
-  adjustingRef: React.RefObject<boolean>,
+  formingControl: FormingCandleControl,
 ) {
   const inflightRef = useRef(false)
   const reachedStartRef = useRef(false)
@@ -161,14 +156,14 @@ function useLazyScroll(
     tfRef.current = tf
     reachedStartRef.current = false
     inflightRef.current = false
-    adjustingRef.current = false
+    formingControl.resume()
     emptyCountRef.current = 0
   }, [symbol, tf])
 
   // Bug 3: debounce onRange — avoid dozens of redundant checks per second during fast scroll
   const onRangeDebounced = useMemo(
     () => debounce((range: { from: number; to: number } | null) => {
-      if (!range || adjustingRef.current || inflightRef.current || reachedStartRef.current) return
+      if (!range || inflightRef.current || reachedStartRef.current) return
 
       // Dynamic threshold: start loading when approaching edge
       // Bug 1a: use 60% of visible range or minimum 300 bars (was 30%/100)
@@ -253,7 +248,7 @@ function useLazyScroll(
             return
           }
 
-          adjustingRef.current = true
+          formingControl.pause()
 
           const barSpacing = (ts.options() as any).barSpacing
 
@@ -280,7 +275,7 @@ function useLazyScroll(
             }
           } catch {}
 
-          adjustingRef.current = false
+          formingControl.resume()
           inflightRef.current = false
           setIsLoadingMore?.(false)
 
@@ -328,197 +323,6 @@ function useLazyScroll(
   }, [symbol, tf, isInitialLoading, onRangeDebounced])
 }
 
-function useRafFlush(
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
-  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  destroyedRef: React.RefObject<boolean>,
-) {
-  const pendingCandle = useRef<{ time: Time; open: number; high: number; low: number; close: number } | null>(null)
-  const pendingVolume = useRef<{ time: Time; value: number; color: string } | null>(null)
-  const rafId = useRef<number | null>(null)
-
-  const flush = () => {
-    rafId.current = null
-    if (destroyedRef.current) {
-      pendingCandle.current = null
-      pendingVolume.current = null
-      return
-    }
-    const c = pendingCandle.current
-    const v = pendingVolume.current
-    pendingCandle.current = null
-    pendingVolume.current = null
-    try {
-      if (c && candleRef.current) candleRef.current.update(c)
-      if (v && volumeRef.current) volumeRef.current.update(v)
-    } catch {}
-  }
-
-  const schedule = () => {
-    if (rafId.current != null) return
-    rafId.current = requestAnimationFrame(flush)
-  }
-
-  useEffect(() => () => {
-    if (rafId.current != null) cancelAnimationFrame(rafId.current)
-    rafId.current = null
-  }, [])
-
-  return {
-    queueCandle(p: { time: Time; open: number; high: number; low: number; close: number }) {
-      // Bug 3b: reject out-of-order — if pending candle is newer, don't overwrite
-      const prev = pendingCandle.current
-      if (prev && p.time < prev.time) return
-      pendingCandle.current = p
-      schedule()
-    },
-    queueVolume(p: { time: Time; value: number; color: string }) {
-      pendingVolume.current = p
-      schedule()
-    },
-  }
-}
-
-function useWsCandle(
-  symbol: string,
-  tf: Timeframe,
-  flush: ReturnType<typeof useRafFlush>,
-  destroyedRef: React.RefObject<boolean>,
-  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
-  adjustingRef?: React.RefObject<boolean>,
-) {
-  useEffect(() => {
-    const channel = `candle:${symbol}:${tf}`
-    const unsub = wsOnChannel(channel, (msg) => {
-      if (destroyedRef.current) return
-      // Bug 2: skip WS updates while useLazyScroll is doing setData
-      if (adjustingRef?.current) return
-      const c = msg.data as UnifiedCandle
-      if (!c) return
-      // Bug 3a: reject stale/out-of-order candles — if a trade-built candle
-      // already has a later time, a delayed WS candle must not overwrite it
-      if (candlesDataRef?.current) {
-        const arr = candlesDataRef.current
-        const last = arr[arr.length - 1]
-        if (last && c.time < last.time) return
-      }
-      if (!c.isFinal) {
-        setLivePrice(symbol, c.close)
-      }
-      candleCache.updateCandle(symbol, tf, c)
-      if (candlesDataRef && candlesDataRef.current) {
-        const arr = candlesDataRef.current
-        const last = arr[arr.length - 1]
-        if (last && last.time === c.time) {
-          arr[arr.length - 1] = c
-        } else if (!last || c.time > last.time) {
-          arr.push(c)
-        }
-      }
-      flush.queueCandle({
-        time: c.time as Time,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      })
-      flush.queueVolume({
-        time: c.time as Time,
-        value: c.volume,
-        color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
-      })
-    })
-    wsSubscribe(channel)
-    return () => {
-      unsub()
-      wsUnsubscribe(channel)
-    }
-  }, [symbol, tf])
-}
-
-function useWsTrade(
-  symbol: string,
-  tf: Timeframe,
-  flush: ReturnType<typeof useRafFlush>,
-  destroyedRef: React.RefObject<boolean>,
-  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
-  adjustingRef?: React.RefObject<boolean>,
-) {
-  // Bug 5: useRef instead of let — survives re-renders, reset on symbol/tf change
-  const curRef = useRef<UnifiedCandle | null>(null)
-
-  useEffect(() => {
-    curRef.current = null
-    const tradeType = `trade:${symbol}`
-
-    const unsub = wsOnType(tradeType, (msg) => {
-      if (destroyedRef.current) return
-      // Bug 2: skip WS updates while useLazyScroll is doing setData
-      if (adjustingRef?.current) return
-      const trade = msg.data as any
-      if (!trade?.price) return
-      const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
-      if (!isFinite(price)) return
-
-      // Bug 2a: push trade price to live-price store — redundancy for ticker batch lag
-      setLivePrice(symbol, price)
-
-      const now = Math.floor(Date.now() / 1000)
-      const tfSeconds = getTfSeconds(tf)
-      const candleTime = Math.floor(now / tfSeconds) * tfSeconds
-
-      const cur = curRef.current
-      if (!cur || cur.time !== candleTime) {
-        // Bug 3c: include full UnifiedCandle fields (symbol, exchange, timeframe)
-        // so candleCache.updateCandle gets consistent data
-        // Copy exchange from last candle in backing array if available
-        const lastCandle = candlesDataRef?.current?.[candlesDataRef.current.length - 1]
-        curRef.current = {
-          symbol, exchange: lastCandle?.exchange ?? ('agg' as any), timeframe: tf,
-          time: candleTime, open: price, high: price, low: price, close: price, volume: trade.volume || 0,
-        }
-      } else {
-        if (price > cur.high) cur.high = price
-        if (price < cur.low) cur.low = price
-        cur.close = price
-        cur.volume += trade.volume || 0
-      }
-
-      const c = curRef.current!
-
-      // Bug 1: write to cache (was missing)
-      candleCache.updateCandle(symbol, tf, c)
-
-      // Bug 1: write to backing array (was missing)
-      if (candlesDataRef?.current) {
-        const arr = candlesDataRef.current
-        const last = arr[arr.length - 1]
-        if (last?.time === c.time) arr[arr.length - 1] = { ...c }
-        else arr.push({ ...c })
-      }
-
-      flush.queueCandle({
-        time: c.time as Time,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      })
-      // Bug 1: queue volume (was missing)
-      flush.queueVolume({
-        time: c.time as Time,
-        value: c.volume,
-        color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
-      })
-    })
-    wsSubscribe(tradeType)
-
-    return () => {
-      unsub()
-      wsUnsubscribe(tradeType)
-    }
-  }, [symbol, tf])
-}
 
 function exchangeBadge(ex: string): string {
   if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
@@ -602,88 +406,7 @@ const MiniChart = memo(function MiniChart({
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const [priceLineVersion, setPriceLineVersion] = useState(0)
 
-  const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
-
-  useEffect(() => {
-    destroyedRef.current = false
-    if (!containerRef.current) return
-
-    const chart = createChart(containerRef.current, {
-      layout: { background: { type: ColorType.Solid, color: '#0e0e0e' }, textColor: '#666666', fontSize: 9, fontFamily: "'JetBrains Mono', monospace" },
-      grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
-      crosshair: { mode: CrosshairMode.Normal, vertLine: { visible: true, color: '#4d4d4d' }, horzLine: { visible: true, color: '#4d4d4d' } },
-      rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.1, bottom: 0.25 }, textColor: '#666666' },
-      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6 },
-      handleScroll: true,
-      handleScale: {
-        axisPressedMouseMove: { time: true, price: true },
-        pinch: true,
-        mouseWheel: true,
-      },
-      kineticScroll: { touch: false, mouse: false },
-    })
-
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: UP_COLOR, downColor: DOWN_COLOR,
-      borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
-      wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      priceFormat: {
-        type: 'price',
-        precision: pricePrecision,
-        minMove: Math.pow(10, -pricePrecision),
-      },
-    })
-    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', priceLineVisible: false })
-    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, textColor: '#666666' })
-
-    chartRef.current = chart
-    candleRef.current = candleSeries
-    volumeRef.current = volumeSeries
-    priceLineRef.current = candleSeries.createPriceLine({
-      price: 0,
-      color: '#26a65b',
-      lineStyle: 2, // Dashed
-      lineWidth: 1,
-      axisLabelVisible: true,
-      title: '',
-    })
-    setPriceLineVersion(v => v + 1)
-
-    const ro = new ResizeObserver(() => {
-      if (containerRef.current && !destroyedRef.current) {
-        chart.applyOptions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight })
-      }
-    })
-    ro.observe(containerRef.current)
-
-    const onWheel = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault()
-        e.stopPropagation()
-        const ts = chart.timeScale()
-        const options = ts.options()
-        const currentSpacing = (options as any).barSpacing || 6
-        const delta = e.deltaY > 0 ? -0.5 : 0.5
-        const newSpacing = Math.max(1, Math.min(30, currentSpacing + delta))
-        ts.applyOptions({ barSpacing: newSpacing })
-      }
-    }
-    containerRef.current.addEventListener('wheel', onWheel, { passive: false })
-
-    return () => {
-      destroyedRef.current = true
-      containerRef.current?.removeEventListener('wheel', onWheel)
-      ro.disconnect()
-      chart.remove()
-      chartRef.current = null
-      candleRef.current = null
-      volumeRef.current = null
-      priceLineRef.current = null
-      prevPriceRef.current = null
-    }
-  }, [symbol, tf, pricePrecision])
+  const formingControl = useFormingCandle(symbol, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
 
   const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 })
 
@@ -691,8 +414,6 @@ const MiniChart = memo(function MiniChart({
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
   }, [isInitialLoading, symbol, tf, onLoaded])
 
-  useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef)
-  useWsTrade(symbol, tf, flush, destroyedRef, candlesDataRef)
   usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
 
   // Set initial price line position from loaded data
@@ -855,34 +576,6 @@ function usePriceLine(
       })
     } catch {}
   }, [livePrice, priceLineVersion])
-
-  // Fallback: subscribe to candle updates for initial price
-  useEffect(() => {
-    const channel = `candle:${symbol}:1m`
-
-    const unsubCandle = wsOnChannel(channel, (msg) => {
-      if (destroyedRef.current || !priceLineRef.current) return
-      const c = msg.data as UnifiedCandle
-      if (!c?.close) return
-      // Only update if we don't have a price yet
-      if (prevPriceRef.current === null) {
-        prevPriceRef.current = c.close
-        try {
-          priceLineRef.current.applyOptions({
-            price: c.close,
-            color: '#26a65b',
-          })
-        } catch {}
-      }
-    })
-
-    wsSubscribe(channel)
-
-    return () => {
-      unsubCandle()
-      wsUnsubscribe(channel)
-    }
-  }, [symbol])
 }
 
 function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void }) {
@@ -895,7 +588,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const prevPriceRef = useRef<number | null>(null)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
-  const adjustingRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const [priceLineVersion, setPriceLineVersion] = useState(0)
   const [selection, setSelection] = useState<RangeSelection | null>(null)
@@ -1000,12 +692,10 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     }
   }, [symbol, tf, pricePrecision])
 
-  const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
+  const formingControl = useFormingCandle(symbol, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
   const { isInitialLoading, status } = useFullHistory(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
-  useWsCandle(symbol, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
   usePriceLine(symbol, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion)
-  useWsTrade(symbol, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
-  useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, setIsLoadingMore, adjustingRef)
+  useLazyScroll(symbol, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, setIsLoadingMore, formingControl)
 
   // Set initial price line position from loaded data
   useEffect(() => {
