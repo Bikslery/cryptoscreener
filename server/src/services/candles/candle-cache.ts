@@ -1,4 +1,4 @@
-import type { UnifiedCandle } from '../../types.js'
+import type { UnifiedCandle, Exchange } from '../../types.js'
 
 const MAX_CANDLES_PER_KEY = 2000
 const MAX_TOTAL_CANDLES = 1_500_000
@@ -107,34 +107,46 @@ return merged.length > MAX_CANDLES_PER_KEY
   : merged
 }
 
-export function getCachedCandles(symbol: string, tf: string): UnifiedCandle[] | undefined {
-const key = `${symbol}:${tf}`
-const data = cache.get(key)
-if (data) lru.touch(key)
-return data
+export function getCachedCandles(symbol: string, tf: string, exchange?: Exchange): UnifiedCandle[] | undefined {
+  // If exchange is specified, use exchange-aware key
+  if (exchange) {
+    const key = `${exchange}:${symbol}:${tf}`
+    const data = cache.get(key)
+    if (data) lru.touch(key)
+    return data
+  }
+  // Fallback: try without exchange (backward compatibility for REST routes)
+  const key = `${symbol}:${tf}`
+  const data = cache.get(key)
+  if (data) lru.touch(key)
+  return data
 }
 
-export function setCachedCandles(symbol: string, tf: string, candles: UnifiedCandle[]): void {
-const key = `${symbol}:${tf}`
-const existing = cache.get(key)
-if (existing) totalCandleCount -= existing.length
-const merged = existing ? mergeCandles(existing, candles) : candles.slice(0, MAX_CANDLES_PER_KEY)
-cache.set(key, merged)
-totalCandleCount += merged.length
-lru.touch(key)
-evictIfNeeded()
+export function setCachedCandles(symbol: string, tf: string, candles: UnifiedCandle[], exchange?: Exchange): void {
+  // Use exchange from candles if available, otherwise from parameter
+  const ex = exchange || candles[0]?.exchange
+  const key = ex ? `${ex}:${symbol}:${tf}` : `${symbol}:${tf}`
+  const existing = cache.get(key)
+  if (existing) totalCandleCount -= existing.length
+  const merged = existing ? mergeCandles(existing, candles) : candles.slice(0, MAX_CANDLES_PER_KEY)
+  cache.set(key, merged)
+  totalCandleCount += merged.length
+  lru.touch(key)
+  evictIfNeeded()
 }
 
-export function setCachedCandlesFromRest(symbol: string, tf: string, candles: UnifiedCandle[]): void {
-const key = `${symbol}:${tf}`
-setCachedCandles(symbol, tf, candles)
-restKeys.add(key)
+export function setCachedCandlesFromRest(symbol: string, tf: string, candles: UnifiedCandle[], exchange?: Exchange): void {
+  const ex = exchange || candles[0]?.exchange
+  const key = ex ? `${ex}:${symbol}:${tf}` : `${symbol}:${tf}`
+  setCachedCandles(symbol, tf, candles, exchange)
+  restKeys.add(key)
 }
 
 export function updateCachedCandle(candle: UnifiedCandle): void {
-const key = `${candle.symbol}:${candle.timeframe}`
-const arr = cache.get(key)
-if (!arr) return
+  // Use exchange-aware key
+  const key = `${candle.exchange}:${candle.symbol}:${candle.timeframe}`
+  const arr = cache.get(key)
+  if (!arr) return
 
   const lastIdx = arr.length - 1
   if (lastIdx >= 0 && arr[lastIdx].time === candle.time) {
@@ -158,8 +170,11 @@ if (!arr) return
   }
 }
 
-export function isRestCached(symbol: string, tf: string): boolean {
-return restKeys.has(`${symbol}:${tf}`)
+export function isRestCached(symbol: string, tf: string, exchange?: Exchange): boolean {
+  if (exchange) {
+    return restKeys.has(`${exchange}:${symbol}:${tf}`)
+  }
+  return restKeys.has(`${symbol}:${tf}`)
 }
 
 export function clearCache(): void {

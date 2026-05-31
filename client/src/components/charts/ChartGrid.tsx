@@ -350,10 +350,13 @@ function useLazyScroll(
 function useRafFlush(
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  priceLineRef: React.RefObject<any>,
+  lastCandleTsRef: React.RefObject<number>,
   destroyedRef: React.RefObject<boolean>,
 ) {
   const pendingCandle = useRef<{ time: Time; open: number; high: number; low: number; close: number } | null>(null)
   const pendingVolume = useRef<{ time: Time; value: number; color: string } | null>(null)
+  const pendingPriceLine = useRef<{ price: number; color: string } | null>(null)
   const rafId = useRef<number | null>(null)
   const lastFlushTime = useRef<number>(0)
 
@@ -372,15 +375,23 @@ function useRafFlush(
     if (destroyedRef.current) {
       pendingCandle.current = null
       pendingVolume.current = null
+      pendingPriceLine.current = null
       return
     }
     const c = pendingCandle.current
     const v = pendingVolume.current
+    const pl = pendingPriceLine.current
     pendingCandle.current = null
     pendingVolume.current = null
+    pendingPriceLine.current = null
     try {
       if (c && candleRef.current) candleRef.current.update(c)
       if (v && volumeRef.current) volumeRef.current.update(v)
+      // Atomic: update price line in the same RAF frame as candle
+      if (pl && priceLineRef.current) {
+        priceLineRef.current.applyOptions({ price: pl.price, color: pl.color })
+        lastCandleTsRef.current = now
+      }
     } catch {}
   }
 
@@ -423,6 +434,10 @@ function useRafFlush(
     },
     queueVolume(p: { time: Time; value: number; color: string }) {
       pendingVolume.current = p
+      schedule()
+    },
+    queuePriceLine(price: number, color: string) {
+      pendingPriceLine.current = { price, color }
       schedule()
     },
   }
@@ -485,6 +500,9 @@ function useWsCandle(
         value: c.volume,
         color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
       })
+      // Atomic: queue price line update in same RAF frame as candle
+      const candleColor = c.close >= c.open ? '#26a65b' : '#e74c3c'
+      flush.queuePriceLine(c.close, candleColor)
     })
     wsSubscribe(channel)
     return () => {
@@ -579,6 +597,9 @@ function useWsTrade(
         value: c.volume,
         color: c.close >= c.open ? 'rgba(38,166,91,0.27)' : 'rgba(231,76,60,0.27)',
       })
+      // Atomic: queue price line update in same RAF frame as candle
+      const candleColor = c.close >= c.open ? '#26a65b' : '#e74c3c'
+      flush.queuePriceLine(c.close, candleColor)
     })
     wsSubscribe(tradeType)
 
@@ -665,6 +686,7 @@ const MiniChart = memo(function MiniChart({
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const priceLineRef = useRef<any>(null)
   const prevPriceRef = useRef<number | null>(null)
+  const lastCandleTsRef = useRef<number>(0)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
@@ -672,7 +694,7 @@ const MiniChart = memo(function MiniChart({
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const [priceLineVersion, setPriceLineVersion] = useState(0)
 
-  const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
+  const flush = useRafFlush(candleRef, volumeRef, priceLineRef, lastCandleTsRef, destroyedRef)
 
   useEffect(() => {
     destroyedRef.current = false
@@ -763,7 +785,7 @@ const MiniChart = memo(function MiniChart({
 
   useWsCandle(symbol, exchange, tf, flush, destroyedRef, candlesDataRef)
   useWsTrade(symbol, exchange, tf, flush, destroyedRef, candlesDataRef)
-  usePriceLine(symbol, exchange, tf, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion, candlesDataRef)
+  usePriceLine(symbol, exchange, tf, priceLineRef, prevPriceRef, lastCandleTsRef, destroyedRef, priceLineVersion, candlesDataRef)
 
   // Set initial price line position from loaded data
   useEffect(() => {
@@ -906,6 +928,7 @@ function usePriceLine(
   tf: Timeframe,
   priceLineRef: React.RefObject<any>,
   prevPriceRef: React.RefObject<number | null>,
+  lastCandleTsRef: React.RefObject<number>,
   destroyedRef: React.RefObject<boolean>,
   priceLineVersion: number,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
@@ -947,6 +970,14 @@ function usePriceLine(
       const price = pendingPriceRef.current
       if (price == null || destroyedRef.current || !priceLineRef.current) return
 
+      // The candle-synced RAF path (useWsCandle/useWsTrade) is authoritative —
+      // it keeps the price line in lockstep with the last candle's close.
+      // Only fall back to the ticker price when no candle-driven update has
+      // arrived recently (e.g. illiquid symbols with sparse trade streams),
+      // so the two writers never fight and cause flicker/divergence.
+      const sinceCandle = performance.now() - lastCandleTsRef.current
+      if (sinceCandle < 1000) return
+
       prevPriceRef.current = price
 
       try {
@@ -970,28 +1001,16 @@ function usePriceLine(
     if (!exchange) return
     const channel = `candle:${exchange}:${symbol}:${tf}`
 
+    // The RAF flush in useWsCandle/useWsTrade is now the single writer that
+    // applies price+color to the price line (atomic with the candle update).
+    // Here we only track the latest candle color so the ticker fallback
+    // (above) can colour its updates correctly, and seed prevPriceRef once.
     const unsubCandle = wsOnChannel(channel, (msg) => {
-      if (destroyedRef.current || !priceLineRef.current) return
+      if (destroyedRef.current) return
       const c = msg.data as UnifiedCandle
       if (!c?.close) return
-
       lastCandleColorRef.current = deriveCandleColor(c)
-
-      if (prevPriceRef.current === null) {
-        prevPriceRef.current = c.close
-        try {
-          priceLineRef.current.applyOptions({
-            price: c.close,
-            color: lastCandleColorRef.current,
-          })
-        } catch {}
-      } else {
-        try {
-          priceLineRef.current.applyOptions({
-            color: lastCandleColorRef.current,
-          })
-        } catch {}
-      }
+      if (prevPriceRef.current === null) prevPriceRef.current = c.close
     })
 
     wsSubscribe(channel)
@@ -1011,6 +1030,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const priceLineRef = useRef<any>(null)
   const prevPriceRef = useRef<number | null>(null)
+  const lastCandleTsRef = useRef<number>(0)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const adjustingRef = useRef(false)
@@ -1119,10 +1139,10 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     }
   }, [symbol, tf, pricePrecision])
 
-  const flush = useRafFlush(candleRef, volumeRef, destroyedRef)
+  const flush = useRafFlush(candleRef, volumeRef, priceLineRef, lastCandleTsRef, destroyedRef)
   const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
   useWsCandle(symbol, exchange, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
-  usePriceLine(symbol, exchange, tf, priceLineRef, prevPriceRef, destroyedRef, priceLineVersion, candlesDataRef)
+  usePriceLine(symbol, exchange, tf, priceLineRef, prevPriceRef, lastCandleTsRef, destroyedRef, priceLineVersion, candlesDataRef)
   useWsTrade(symbol, exchange, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore)
 

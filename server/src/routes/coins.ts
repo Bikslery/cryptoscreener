@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import rateLimit from 'express-rate-limit'
-import { fetchCandles, fetchDepth, getTickers } from '../services/aggregator/index.js'
+import { fetchCandles, fetchDepth, getTickers, getTicker } from '../services/aggregator/index.js'
 import { getCachedCandles, setCachedCandlesFromRest } from '../services/candles/candle-cache.js'
 import { getHistory } from '../services/candles/history.js'
 
@@ -61,7 +61,8 @@ router.post('/candles-bulk', async (req, res) => {
 
   // Check server in-memory cache first (fastest path)
   for (const symbol of symbols) {
-    const cached = getCachedCandles(symbol, tf)
+    const ex = getTicker(symbol)?.exchange
+    const cached = getCachedCandles(symbol, tf, ex)
     if (cached && cached.length > 0) {
       result[symbol] = cached.slice(-limit)
     } else {
@@ -77,7 +78,8 @@ router.post('/candles-bulk', async (req, res) => {
         // automatically stitches data from multiple exchanges
         const candles = await getHistory(symbol, tf, { limit })
         if (candles.length > 0) {
-          setCachedCandlesFromRest(symbol, tf, candles)
+          const ex = getTicker(symbol)?.exchange || candles[0]?.exchange
+          setCachedCandlesFromRest(symbol, tf, candles, ex)
           result[symbol] = candles
         } else {
           result[symbol] = []
@@ -110,7 +112,8 @@ router.get('/:symbol/candles', async (req, res) => {
     return
   }
 
-  const cached = getCachedCandles(symbol, tf)
+  const cacheExchange = (exchange as any) || getTicker(symbol)?.exchange
+  const cached = getCachedCandles(symbol, tf, cacheExchange)
   const minUsable = Math.min(Math.floor(limit * 0.5), 100)
   if (cached && cached.length >= minUsable) {
     res.setHeader('Cache-Control', 'public, max-age=5')
@@ -120,7 +123,8 @@ router.get('/:symbol/candles', async (req, res) => {
 
   const candles = await getHistory(symbol, tf, { limit, exchange: exchange as any })
   if (candles.length > 0) {
-    setCachedCandlesFromRest(symbol, tf, candles)
+    // Key by the same exchange used for reads/WS updates so cache hits align.
+    setCachedCandlesFromRest(symbol, tf, candles, cacheExchange || candles[0]?.exchange)
   }
   res.json(candles)
 })

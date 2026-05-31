@@ -3,7 +3,7 @@ import { verifyToken, type JwtPayload } from '../middleware/auth.js'
 import type { WsMessage } from '../types.js'
 import type { UnifiedTicker, UnifiedCandle } from '../types.js'
 import { getTopCachedSymbols, getCachedCandles } from '../services/candles/candle-cache.js'
-import { getTickers, setTickersFromRedis } from '../services/aggregator/index.js'
+import { getTickers, getTicker, setTickersFromRedis } from '../services/aggregator/index.js'
 import { INITIAL_CANDLES_TF } from '../services/candles/preload.js'
 import { getRedisSub } from '../redis.js'
 import {
@@ -36,8 +36,8 @@ const CLIENT_PING_INTERVAL = 30_000
 let clientPingTimer: ReturnType<typeof setInterval> | null = null
 
 let candleManager: {
-  subscribeCandle: (symbol: string, tf: string) => void
-  unsubscribeCandle: (symbol: string, tf: string) => void
+  subscribeCandle: (exchange: string, symbol: string, tf: string) => void
+  unsubscribeCandle: (exchange: string, symbol: string, tf: string) => void
   subscribeDepth: (symbol: string) => void
   unsubscribeDepth: (symbol: string) => void
 } | null = null
@@ -99,10 +99,10 @@ export function stopWsHub() {
   if (clientPingTimer) { clearInterval(clientPingTimer); clientPingTimer = null }
 }
 
-function parseCandleChannel(channel: string): { symbol: string; tf: string } | null {
-  const match = channel.match(/^candle:([^:]+):(.+)$/)
+function parseCandleChannel(channel: string): { exchange: string; symbol: string; tf: string } | null {
+  const match = channel.match(/^candle:([^:]+):([^:]+):(.+)$/)
   if (!match) return null
-  return { symbol: match[1], tf: match[2] }
+  return { exchange: match[1], symbol: match[2], tf: match[3] }
 }
 
 function parseDepthChannel(channel: string): string | null {
@@ -130,9 +130,16 @@ function buildInitialCandlesData(): Record<string, any[]> {
 
   const result: Record<string, any[]> = {}
   for (const symbol of topSymbols) {
-    const cached = getCachedCandles(symbol, INITIAL_CANDLES_TF)
+    const exchange = getTicker(symbol)?.exchange
+    const cached = getCachedCandles(symbol, INITIAL_CANDLES_TF, exchange)
     if (cached && cached.length > 0) {
-      result[`${symbol}:${INITIAL_CANDLES_TF}`] = cached.slice(-INITIAL_CANDLES_LIMIT)
+      // Key with exchange so it matches the client cache's
+      // `${exchange}:${symbol}:${tf}` lookup (storeBulk).
+      const ex = exchange || cached[0]?.exchange
+      const payloadKey = ex
+        ? `${ex}:${symbol}:${INITIAL_CANDLES_TF}`
+        : `${symbol}:${INITIAL_CANDLES_TF}`
+      result[payloadKey] = cached.slice(-INITIAL_CANDLES_LIMIT)
     }
   }
   return result
@@ -142,7 +149,7 @@ function cleanupClient(client: Client) {
   if (candleManager) {
     for (const channel of client.subscriptions) {
       const candleInfo = parseCandleChannel(channel)
-      if (candleInfo) candleManager.unsubscribeCandle(candleInfo.symbol, candleInfo.tf)
+      if (candleInfo) candleManager.unsubscribeCandle(candleInfo.exchange, candleInfo.symbol, candleInfo.tf)
       const depthSymbol = parseDepthChannel(channel)
       if (depthSymbol) candleManager.unsubscribeDepth(depthSymbol)
     }
@@ -206,7 +213,7 @@ export function setupWsHub(wss: WebSocketServer) {
           if (isNew) {
             const candleInfo = parseCandleChannel(msg.channel)
             if (candleInfo && candleManager) {
-              candleManager.subscribeCandle(candleInfo.symbol, candleInfo.tf)
+              candleManager.subscribeCandle(candleInfo.exchange, candleInfo.symbol, candleInfo.tf)
             }
 
             const depthSymbol = parseDepthChannel(msg.channel)
@@ -223,7 +230,7 @@ export function setupWsHub(wss: WebSocketServer) {
 
           const candleInfo = parseCandleChannel(msg.channel)
           if (candleInfo && candleManager) {
-            candleManager.unsubscribeCandle(candleInfo.symbol, candleInfo.tf)
+            candleManager.unsubscribeCandle(candleInfo.exchange, candleInfo.symbol, candleInfo.tf)
           }
 
           const depthSymbol = parseDepthChannel(msg.channel)
@@ -344,13 +351,13 @@ export function startRedisListener() {
           broadcast({ type: 'ticker', data: tickers })
         } else if (channel === 'candles') {
           const candle = JSON.parse(message) as UnifiedCandle
-          broadcastToChannel(`candle:${candle.symbol}:${candle.timeframe}`, candle)
+          broadcastToChannel(`candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`, candle)
         } else if (channel === 'depth') {
           const depth = JSON.parse(message)
           broadcastToChannel(`depth:${depth.symbol}`, depth)
         } else if (channel === 'trades') {
           const trade = JSON.parse(message)
-          broadcastToChannel(`trade:${trade.symbol}`, trade)
+          broadcastToChannel(`trade:${trade.exchange}:${trade.symbol}`, trade)
         } else if (channel === 'alerts') {
           broadcast({ type: 'alert', data: JSON.parse(message) })
         }

@@ -195,7 +195,7 @@ export function startAggregator() {
         } catch {}
       }
       if (isBroadcast) {
-        broadcastToChannel(`candle:${candle.symbol}:${candle.timeframe}`, candle)
+        broadcastToChannel(`candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`, candle)
       }
     })
 
@@ -257,7 +257,7 @@ async function computeMetrics() {
 
     for (const coin of topCoins) {
       try {
-        const cached1m = getCachedCandles(coin.symbol, '1m')
+        const cached1m = getCachedCandles(coin.symbol, '1m', coin.exchange)
         let candles1m: UnifiedCandle[]
         if (cached1m && cached1m.length >= 2) {
           candles1m = cached1m.slice(-5)
@@ -273,7 +273,7 @@ async function computeMetrics() {
           metricsMap.set(coin.symbol, { ...(metricsMap.get(coin.symbol) || { natr5m: 0 }), range1m })
         }
 
-        const cached5m = getCachedCandles(coin.symbol, '5m')
+        const cached5m = getCachedCandles(coin.symbol, '5m', coin.exchange)
         let candles5m: UnifiedCandle[]
         if (cached5m && cached5m.length >= 14) {
           candles5m = cached5m.slice(-14)

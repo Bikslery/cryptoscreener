@@ -1,6 +1,6 @@
 import type { ExchangeAdapter } from '../exchanges/types.js'
 import { setCachedCandlesFromRest, getCachedCandles } from './candle-cache.js'
-import { getTickers } from '../aggregator/index.js'
+import { getTickers, getTicker } from '../aggregator/index.js'
 
 export const PRELOAD_TFS = ['5m', '15m', '1h', '4h'] as const
 export const INITIAL_CANDLES_TF = '5m'
@@ -103,7 +103,10 @@ async function phase1(
           }
 
           if (candles.length > 0) {
-            setCachedCandlesFromRest(symbol, tf, candles)
+            // Key by ticker exchange (the canonical key used by reads + WS
+            // updates) so preloaded history and live candles share one entry.
+            const exchange = getTicker(symbol)?.exchange || candles[0]?.exchange || adapter.exchange
+            setCachedCandlesFromRest(symbol, tf, candles, exchange)
             recordPreload(tf, candles.length)
           } else {
             recordFailure(tf)
@@ -122,15 +125,19 @@ async function phase1(
 
 function setupWsSubscriptions(
   topSymbols: string[],
-  candleManager: { subscribeCandle: (symbol: string, tf: string) => void }
+  candleManager: { subscribeCandle: (exchange: string, symbol: string, tf: string) => void }
 ): void {
   for (const symbol of topSymbols) {
+    // Use the same exchange the client will use (ticker's exchange) so the
+    // subscription key matches and the ref-count is shared, not duplicated.
+    const exchange = getTicker(symbol)?.exchange
+    if (!exchange) continue
     for (const tf of WS_TFS) {
       try {
-        candleManager.subscribeCandle(symbol, tf)
+        candleManager.subscribeCandle(exchange, symbol, tf)
         preloadStats.wsSubscriptions++
       } catch (err) {
-        console.warn(`[Preload] WS subscribe failed for ${symbol}:${tf}`, err)
+        console.warn(`[Preload] WS subscribe failed for ${exchange}:${symbol}:${tf}`, err)
       }
     }
   }
@@ -156,7 +163,8 @@ function periodicRefresh(
               if (alt) candles = await alt.fetchCandles(symbol, tf, limit)
             }
             if (candles.length > 0) {
-              setCachedCandlesFromRest(symbol, tf, candles)
+              const exchange = getTicker(symbol)?.exchange || candles[0]?.exchange || adapter.exchange
+              setCachedCandlesFromRest(symbol, tf, candles, exchange)
             }
           } catch {}
           await sleep(RATE_LIMIT_MS)
@@ -175,7 +183,7 @@ function periodicRefresh(
 
 export async function startPreload(
   adapters: ExchangeAdapter[],
-  candleManager: { subscribeCandle: (symbol: string, tf: string) => void }
+  candleManager: { subscribeCandle: (exchange: string, symbol: string, tf: string) => void }
 ): Promise<void> {
   preloadStats.startTime = Date.now()
   console.log('[Preload] Starting...')
