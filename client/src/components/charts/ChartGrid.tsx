@@ -564,7 +564,7 @@ const MiniChart = memo(function MiniChart({
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const lastUpdateRef = useRef<number>(Date.now())
 
-  useFormingCandle(symbol, exchange, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
+  useFormingCandle(symbol, exchange, tf, candleRef, volumeRef, destroyedRef, candlesDataRef, lastUpdateRef)
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
   const flashEffect = useFlashEffect(candlesDataRef)
@@ -876,7 +876,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     }
   }, [symbol, tf, pricePrecision])
 
-  const formingControl = useFormingCandle(symbol, exchange, tf, candleRef, volumeRef, destroyedRef, candlesDataRef)
+  const formingControl = useFormingCandle(symbol, exchange, tf, candleRef, volumeRef, destroyedRef, candlesDataRef, lastUpdateRef)
   const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef)
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)

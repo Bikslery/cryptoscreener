@@ -46,6 +46,7 @@ export function useFormingCandle(
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  lastUpdateRef?: React.RefObject<number>,
 ): FormingCandleControl {
   const curRef = useRef<UnifiedCandle | null>(null)
   const pausedRef = useRef(false)
@@ -149,10 +150,14 @@ export function useFormingCandle(
     const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
     if (!isFinite(price)) return
 
+    if (lastUpdateRef) lastUpdateRef.current = Date.now()
+
     setLivePrice(symbol, price)
 
-    const now = Math.floor(Date.now() / 1000)
-    const ct = candleTimeFor(tf, now)
+    const tradeSec = typeof trade.time === 'number' && isFinite(trade.time)
+      ? trade.time
+      : Math.floor(Date.now() / 1000)
+    const ct = candleTimeFor(tf, tradeSec)
     let cur = curRef.current
 
     if (!cur || cur.time !== ct) {
@@ -186,6 +191,8 @@ export function useFormingCandle(
   const handleCandle = useCallback((c: UnifiedCandle) => {
     if (destroyedRef.current || pausedRef.current) return
     if (!c || !isFinite(c.time)) return
+
+    if (lastUpdateRef) lastUpdateRef.current = Date.now()
 
     const cur = curRef.current
 
@@ -233,7 +240,8 @@ export function useFormingCandle(
 
     if (ct === cur.time) {
       cur.open = c.open
-
+      cur.close = c.close
+      cur.volume = c.volume
       if (c.high > cur.high) cur.high = c.high
       if (c.low < cur.low) cur.low = c.low
 
