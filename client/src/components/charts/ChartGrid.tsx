@@ -44,6 +44,41 @@ function ChartCornerSpinner() {
   )
 }
 
+function LiveIndicator({ isLive, lastUpdate }: { isLive: boolean; lastUpdate: number }) {
+  const timeSinceUpdate = Date.now() - lastUpdate
+  const showWarning = timeSinceUpdate > 3000
+
+  return (
+    <div className="absolute top-[8px] right-[8px] z-30 pointer-events-none flex items-center gap-[6px] px-[8px] py-[4px] rounded-[4px] bg-[#141414]/95 border border-[#2a2a2a] shadow-lg">
+      <div
+        className={`w-[6px] h-[6px] rounded-full ${
+          isLive && !showWarning
+            ? 'bg-[#26a65b] live-indicator-pulse'
+            : 'bg-[#666]'
+        }`}
+      />
+      <span className={`text-[9px] font-bold tracking-wide ${
+        isLive && !showWarning ? 'text-[#26a65b]' : 'text-[#666]'
+      }`}>
+        {isLive && !showWarning ? 'LIVE' : 'PAUSED'}
+      </span>
+    </div>
+  )
+}
+
+function StaleDataOverlay({ visible }: { visible: boolean }) {
+  if (!visible) return null
+
+  return (
+    <div className="stale-data-overlay absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-[#0a0a0a]/60 backdrop-blur-[3px]">
+      <div className="rounded-[6px] border border-[#e74c3c]/40 bg-[#1a1010]/95 px-4 py-3 text-[12px] font-medium shadow-[0_12px_30px_rgba(0,0,0,0.35)] flex items-center gap-3">
+        <div className="w-[14px] h-[14px] border-2 border-[#e74c3c]/40 border-t-[#e74c3c] rounded-full animate-spin" />
+        <span className="text-[#f0b0aa]">Переподключение к серверу...</span>
+      </div>
+    </div>
+  )
+}
+
 let initialPushReceived = false
 
 function useInitialCandlesPush() {
@@ -347,26 +382,149 @@ function useLazyScroll(
   }, [symbol, tf, isInitialLoading, onRangeDebounced])
 }
 
+function calculateVolatility(candles: UnifiedCandle[], period = 20): number {
+  if (candles.length < period + 1) return 0
+  const recent = candles.slice(-period - 1)
+  const changes = recent.slice(1).map((c, i) =>
+    Math.abs(c.close - recent[i].close) / recent[i].close
+  )
+  return changes.reduce((a, b) => a + b, 0) / changes.length
+}
+
+function useAdaptiveThrottling(candlesDataRef: React.RefObject<UnifiedCandle[]>): number {
+  const [minInterval, setMinInterval] = useState(16)
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const candles = candlesDataRef.current
+      if (!candles || candles.length < 21) return
+
+      const volatility = calculateVolatility(candles)
+
+      // High volatility (>2%): 8ms for faster updates
+      // Medium volatility (1-2%): 12ms
+      // Low volatility (<1%): 16ms
+      if (volatility > 0.02) {
+        setMinInterval(8)
+      } else if (volatility > 0.01) {
+        setMinInterval(12)
+      } else {
+        setMinInterval(16)
+      }
+    }, 2000) // Check every 2 seconds
+
+    return () => clearInterval(interval)
+  }, [])
+
+  return minInterval
+}
+
+function useLiveIndicator(
+  lastUpdateRef: React.RefObject<number>
+): { isLive: boolean; lastUpdate: number } {
+  const [state, setState] = useState({ isLive: true, lastUpdate: Date.now() })
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now()
+      const timeSinceUpdate = now - lastUpdateRef.current
+      setState({
+        isLive: timeSinceUpdate < 3000,
+        lastUpdate: lastUpdateRef.current
+      })
+    }, 500) // Check twice per second
+
+    return () => clearInterval(interval)
+  }, [])
+
+  return state
+}
+
+function useStaleDataDetection(
+  lastUpdateRef: React.RefObject<number>,
+  threshold = 5000
+): boolean {
+  const [isStale, setIsStale] = useState(false)
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - lastUpdateRef.current
+      setIsStale(elapsed > threshold)
+    }, 1000)
+
+    return () => clearInterval(interval)
+  }, [threshold])
+
+  return isStale
+}
+
+function useFlashEffect(
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  threshold = 0.005 // 0.5%
+): 'up' | 'down' | null {
+  const [flash, setFlash] = useState<'up' | 'down' | null>(null)
+  const prevCloseRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const candles = candlesDataRef.current
+    if (!candles || candles.length === 0) return
+
+    const lastCandle = candles[candles.length - 1]
+    const prevClose = prevCloseRef.current
+
+    if (prevClose !== null && isFinite(lastCandle.close) && isFinite(prevClose)) {
+      const change = Math.abs(lastCandle.close - prevClose) / prevClose
+
+      if (change > threshold) {
+        const direction = lastCandle.close > prevClose ? 'up' : 'down'
+        setFlash(direction)
+
+        const timer = setTimeout(() => setFlash(null), 300)
+        return () => clearTimeout(timer)
+      }
+    }
+
+    prevCloseRef.current = lastCandle.close
+  }, [candlesDataRef.current?.[candlesDataRef.current.length - 1]?.close, threshold])
+
+  return flash
+}
+
 function useRafFlush(
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
   priceLineRef: React.RefObject<any>,
   lastCandleTsRef: React.RefObject<number>,
   destroyedRef: React.RefObject<boolean>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
 ) {
   const pendingCandle = useRef<{ time: Time; open: number; high: number; low: number; close: number } | null>(null)
   const pendingVolume = useRef<{ time: Time; value: number; color: string } | null>(null)
   const pendingPriceLine = useRef<{ price: number; color: string } | null>(null)
   const rafId = useRef<number | null>(null)
   const lastFlushTime = useRef<number>(0)
+  const minInterval = useAdaptiveThrottling(candlesDataRef)
 
   const flush = () => {
     rafId.current = null
     const now = performance.now()
-    // Throttle: minimum 16ms between flushes (60fps) to reduce flickering while maintaining smooth updates
-    // BUT: skip throttle if this is the first flush or if enough time has passed
+
+    // Check if this is a new high/low - if so, render immediately
+    const isNewExtreme = (() => {
+      const pending = pendingCandle.current
+      if (!pending || !candlesDataRef.current || candlesDataRef.current.length < 2) return false
+
+      const recentCandles = candlesDataRef.current.slice(-10)
+      const recentHigh = Math.max(...recentCandles.map(c => c.high))
+      const recentLow = Math.min(...recentCandles.map(c => c.low))
+
+      return pending.high > recentHigh || pending.low < recentLow
+    })()
+
+    // Adaptive throttle: use minInterval from volatility calculation
+    // BUT: skip throttle if this is a new extreme, first flush, or enough time has passed
     const timeSinceLastFlush = now - lastFlushTime.current
-    if (timeSinceLastFlush < 16 && lastFlushTime.current > 0) {
+    if (timeSinceLastFlush < minInterval && lastFlushTime.current > 0 && !isNewExtreme) {
       rafId.current = requestAnimationFrame(flush)
       return
     }
@@ -457,6 +615,7 @@ function useWsCandle(
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
   adjustingRef?: React.RefObject<boolean>,
+  lastUpdateRef?: React.RefObject<number>,
 ) {
   useEffect(() => {
     if (!exchange) return
@@ -467,6 +626,11 @@ function useWsCandle(
       if (adjustingRef?.current) return
       const c = msg.data as UnifiedCandle
       if (!c) return
+
+      // Update last update timestamp for live indicator
+      if (lastUpdateRef) {
+        lastUpdateRef.current = Date.now()
+      }
 
       // Validate OHLC fields before processing
       if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
@@ -480,18 +644,33 @@ function useWsCandle(
         const arr = candlesDataRef.current
         const last = arr[arr.length - 1]
         if (last && c.time < last.time) return
+
+        // Log divergence if replacing trade-built candle with kline
+        if (last && last.time === c.time && last.source === 'trade') {
+          const priceDiff = Math.abs(last.close - c.close) / last.close
+          if (priceDiff > 0.001) { // >0.1% difference
+            console.debug('[useWsCandle] Kline replaced trade-built candle', {
+              symbol, tf, time: c.time,
+              tradClose: last.close, klineClose: c.close, diffPct: (priceDiff * 100).toFixed(2)
+            })
+          }
+        }
       }
       if (!c.isFinal) {
         setLivePrice(symbol, c.close)
       }
-      candleCache.updateCandle(exchange, symbol, tf, c)
+
+      // Mark as kline source
+      const candleWithSource = { ...c, source: 'kline' as const }
+
+      candleCache.updateCandle(exchange, symbol, tf, candleWithSource)
       if (candlesDataRef && candlesDataRef.current) {
         const arr = candlesDataRef.current
         const last = arr[arr.length - 1]
         if (last && last.time === c.time) {
-          arr[arr.length - 1] = c
+          arr[arr.length - 1] = candleWithSource
         } else if (!last || c.time > last.time) {
-          arr.push(c)
+          arr.push(candleWithSource)
         }
       }
       flush.queueCandle({
@@ -525,6 +704,7 @@ function useWsTrade(
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
   adjustingRef?: React.RefObject<boolean>,
+  lastUpdateRef?: React.RefObject<number>,
 ) {
   // Bug 5: useRef instead of let — survives re-renders, reset on symbol/tf change
   const curRef = useRef<UnifiedCandle | null>(null)
@@ -538,6 +718,11 @@ function useWsTrade(
       if (destroyedRef.current) return
       // Bug 2: skip WS updates while useLazyScroll is doing setData
       if (adjustingRef?.current) return
+
+      // Update last update timestamp for live indicator
+      if (lastUpdateRef) {
+        lastUpdateRef.current = Date.now()
+      }
       const trade = msg.data as any
       if (!trade?.price) return
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
@@ -580,6 +765,7 @@ function useWsTrade(
         curRef.current = {
           symbol, exchange, timeframe: tf,
           time: candleTime, open: price, high: price, low: price, close: price, volume,
+          source: 'trade', // Mark as trade-built
         }
       } else {
         if (price > cur.high) cur.high = price
@@ -715,8 +901,12 @@ const MiniChart = memo(function MiniChart({
   const exchange = useCoinListStore(s => s.coinMap.get(symbol)?.exchange)
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const [priceLineVersion, setPriceLineVersion] = useState(0)
+  const lastUpdateRef = useRef<number>(Date.now())
 
-  const flush = useRafFlush(candleRef, volumeRef, priceLineRef, lastCandleTsRef, destroyedRef)
+  const flush = useRafFlush(candleRef, volumeRef, priceLineRef, lastCandleTsRef, destroyedRef, candlesDataRef)
+  const liveIndicator = useLiveIndicator(lastUpdateRef)
+  const isStale = useStaleDataDetection(lastUpdateRef)
+  const flashEffect = useFlashEffect(candlesDataRef)
 
   useEffect(() => {
     destroyedRef.current = false
@@ -805,8 +995,8 @@ const MiniChart = memo(function MiniChart({
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
   }, [isInitialLoading, symbol, tf, onLoaded])
 
-  useWsCandle(symbol, exchange, tf, flush, destroyedRef, candlesDataRef)
-  useWsTrade(symbol, exchange, tf, flush, destroyedRef, candlesDataRef)
+  useWsCandle(symbol, exchange, tf, flush, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, flush, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
   usePriceLine(symbol, exchange, tf, priceLineRef, prevPriceRef, lastCandleTsRef, destroyedRef, priceLineVersion, candlesDataRef)
 
   // Set initial price line position from loaded data
@@ -828,7 +1018,7 @@ const MiniChart = memo(function MiniChart({
     <div
       className={`relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px] transition-all duration-300 ease-out ${
         visible ? 'opacity-100 scale-100' : 'opacity-0 scale-[0.99]'
-      }`}
+      } ${flashEffect ? `flash-border-${flashEffect}` : ''}`}
     >
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
         <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
@@ -836,7 +1026,10 @@ const MiniChart = memo(function MiniChart({
         </span>
       </div>
       <MiniChartHeader symbol={symbol} />
-      <div ref={containerRef} className="relative z-0 flex-1 min-h-0" />
+      <div ref={containerRef} className="relative z-0 flex-1 min-h-0">
+        {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} />}
+        {isStale && <StaleDataOverlay visible={true} />}
+      </div>
       {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
       {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
     </div>
@@ -1062,6 +1255,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const [selection, setSelection] = useState<RangeSelection | null>(null)
   const [chartVersion, setChartVersion] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const lastUpdateRef = useRef<number>(Date.now())
 
   const {
     activeTool,
@@ -1161,11 +1355,15 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     }
   }, [symbol, tf, pricePrecision])
 
-  const flush = useRafFlush(candleRef, volumeRef, priceLineRef, lastCandleTsRef, destroyedRef)
+  const flush = useRafFlush(candleRef, volumeRef, priceLineRef, lastCandleTsRef, destroyedRef, candlesDataRef)
   const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 })
-  useWsCandle(symbol, exchange, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
+  const liveIndicator = useLiveIndicator(lastUpdateRef)
+  const isStale = useStaleDataDetection(lastUpdateRef)
+  const flashEffect = useFlashEffect(candlesDataRef)
+
+  useWsCandle(symbol, exchange, tf, flush, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   usePriceLine(symbol, exchange, tf, priceLineRef, prevPriceRef, lastCandleTsRef, destroyedRef, priceLineVersion, candlesDataRef)
-  useWsTrade(symbol, exchange, tf, flush, destroyedRef, candlesDataRef, adjustingRef)
+  useWsTrade(symbol, exchange, tf, flush, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore)
 
   // Set initial price line position from loaded data
@@ -1382,10 +1580,11 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [primitiveRef])
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
+    <div className={`flex-1 flex flex-col h-full bg-[#0e0e0e] ${flashEffect ? `flash-border-${flashEffect}` : ''}`}>
       <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} />
       <div ref={containerRef} className="relative flex-1 min-h-0">
         {isInitialLoading && <ChartCornerSpinner />}
+        {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} />}
         {!isInitialLoading && isLoadingMore && (
           <div className="absolute top-[8px] left-[8px] z-30 pointer-events-none">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-[4px] bg-[#1a1a1a]/95 border border-[#2a2a2a] shadow-lg">
@@ -1394,6 +1593,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
             </div>
           </div>
         )}
+        {isStale && <StaleDataOverlay visible={true} />}
         {status === 'empty' && <ChartMessageOverlay label="Нет данных для этого таймфрейма" />}
         {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных. Попробуйте другой таймфрейм." tone="error" />}
         {(pendingPointPixel || previewLine) && (
