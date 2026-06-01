@@ -176,6 +176,7 @@ export function setupWsHub(wss: WebSocketServer) {
       totalDropped: 0,
     }
     clients.set(ws, client)
+    console.log(`[DIAG Hub] client connected totalClients=${clients.size} user=${user?.userId ?? 'anon'}`)
 
     ws.on('pong', () => { client.alive = true; client.buffered = 0 })
 
@@ -201,6 +202,7 @@ export function setupWsHub(wss: WebSocketServer) {
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString()) as WsMessage
+        console.log(`[DIAG Hub] message received type=${msg.type} channel=${msg.channel ?? 'none'}`)
         if (msg.type === 'subscribe' && msg.channel) {
           const isNew = !client.subscriptions.has(msg.channel)
           console.log(`[DIAG Hub] subscribe channel=${msg.channel} isNew=${isNew}`)
@@ -239,7 +241,9 @@ export function setupWsHub(wss: WebSocketServer) {
             candleManager.unsubscribeDepth(depthSymbol)
           }
         }
-      } catch {}
+      } catch (e) {
+        console.warn(`[DIAG Hub] message handler error:`, e instanceof Error ? e.message : e, `raw=${raw.toString().slice(0, 200)}`)
+      }
     })
 
     ws.on('close', () => {
