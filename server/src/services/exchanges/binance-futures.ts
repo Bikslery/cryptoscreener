@@ -28,6 +28,13 @@ const TF_MAP: Record<string, string> = {
   '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d', '1w': '1w',
 }
 
+const TF_SECONDS: Record<string, number> = {
+  '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
+}
+
+const CANDLE_WS_SILENCE_TIMEOUT = 10_000
+const CANDLE_POLL_INTERVAL = 1_500
+
 const STABLECOIN_BASES = new Set([
   'USDC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'EUR', 'AEUR', 'EURI', 'USDSB', 'PYUSD',
 ])
@@ -58,6 +65,11 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
   private candleMsgCount = 0
+  private lastCandleMsgAt = 0
+  private candleFallbackActive = false
+  private candleFallbackTimer: ReturnType<typeof setInterval> | null = null
+  private candleSilenceTimer: ReturnType<typeof setInterval> | null = null
+  private candleSubInfo = new Map<string, { symbol: string, tf: string }>()
   private precisionMap = new Map<string, number>()
   private cryptoSymbols = new Set<string>()
   private exchangeInfoLoaded = false
@@ -80,6 +92,11 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
           const candle = this.parseCandle(msg)
           if (candle) {
             this.candleMsgCount++
+            this.lastCandleMsgAt = Date.now()
+            if (this.candleFallbackActive) {
+              this.stopCandleFallback()
+              console.log(`[${this.name}] Candle WS recovered → stop REST poll`)
+            }
             if (this.candleMsgCount <= 3 || this.candleMsgCount % 200 === 0) {
               console.log(`[BinanceFutures] kline #${this.candleMsgCount}: ${candle.symbol} ${candle.timeframe} close=${candle.close}`)
             }
@@ -305,19 +322,31 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     this.candlePool.close()
     this.depthPool.close()
     if (this.pollTimer) clearInterval(this.pollTimer)
+    this.stopCandleSilenceChecker()
+    this.stopCandleFallback()
   }
 
   subscribeCandle(symbol: string, tf: string, cb: CandleCallback) {
     const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
     this.candleSubs.set(stream, cb)
+    this.candleSubInfo.set(stream, { symbol, tf })
     this.candlePool.addStream(stream)
     console.log(`[BinanceFutures] subscribeCandle: ${stream} (pool streams=${this.candlePool.size})`)
+    if (this.candleSubs.size === 1) {
+      this.lastCandleMsgAt = Date.now()
+      this.startCandleSilenceChecker()
+    }
   }
 
   unsubscribeCandle(symbol: string, tf: string) {
     const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
     this.candleSubs.delete(stream)
+    this.candleSubInfo.delete(stream)
     this.candlePool.removeStream(stream)
+    if (this.candleSubs.size === 0) {
+      this.stopCandleSilenceChecker()
+      this.stopCandleFallback()
+    }
   }
 
   subscribeDepth(symbol: string, cb: DepthCallback) {
@@ -330,6 +359,60 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     const stream = `${symbol.toLowerCase()}@depth20@100ms`
     this.depthSubs.delete(stream)
     this.depthPool.removeStream(stream)
+  }
+
+  private startCandleSilenceChecker() {
+    if (this.candleSilenceTimer) return
+    this.candleSilenceTimer = setInterval(() => {
+      if (this.candleSubs.size === 0 || this.candleFallbackActive) return
+      if (Date.now() - this.lastCandleMsgAt > CANDLE_WS_SILENCE_TIMEOUT) {
+        console.warn(`[${this.name}] Candle WS silent for ${CANDLE_WS_SILENCE_TIMEOUT / 1000}s → REST-poll fallback`)
+        this.startCandleFallback()
+      }
+    }, 2_000)
+  }
+
+  private stopCandleSilenceChecker() {
+    if (this.candleSilenceTimer) { clearInterval(this.candleSilenceTimer); this.candleSilenceTimer = null }
+  }
+
+  private startCandleFallback() {
+    if (this.candleFallbackActive) return
+    this.candleFallbackActive = true
+    this.pollCandleFallback()
+    this.candleFallbackTimer = setInterval(() => this.pollCandleFallback(), CANDLE_POLL_INTERVAL)
+  }
+
+  private stopCandleFallback() {
+    this.candleFallbackActive = false
+    if (this.candleFallbackTimer) { clearInterval(this.candleFallbackTimer); this.candleFallbackTimer = null }
+  }
+
+  private async pollCandleFallback() {
+    if (this.rateLimiter.isThrottled()) return
+    if (this.rateLimiter.isOverThreshold()) return
+    const entries = Array.from(this.candleSubInfo.entries())
+    if (entries.length === 0) return
+    const nowSec = Date.now() / 1000
+    const results = await Promise.allSettled(entries.map(async ([stream, { symbol, tf }]) => {
+      const tfSec = TF_SECONDS[tf] || 60
+      try {
+        const candles = await this.fetchCandles(symbol, tf, 2)
+        for (const c of candles) {
+          const subCb = this.candleSubs.get(stream)
+          const candle: UnifiedCandle = {
+            ...c,
+            isFinal: c.time + tfSec <= nowSec,
+          }
+          if (subCb) subCb(candle)
+          for (const cb of this.candleCbs) cb(candle)
+        }
+      } catch {}
+    }))
+    const failed = results.filter(r => r.status === 'rejected').length
+    if (failed > 0) {
+      console.warn(`[${this.name}] Candle REST-poll: ${failed}/${entries.length} failed`)
+    }
   }
 
   private parseCandle(msg: any): UnifiedCandle | null {
