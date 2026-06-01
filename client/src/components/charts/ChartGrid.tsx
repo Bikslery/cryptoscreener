@@ -785,7 +785,7 @@ const MiniChart = memo(function MiniChart({
       borderUpColor: UP_BORDER(), borderDownColor: DOWN_BORDER(),
       wickUpColor: UP_COLOR(), wickDownColor: DOWN_COLOR(),
       priceLineVisible: true,
-      lastValueVisible: false,
+      lastValueVisible: true,
       priceLineColor: UP_COLOR(),
       priceFormat: {
         type: 'price',
@@ -793,7 +793,7 @@ const MiniChart = memo(function MiniChart({
         minMove: Math.pow(10, -pricePrecision),
       },
     })
-    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', priceLineVisible: false })
+    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', priceLineVisible: false, lastValueVisible: false })
     chart.priceScale('').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, textColor: '#666666' })
 
     chartRef.current = chart
@@ -1035,7 +1035,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       borderUpColor: UP_BORDER(), borderDownColor: DOWN_BORDER(),
       wickUpColor: UP_COLOR(), wickDownColor: DOWN_COLOR(),
       priceLineVisible: true,
-      lastValueVisible: false,
+      lastValueVisible: true,
       priceLineColor: UP_COLOR(),
       priceFormat: {
         type: 'price',
@@ -1043,7 +1043,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
         minMove: Math.pow(10, -pricePrecision),
       },
     })
-    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', priceLineVisible: false })
+    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', priceLineVisible: false, lastValueVisible: false })
     chart.priceScale('').applyOptions({ scaleMargins: { top: 0.9, bottom: 0 }, textColor: '#666666' })
 
     chartRef.current = chart
