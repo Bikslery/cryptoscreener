@@ -57,8 +57,6 @@ function getBestAdapter(symbol: string, adapters: ExchangeAdapter[], preferredEx
 export function createCandleManager(adapters: ExchangeAdapter[]) {
   const candleCallback: CandleCallback = (candle: UnifiedCandle) => {
     const channel = `candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`
-    // [DIAG] Phase 4: is candleCallback ever called?
-    console.log(`[DIAG CandleManager] candleCallback channel=${channel} isFinal=${candle.isFinal} time=${candle.time}`)
     broadcastToChannel(channel, candle, true)
   }
 
@@ -73,7 +71,6 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
       const existing = activeCandleSubs.get(key)
       if (existing) {
         existing.count++
-        console.log(`[DIAG CandleManager] subscribeCandle EXISTING key=${key} count=${existing.count}`)
         return
       }
 
@@ -83,7 +80,7 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
         console.error(`[CandleManager] No adapter available for ${exchange}:${symbol}`)
         return
       }
-      console.log(`[DIAG CandleManager] subscribeCandle NEW key=${key} adapter=${adapter.name} adapterExchange=${adapter.exchange}`)
+      console.log(`[CandleManager] subscribeCandle NEW key=${key} adapter=${adapter.name}`)
 
       adapter.subscribeCandle(symbol, tf, candleCallback)
       activeCandleSubs.set(key, { adapter, count: 1 })

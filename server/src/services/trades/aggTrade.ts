@@ -11,6 +11,7 @@ interface AggTradeStream {
   activeSymbols: Set<string>
   isConnecting: boolean
   generation: number
+  reqId: number
 }
 
 function createStream(): AggTradeStream {
@@ -21,6 +22,7 @@ function createStream(): AggTradeStream {
     activeSymbols: new Set(),
     isConnecting: false,
     generation: 0,
+    reqId: 0,
   }
 }
 
@@ -55,7 +57,14 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
 
   nextWs.on('open', () => {
     console.log(`[AggTrade${label}] WebSocket connected`)
-    if (generation === stream.generation) stream.isConnecting = false
+    if (generation === stream.generation) {
+      stream.isConnecting = false
+      const urlSymbols = new Set(streams.split('/').map(s => s.replace('@aggTrade', '').toUpperCase()))
+      const missing = Array.from(stream.activeSymbols).filter(s => !urlSymbols.has(s))
+      if (missing.length > 0) {
+        sendSubscribe(stream, exchange, missing)
+      }
+    }
   })
 
   nextWs.on('message', (raw) => {
@@ -105,6 +114,22 @@ function scheduleReconnect(stream: AggTradeStream, exchange: Exchange) {
   }, 3000)
 }
 
+function sendSubscribe(stream: AggTradeStream, exchange: Exchange, symbols: string[]) {
+  if (!stream.ws || stream.ws.readyState !== WebSocket.OPEN) return
+  const params = symbols.map(s => `${s.toLowerCase()}@aggTrade`)
+  stream.ws.send(JSON.stringify({ method: 'SUBSCRIBE', params, id: ++stream.reqId }))
+  const label = exchange === 'binance-futures' ? 'Futures' : ''
+  console.log(`[AggTrade${label}] SUBSCRIBE ${params.length} stream(s) on live WS (total: ${stream.activeSymbols.size})`)
+}
+
+function sendUnsubscribe(stream: AggTradeStream, exchange: Exchange, symbols: string[]) {
+  if (!stream.ws || stream.ws.readyState !== WebSocket.OPEN) return
+  const params = symbols.map(s => `${s.toLowerCase()}@aggTrade`)
+  stream.ws.send(JSON.stringify({ method: 'UNSUBSCRIBE', params, id: ++stream.reqId }))
+  const label = exchange === 'binance-futures' ? 'Futures' : ''
+  console.log(`[AggTrade${label}] UNSUBSCRIBE ${params.length} stream(s) on live WS (total: ${stream.activeSymbols.size})`)
+}
+
 function scheduleReconnectDebounced(stream: AggTradeStream, exchange: Exchange) {
   if (stream.debounceTimer) {
     clearTimeout(stream.debounceTimer)
@@ -127,10 +152,13 @@ function scheduleReconnectDebounced(stream: AggTradeStream, exchange: Exchange) 
 
 export function subscribeAggTrade(symbol: string, exchange: Exchange = 'binance-spot') {
   const stream = getStream(exchange)
+  const isNew = !stream.activeSymbols.has(symbol)
   const wasEmpty = stream.activeSymbols.size === 0
   stream.activeSymbols.add(symbol)
   if (wasEmpty || !stream.ws || stream.ws.readyState !== WebSocket.OPEN) {
     scheduleReconnectDebounced(stream, exchange)
+  } else if (isNew) {
+    sendSubscribe(stream, exchange, [symbol])
   }
 }
 
@@ -152,6 +180,8 @@ export function unsubscribeAggTrade(symbol: string, exchange: Exchange = 'binanc
       clearTimeout(stream.debounceTimer)
       stream.debounceTimer = null
     }
+  } else if (stream.ws && stream.ws.readyState === WebSocket.OPEN) {
+    sendUnsubscribe(stream, exchange, [symbol])
   } else {
     scheduleReconnectDebounced(stream, exchange)
   }

@@ -174,12 +174,7 @@ function useFullHistory(
   const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading')
 
   useEffect(() => {
-    // [DIAG] Phase 4: track useFullHistory entry
-    console.log(`[DIAG useFullHistory] useEffect ${JSON.stringify({ symbol, exchange, tf })}`)
-    if (!exchange) {
-      console.warn(`[DIAG useFullHistory] exchange=undefined — SKIPPING history load ${JSON.stringify({ symbol, tf })}`)
-      return
-    }
+    if (!exchange) return
     const cancelled = { value: false }
     setIsInitialLoading(true)
     setStatus('loading')
@@ -568,37 +563,20 @@ function useWsCandle(
   useEffect(() => {
     if (!exchange) return
     const channel = `candle:${exchange}:${symbol}:${tf}`
-    // [DIAG] Phase 4: track WS candle subscription
-    console.log(`[DIAG useWsCandle] subscribing ${JSON.stringify({ channel, symbol, exchange, tf })}`)
     const unsub = wsOnChannel(channel, (msg) => {
-      // [DIAG] Phase 4: track every WS message arrival
-      console.log(`[DIAG useWsCandle] message received ${JSON.stringify({ channel, destroyed: destroyedRef.current, hasData: !!msg?.data, dataType: msg?.data ? typeof msg.data : 'none', msgKeys: msg ? Object.keys(msg) : [] })}`)
-
-      if (destroyedRef.current) {
-        console.warn(`[DIAG useWsCandle] SKIP: destroyed=true ${JSON.stringify({ channel })}`)
-        return
-      }
+      if (destroyedRef.current) return
 
       const c = msg.data as UnifiedCandle
-      if (!c) {
-        console.warn(`[DIAG useWsCandle] SKIP: msg.data is falsy ${JSON.stringify({ channel, msgType: typeof msg, msgStr: JSON.stringify(msg).slice(0,200) })}`)
-        return
-      }
+      if (!c) return
 
       if (lastUpdateRef) {
         lastUpdateRef.current = Date.now()
       }
 
-      if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
-        console.warn(`[DIAG useWsCandle] SKIP: invalid OHLC ${JSON.stringify({ channel, time: c.time, o: c.open, h: c.high, l: c.low, c: c.close })}`)
-        return
-      }
+      if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) return
 
       const lc = lifecycleRef.current
-      if (!lc) {
-        console.warn(`[DIAG useWsCandle] SKIP: lifecycleRef=null ${JSON.stringify({ channel, time: c.time })}`)
-        return
-      }
+      if (!lc) return
 
       const patch = lc.applyKline(c)
       if (adjustingRef?.current) return
@@ -760,15 +738,11 @@ const MiniChart = memo(function MiniChart({
   const lifecycleRef = useRef<CandleLifecycle | null>(null)
 
   useEffect(() => {
-    // [DIAG] Phase 4: track exchange resolution timing for MiniChart
-    console.log(`[DIAG MiniChart] lifecycle useEffect ${JSON.stringify({ symbol, exchange, tf })}`)
     if (exchange) {
       lifecycleRef.current?.destroy()
       lifecycleRef.current = createCandleLifecycle({
         symbol, exchange, tf, tfSeconds: getTfSeconds(tf),
       })
-    } else {
-      console.warn(`[DIAG MiniChart] exchange=undefined — lifecycle NOT created ${JSON.stringify({ symbol, tf })}`)
     }
     return () => { lifecycleRef.current?.destroy() }
   }, [symbol, exchange, tf])
@@ -1002,15 +976,11 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const lifecycleRef = useRef<CandleLifecycle | null>(null)
 
   useEffect(() => {
-    // [DIAG] Phase 4: track exchange resolution timing for ExpandedChart
-    console.log(`[DIAG ExpandedChart] lifecycle useEffect ${JSON.stringify({ symbol, exchange, tf })}`)
     if (exchange) {
       lifecycleRef.current?.destroy()
       lifecycleRef.current = createCandleLifecycle({
         symbol, exchange, tf, tfSeconds: getTfSeconds(tf),
       })
-    } else {
-      console.warn(`[DIAG ExpandedChart] exchange=undefined — lifecycle NOT created ${JSON.stringify({ symbol, tf })}`)
     }
     return () => { lifecycleRef.current?.destroy() }
   }, [symbol, exchange, tf])

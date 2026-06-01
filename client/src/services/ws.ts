@@ -33,10 +33,8 @@ function connect() {
   ws = new WebSocket(url)
 
   ws.onopen = () => {
-    console.log('[DIAG ws] connected, readyState=', ws?.readyState)
     dispatch({ type: 'open' })
     for (const ch of subscriptions.keys()) {
-      console.log(`[DIAG ws] resending subscribe channel=${ch}`)
       ws?.send(JSON.stringify({ type: 'subscribe', channel: ch }))
     }
   }
@@ -44,10 +42,6 @@ function connect() {
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data) as WsMessage
-      // [DIAG] Phase 4: log every incoming WS message type
-      if (msg.channel?.startsWith('candle:')) {
-        console.log(`[DIAG ws] received candle msg channel=${msg.channel}`)
-      }
       dispatch(msg)
     } catch {}
   }
@@ -81,10 +75,8 @@ export function wsDisconnect() {
 export function wsSubscribe(channel: string) {
   const count = subscriptions.get(channel) || 0
   subscriptions.set(channel, count + 1)
-  console.log(`[DIAG ws] wsSubscribe channel=${channel} count=${count + 1} wsState=${ws?.readyState}`)
   if (count > 0) return
   if (ws?.readyState === WebSocket.OPEN) {
-    console.log(`[DIAG ws] sending subscribe channel=${channel}`)
     ws.send(JSON.stringify({ type: 'subscribe', channel }))
   }
 }
