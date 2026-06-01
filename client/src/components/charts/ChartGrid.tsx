@@ -175,9 +175,9 @@ function useFullHistory(
 
   useEffect(() => {
     // [DIAG] Phase 4: track useFullHistory entry
-    console.log('[DIAG useFullHistory] useEffect', { symbol, exchange, tf })
+    console.log(`[DIAG useFullHistory] useEffect ${JSON.stringify({ symbol, exchange, tf })}`)
     if (!exchange) {
-      console.warn('[DIAG useFullHistory] exchange=undefined — SKIPPING history load', { symbol, tf })
+      console.warn(`[DIAG useFullHistory] exchange=undefined — SKIPPING history load ${JSON.stringify({ symbol, tf })}`)
       return
     }
     const cancelled = { value: false }
@@ -569,7 +569,7 @@ function useWsCandle(
     if (!exchange) return
     const channel = `candle:${exchange}:${symbol}:${tf}`
     // [DIAG] Phase 4: track WS candle subscription
-    console.log('[DIAG useWsCandle] subscribing', { channel, symbol, exchange, tf })
+    console.log(`[DIAG useWsCandle] subscribing ${JSON.stringify({ channel, symbol, exchange, tf })}`)
     const unsub = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current) return
 
@@ -749,14 +749,14 @@ const MiniChart = memo(function MiniChart({
 
   useEffect(() => {
     // [DIAG] Phase 4: track exchange resolution timing for MiniChart
-    console.log('[DIAG MiniChart] lifecycle useEffect', { symbol, exchange, tf })
+    console.log(`[DIAG MiniChart] lifecycle useEffect ${JSON.stringify({ symbol, exchange, tf })}`)
     if (exchange) {
       lifecycleRef.current?.destroy()
       lifecycleRef.current = createCandleLifecycle({
         symbol, exchange, tf, tfSeconds: getTfSeconds(tf),
       })
     } else {
-      console.warn('[DIAG MiniChart] exchange=undefined — lifecycle NOT created', { symbol, tf })
+      console.warn(`[DIAG MiniChart] exchange=undefined — lifecycle NOT created ${JSON.stringify({ symbol, tf })}`)
     }
     return () => { lifecycleRef.current?.destroy() }
   }, [symbol, exchange, tf])
@@ -991,14 +991,14 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
 
   useEffect(() => {
     // [DIAG] Phase 4: track exchange resolution timing for ExpandedChart
-    console.log('[DIAG ExpandedChart] lifecycle useEffect', { symbol, exchange, tf })
+    console.log(`[DIAG ExpandedChart] lifecycle useEffect ${JSON.stringify({ symbol, exchange, tf })}`)
     if (exchange) {
       lifecycleRef.current?.destroy()
       lifecycleRef.current = createCandleLifecycle({
         symbol, exchange, tf, tfSeconds: getTfSeconds(tf),
       })
     } else {
-      console.warn('[DIAG ExpandedChart] exchange=undefined — lifecycle NOT created', { symbol, tf })
+      console.warn(`[DIAG ExpandedChart] exchange=undefined — lifecycle NOT created ${JSON.stringify({ symbol, tf })}`)
     }
     return () => { lifecycleRef.current?.destroy() }
   }, [symbol, exchange, tf])

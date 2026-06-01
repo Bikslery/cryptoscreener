@@ -114,12 +114,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
       })
     }
     // [DIAG] Phase 4: track tail population after applyHistory
-    console.log('[DIAG applyHistory] tail populated', {
-      symbol, exchange, tf,
-      tailTimes: tail.map(t => t.candle.time),
-      tailExchanges: tail.map(t => t.candle.exchange),
-      validCount: valid.length,
-    })
+    console.log(`[DIAG applyHistory] tail populated ${JSON.stringify({ symbol, exchange, tf, tailTimes: tail.map(t => t.candle.time), tailExchanges: tail.map(t => t.candle.exchange), validCount: valid.length })}`)
 
     return patchFromCandles(valid, undefined, valid)
   }
@@ -214,15 +209,10 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     if (!isFiniteOHLCV(kline) || kline.time <= 0) return EMPTY_PATCH
 
     const idx = getTailIndex(kline.time)
+    // [DIAG] Phase 4: log EVERY applyKline call — track whether WS data reaches here
+    console.log(`[DIAG applyKline] called ${JSON.stringify({ symbol, exchange, tf, klineTime: kline.time, klineExchange: kline.exchange, klineIsFinal: kline.isFinal, idx, tailTimes: tail.map(t => t.candle.time) })}`)
     if (idx < 0) {
-      // [DIAG] Phase 4 instrument: kline time not in tail — forming candle silently dropped
-      const tailTimes = tail.map(t => t.candle.time)
-      console.warn('[DIAG applyKline] kline.time not in tail', {
-        symbol, exchange, tf,
-        klineTime: kline.time, klineExchange: kline.exchange,
-        tailTimes, tailLength: tail.length,
-        klineIsFinal: kline.isFinal,
-      })
+    console.warn(`[DIAG applyKline] kline.time not in tail ${JSON.stringify({ symbol, exchange, tf, klineTime: kline.time, klineExchange: kline.exchange, tailTimes: tail.map(t => t.candle.time), tailLength: tail.length, klineIsFinal: kline.isFinal })}`)
       return EMPTY_PATCH
     }
 
