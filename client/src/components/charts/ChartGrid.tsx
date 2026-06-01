@@ -708,7 +708,7 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
       flash === 'green' ? 'bg-[#26a65b]/20' : flash === 'red' ? 'bg-[#e74c3c]/20' : 'bg-[#141414]'
     }`}>
       <div className="flex items-center gap-[5px] min-w-0">
-        <span className="text-[9px] font-bold px-[3px] py-[1px] rounded-[2px] leading-none bg-[#f9b600]/15 text-[#f9b600] border border-[#f9b600]/30">
+        <span className="text-[9px] font-bold px-[3px] py-[1px] rounded-[2px] leading-none bg-white/[0.06] text-[#b3b3b3] border border-white/10">
           {badge}
         </span>
         <span className="font-bold text-[11px] text-[#e0e0e0] truncate" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
@@ -922,7 +922,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
       </button>
 
       <div className="flex items-center gap-[8px] min-w-0">
-        <span className="text-[10px] font-bold px-[4px] py-[1px] rounded-[3px] leading-none bg-[#f9b600]/15 text-[#f9b600] border border-[#f9b600]/30">
+        <span className="text-[10px] font-bold px-[4px] py-[1px] rounded-[3px] leading-none bg-white/[0.06] text-[#b3b3b3] border border-white/10">
           {badge}
         </span>
         <span className="font-bold text-[14px] text-[#f0f0f0] tracking-tight" style={{ fontFamily: "'JetBrains Mono', monospace" }}>

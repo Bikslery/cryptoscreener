@@ -19,18 +19,6 @@ const EXCHANGE_FILTERS: { value: FilterExchange; label: string }[] = [
   { value: 'okx', label: 'OKX' },
 ]
 
-function ScalpBoardLogo() {
-  return (
-    <svg viewBox="0 0 420 420" fill="none" className="w-5 h-5">
-      <path d="M360 280C360 291.046 351.046 300 340 300L300 300L300 20C300 8.954 308.954 0 320 0L340 0C351.046 0 360 8.954 360 20L360 280Z" fill="currentColor" />
-      <path d="M120 400C120 411.046 111.046 420 100 420L80 420C68.954 420 60 411.046 60 400L60 140C60 128.954 68.954 120 80 120L120 120L120 400Z" fill="currentColor" />
-      <path d="M330 120L120 120L120 80C120 68.954 128.954 60 140 60L330 60L330 120Z" fill="currentColor" />
-      <rect x="240" y="240" width="60" height="60" rx="20" transform="rotate(-180 240 240)" fill="currentColor" />
-      <path d="M300 340C300 351.046 291.046 360 280 360L90 360L90 300L300 300L300 340Z" fill="currentColor" />
-    </svg>
-  )
-}
-
 export function TopBar() {
   const activeTf = useCoinListStore(s => s.activeTimeframe)
   const setTimeframe = useCoinListStore(s => s.setTimeframe)
@@ -49,8 +37,7 @@ export function TopBar() {
     >
       {/* Лево: логотип */}
       <div className="flex items-center gap-2 shrink-0">
-        <ScalpBoardLogo />
-        <span className="font-bold text-[13px] text-white tracking-tight">ScalpBoard</span>
+        <span className="font-bold text-[13px] text-white tracking-tight">.clinic</span>
       </div>
 
       {/* Центр: таймфреймы + пагинация */}
