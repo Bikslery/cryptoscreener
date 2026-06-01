@@ -57,6 +57,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private tickerCbs: TickerCallback[] = []
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
+  private candleMsgCount = 0
   private precisionMap = new Map<string, number>()
   private cryptoSymbols = new Set<string>()
   private exchangeInfoLoaded = false
@@ -78,6 +79,10 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
         try {
           const candle = this.parseCandle(msg)
           if (candle) {
+            this.candleMsgCount++
+            if (this.candleMsgCount <= 3 || this.candleMsgCount % 200 === 0) {
+              console.log(`[BinanceFutures] kline #${this.candleMsgCount}: ${candle.symbol} ${candle.timeframe} close=${candle.close}`)
+            }
             for (const cb of this.candleCbs) cb(candle)
             const subCb = this.candleSubs.get(msg.stream)
             if (subCb) subCb(candle)
@@ -87,7 +92,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
         }
       },
       this.wsAgent,
-      true  // supportsIncrementalSub
+      true
     )
 
     this.depthPool = new WsStreamPool(
@@ -306,6 +311,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
     this.candleSubs.set(stream, cb)
     this.candlePool.addStream(stream)
+    console.log(`[BinanceFutures] subscribeCandle: ${stream} (pool streams=${this.candlePool.size})`)
   }
 
   unsubscribeCandle(symbol: string, tf: string) {

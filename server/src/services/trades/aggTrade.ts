@@ -12,6 +12,7 @@ interface AggTradeStream {
   isConnecting: boolean
   generation: number
   reqId: number
+  msgCount: number
 }
 
 function createStream(): AggTradeStream {
@@ -23,6 +24,7 @@ function createStream(): AggTradeStream {
     isConnecting: false,
     generation: 0,
     reqId: 0,
+    msgCount: 0,
   }
 }
 
@@ -70,6 +72,10 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
   nextWs.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString())
+      stream.msgCount++
+      if (stream.msgCount <= 3 || stream.msgCount % 500 === 0) {
+        console.log(`[AggTrade${label}] msg #${stream.msgCount} stream=${msg.stream ?? 'ctrl'}`)
+      }
       const data = msg.data || msg
       if (data.e === 'aggTrade') {
         const symbol = data.s.toUpperCase()

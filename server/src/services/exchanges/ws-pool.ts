@@ -7,6 +7,7 @@ interface PoolConn {
   ws: WebSocket | null
   streams: Set<string>
   generation: number
+  pendingSubs: Set<string>
 }
 
 /**
@@ -28,6 +29,7 @@ export class WsStreamPool {
   private connections: PoolConn[] = []
   private intentionalClose = false
   private supportsIncrementalSub: boolean
+  private msgCount = 0
 
   constructor(
     baseUrl: string,
@@ -48,7 +50,7 @@ export class WsStreamPool {
   addStream(stream: string) {
     let target = this.connections.find(c => c.streams.size < MAX_STREAMS_PER_CONN)
     if (!target) {
-      target = { ws: null, streams: new Set(), generation: 0 }
+      target = { ws: null, streams: new Set(), generation: 0, pendingSubs: new Set() }
       this.connections.push(target)
     }
 
@@ -60,6 +62,8 @@ export class WsStreamPool {
       this.sendSubscribe(target, [stream])
     } else if (!target.ws || target.ws.readyState === WebSocket.CLOSED) {
       this.scheduleReconnect()
+    } else if (target.ws?.readyState === WebSocket.CONNECTING) {
+      target.pendingSubs.add(stream)
     }
   }
 
@@ -67,7 +71,8 @@ export class WsStreamPool {
     for (const conn of this.connections) {
       if (!conn.streams.delete(stream)) continue
 
-      // Stream was removed from this conn — send UNSUBSCRIBE if live
+      conn.pendingSubs.delete(stream)
+
       if (this.supportsIncrementalSub && conn.ws?.readyState === WebSocket.OPEN) {
         this.sendUnsubscribe(conn, [stream])
       }
@@ -182,13 +187,19 @@ export class WsStreamPool {
 
     conn.ws.on('open', () => {
       console.log(`[${this.name}] WS connected (${conn.streams.size} streams)`)
+      if (this.supportsIncrementalSub && conn.pendingSubs.size > 0) {
+        this.sendSubscribe(conn, Array.from(conn.pendingSubs))
+        conn.pendingSubs.clear()
+      }
     })
 
     conn.ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString())
-        // Binance may send subscription-confirmation responses —
-        // pass them through; the consumer can ignore if needed.
+        this.msgCount++
+        if (this.msgCount <= 3 || this.msgCount % 1000 === 0) {
+          console.log(`[${this.name}] msg #${this.msgCount} stream=${msg.stream ?? 'ctrl'}`)
+        }
         this.onMessage(msg)
       } catch {}
     })
