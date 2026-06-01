@@ -10,6 +10,7 @@ import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format
 import { ArrowLeft } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
 import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk } from '../../services/candle-prefetch'
+import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload } from '../../services/candle-lifecycle'
 import { useDrawings, type DrawingTool } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
 
@@ -31,14 +32,53 @@ const TF_SECONDS: Record<string, number> = {
 }
 function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
 
-// ScalpBoard-style mutable last bar (Step 2)
-interface LastBar {
-  time: number
-  open: number
-  high: number
-  low: number
-  close: number
-  volume: number
+function applyChartPatch(
+  patch: CandlePatch,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
+) {
+  for (const c of patch.candleUpdates) {
+    if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) continue
+    candleRef.current?.update({
+      time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+    })
+  }
+  for (const v of patch.volumeUpdates) {
+    if (!isFinite(v.volume)) continue
+    volumeRef.current?.update({
+      time: v.time as Time, value: v.volume,
+      color: v.close >= v.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
+    })
+  }
+  if (patch.livePrice != null) {
+    setLivePrice(symbol, patch.livePrice)
+  }
+  if (patch.cacheWrites && exchange) {
+    for (const c of patch.cacheWrites) {
+      candleCache.updateCandle(exchange, symbol, tf, c)
+    }
+  }
+  if (candlesDataRef?.current && patch.candleUpdates.length > 0) {
+    const arr = candlesDataRef.current
+    for (const c of patch.candleUpdates) {
+      const last = arr[arr.length - 1]
+      if (last && last.time === c.time) {
+        arr[arr.length - 1] = c
+      } else if (!last || c.time > last.time) {
+        arr.push(c)
+      }
+    }
+  }
+  const lastCandle = patch.candleUpdates[patch.candleUpdates.length - 1]
+  if (lastCandle) {
+    candleRef.current?.applyOptions({
+      priceLineColor: lastCandle.close >= lastCandle.open ? UP_COLOR() : DOWN_COLOR(),
+    })
+  }
 }
 
 function ChartMessageOverlay({ label, tone = 'muted' }: { label: string; tone?: 'muted' | 'error' }) {
@@ -127,7 +167,7 @@ function useFullHistory(
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   options?: { limit?: number },
   lastUpdateRef?: React.RefObject<number>,
-  lastBarRef?: React.RefObject<LastBar | null>,
+  lifecycleRef?: React.RefObject<CandleLifecycle | null>,
 ): { isInitialLoading: boolean; status: 'loading' | 'ready' | 'empty' | 'error' } {
   const limit = options?.limit ?? 1000
   const [isInitialLoading, setIsInitialLoading] = useState(true)
@@ -164,18 +204,8 @@ function useFullHistory(
           ts.setVisibleLogicalRange({ from: lastBar - visibleBars, to: lastBar + 5 })
         }
       } catch {}
-      // Initialize lastBarRef from the last historical candle so that
-      // subsequent trade/kline updates extend it instead of resetting.
-      if (lastBarRef && validCandles.length > 0) {
-        const last = validCandles[validCandles.length - 1]
-        lastBarRef.current = {
-          time: last.time,
-          open: last.open,
-          high: last.high,
-          low: last.low,
-          close: last.close,
-          volume: last.volume,
-        }
+      if (lifecycleRef && validCandles.length > 0) {
+        lifecycleRef.current?.applyHistory(validCandles)
       }
     }
 
@@ -237,7 +267,7 @@ function useLazyScroll(
   isInitialLoading: boolean,
   adjustingRef: React.RefObject<boolean>,
   setIsLoadingMore?: (loading: boolean) => void,
-  lastBarRef?: React.RefObject<LastBar | null>,
+  lifecycleRef?: React.RefObject<CandleLifecycle | null>,
 ) {
   const inflightRef = useRef(false)
   const reachedStartRef = useRef(false)
@@ -352,6 +382,7 @@ function useLazyScroll(
           }
 
           adjustingRef.current = true
+          lifecycleRef?.current?.setBuffered(true)
 
           const barSpacing = (ts.options() as any).barSpacing
 
@@ -366,23 +397,10 @@ function useLazyScroll(
             candleRef.current?.setData(candleData)
             volumeRef.current?.setData(volumeData)
 
-            // After setData replaces all series data, re-apply the forming
-            // candle from lastBarRef — otherwise the live candle disappears
-            // until the next WS push arrives.
-            const liveBar = lastBarRef.current
-            if (liveBar) {
-              candleRef.current?.update({
-                time: liveBar.time as Time,
-                open: liveBar.open,
-                high: liveBar.high,
-                low: liveBar.low,
-                close: liveBar.close,
-              })
-              volumeRef.current?.update({
-                time: liveBar.time as Time,
-                value: liveBar.volume,
-                color: liveBar.close >= liveBar.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-              })
+            lifecycleRef?.current?.applyHistory(merged)
+            const flushPatch = lifecycleRef?.current?.setBuffered(false)
+            if (flushPatch && flushPatch.candleUpdates.length > 0) {
+              applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
             }
 
             if (barSpacing != null) {
@@ -536,7 +554,7 @@ function useWsCandle(
   tf: Timeframe,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  lastBarRef: React.RefObject<LastBar | null>,
+  lifecycleRef: React.RefObject<CandleLifecycle | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
   adjustingRef?: React.RefObject<boolean>,
@@ -544,11 +562,10 @@ function useWsCandle(
 ) {
   useEffect(() => {
     if (!exchange) return
-    lastBarRef.current = null  // reset on symbol/tf change
     const channel = `candle:${exchange}:${symbol}:${tf}`
     const unsub = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current) return
-      if (adjustingRef?.current) return
+
       const c = msg.data as UnifiedCandle
       if (!c) return
 
@@ -561,78 +578,20 @@ function useWsCandle(
         return
       }
 
-      // Reject stale/out-of-order candles
-      if (candlesDataRef?.current) {
-        const arr = candlesDataRef.current
-        const last = arr[arr.length - 1]
-        if (last && c.time < last.time) return
+      const lc = lifecycleRef.current
+      if (!lc) return
 
-        // Log divergence if replacing trade-built candle with kline
-        if (last && last.time === c.time && last.source === 'trade') {
-          const priceDiff = Math.abs(last.close - c.close) / last.close
-          if (priceDiff > 0.001) {
-            console.debug('[useWsCandle] Kline replaced trade-built candle', {
-              symbol, tf, time: c.time,
-              tradClose: last.close, klineClose: c.close, diffPct: (priceDiff * 100).toFixed(2)
-            })
-          }
-        }
-      }
-      if (!c.isFinal) {
-        setLivePrice(symbol, c.close)
-      }
+      const patch = lc.applyKline(c)
+      if (adjustingRef?.current) return
 
-      // Step 3: kline overwrites lastBarRef entirely (exchange knows best)
-      lastBarRef.current = {
-        time: c.time as number,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: c.volume,
-      }
-
-      const candleWithSource = { ...c, source: 'kline' as const }
-      candleCache.updateCandle(exchange, symbol, tf, candleWithSource)
-      if (candlesDataRef && candlesDataRef.current) {
-        const arr = candlesDataRef.current
-        const last = arr[arr.length - 1]
-        if (last && last.time === c.time) {
-          arr[arr.length - 1] = candleWithSource
-        } else if (!last || c.time > last.time) {
-          arr.push(candleWithSource)
-        }
-      }
-
-      // ScalpBoard-style: direct series.update() — no RAF, no indirection
-      const bar = lastBarRef.current
-      if (candleRef.current) {
-        candleRef.current.update({
-          time: bar.time as Time,
-          open: bar.open,
-          high: bar.high,
-          low: bar.low,
-          close: bar.close,
-        })
-      }
-      if (volumeRef.current) {
-        volumeRef.current.update({
-          time: bar.time as Time,
-          value: bar.volume,
-          color: bar.close >= bar.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-        })
-      }
-      // ScalpBoard-style: update price line color on direction change
-      candleRef.current?.applyOptions({
-        priceLineColor: bar.close >= bar.open ? UP_COLOR() : DOWN_COLOR(),
-      })
+      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
     })
     wsSubscribe(channel)
     return () => {
       unsub()
       wsUnsubscribe(channel)
     }
-  }, [symbol, tf])
+  }, [symbol, exchange, tf])
 }
 
 function useWsTrade(
@@ -641,7 +600,7 @@ function useWsTrade(
   tf: Timeframe,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  lastBarRef: React.RefObject<LastBar | null>,
+  lifecycleRef: React.RefObject<CandleLifecycle | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
   adjustingRef?: React.RefObject<boolean>,
@@ -649,12 +608,10 @@ function useWsTrade(
 ) {
   useEffect(() => {
     if (!exchange) return
-    lastBarRef.current = null  // reset on symbol/tf change
     const tradeType = `trade:${exchange}:${symbol}`
 
     const unsub = wsOnType(tradeType, (msg) => {
       if (destroyedRef.current) return
-      if (adjustingRef?.current) return
 
       const trade = msg.data as any
       if (!trade?.price) return
@@ -666,101 +623,29 @@ function useWsTrade(
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(price)) return
 
-      const volume = typeof trade.volume === 'number' && isFinite(trade.volume) && trade.volume >= 0
+      const qty = typeof trade.volume === 'number' && isFinite(trade.volume) && trade.volume >= 0
         ? trade.volume
         : 0
 
-      setLivePrice(symbol, price)
+      const lc = lifecycleRef.current
+      if (!lc) return
 
-      // Bucket on the exchange's trade timestamp
-      const tradeSec = typeof trade.time === 'number' && isFinite(trade.time)
+      const tradeTime = typeof trade.time === 'number' && isFinite(trade.time)
         ? trade.time
         : Math.floor(Date.now() / 1000)
-      const tfSeconds = getTfSeconds(tf)
-      const candleTime = Math.floor(tradeSec / tfSeconds) * tfSeconds
 
-
-      const bar = lastBarRef.current
-
-      // Trade must extend existing bar or start new one.
-      // Key fix: if kline already set lastBarRef for this period (source=kline),
-      // trade must ONLY extend it — never overwrite open/high/low/close with
-      // a fresh bar, which causes the candle to visually "reset" and disappear.
-      if (!bar) {
-        lastBarRef.current = {
-          time: candleTime,
-          open: price,
-          high: price,
-          low: price,
-          close: price,
-          volume,
-        }
-      } else if (bar.time === candleTime) {
-        // Same period — extend the existing bar (kline or trade-built)
-        bar.close = price
-        if (price > bar.high) bar.high = price
-        if (price < bar.low) bar.low = price
-        bar.volume += volume
-      } else {
-        // New period — but only if the trade is truly ahead of the current bar.
-        // If trade timestamp is behind bar.time (stale/out-of-order), ignore.
-        if (tradeSec < bar.time) return
-        // New candle period
-        lastBarRef.current = {
-          time: candleTime,
-          open: price,
-          high: price,
-          low: price,
-          close: price,
-          volume,
-        }
+      const payload: TradePayload = {
+        symbol,
+        exchange: exchange!,
+        price,
+        qty,
+        time: tradeTime,
       }
 
-      const cur = lastBarRef.current!
+      const patch = lc.applyTrade(payload)
+      if (adjustingRef?.current) return
 
-      if (!isFinite(cur.open) || !isFinite(cur.high) || !isFinite(cur.low) || !isFinite(cur.close)) {
-        console.warn('[useWsTrade] Invalid constructed candle', { exchange, symbol, tf, time: cur.time })
-        return
-      }
-
-      // Write to cache and backing array
-      const unifiedCandle: UnifiedCandle = {
-        symbol, exchange, timeframe: tf,
-        time: cur.time,
-        open: cur.open, high: cur.high, low: cur.low, close: cur.close,
-        volume: cur.volume,
-        source: 'trade',
-      }
-      candleCache.updateCandle(exchange, symbol, tf, unifiedCandle)
-
-      if (candlesDataRef?.current) {
-        const arr = candlesDataRef.current
-        const last = arr[arr.length - 1]
-        if (last?.time === cur.time) arr[arr.length - 1] = unifiedCandle
-        else arr.push(unifiedCandle)
-      }
-
-      // ScalpBoard-style: direct series.update() — no RAF, no indirection
-      if (candleRef.current) {
-        candleRef.current.update({
-          time: cur.time as Time,
-          open: cur.open,
-          high: cur.high,
-          low: cur.low,
-          close: cur.close,
-        })
-      }
-      if (volumeRef.current) {
-        volumeRef.current.update({
-          time: cur.time as Time,
-          value: cur.volume,
-          color: cur.close >= cur.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-        })
-      }
-      // ScalpBoard-style: update price line color on direction change
-      candleRef.current?.applyOptions({
-        priceLineColor: cur.close >= cur.open ? UP_COLOR() : DOWN_COLOR(),
-      })
+      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
     })
     wsSubscribe(tradeType)
 
@@ -768,7 +653,7 @@ function useWsTrade(
       unsub()
       wsUnsubscribe(tradeType)
     }
-  }, [symbol, tf])
+  }, [symbol, exchange, tf])
 }
 
 
@@ -853,7 +738,18 @@ const MiniChart = memo(function MiniChart({
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const lastUpdateRef = useRef<number>(Date.now())
 
-  const lastBarRef = useRef<LastBar | null>(null)
+  const lifecycleRef = useRef<CandleLifecycle | null>(null)
+
+  useEffect(() => {
+    if (exchange) {
+      lifecycleRef.current?.destroy()
+      lifecycleRef.current = createCandleLifecycle({
+        symbol, exchange, tf, tfSeconds: getTfSeconds(tf),
+      })
+    }
+    return () => { lifecycleRef.current?.destroy() }
+  }, [symbol, exchange, tf])
+
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
   const flashEffect = useFlashEffect(candlesDataRef)
@@ -930,14 +826,14 @@ const MiniChart = memo(function MiniChart({
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 }, lastUpdateRef, lastBarRef)
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 }, lastUpdateRef, lifecycleRef)
 
 useEffect(() => {
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
   }, [isInitialLoading, symbol, tf, onLoaded])
 
-  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lastBarRef, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
-  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lastBarRef, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
 
 
 
@@ -1080,6 +976,18 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const lastUpdateRef = useRef<number>(Date.now())
 
+  const lifecycleRef = useRef<CandleLifecycle | null>(null)
+
+  useEffect(() => {
+    if (exchange) {
+      lifecycleRef.current?.destroy()
+      lifecycleRef.current = createCandleLifecycle({
+        symbol, exchange, tf, tfSeconds: getTfSeconds(tf),
+      })
+    }
+    return () => { lifecycleRef.current?.destroy() }
+  }, [symbol, exchange, tf])
+
   const {
     activeTool,
     setActiveTool,
@@ -1169,15 +1077,14 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     }
   }, [symbol, tf, pricePrecision])
 
-  const lastBarRef = useRef<LastBar | null>(null)
-  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lastBarRef)
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef)
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
   const flashEffect = useFlashEffect(candlesDataRef)
 
-  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lastBarRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lastBarRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, lastBarRef)
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, lifecycleRef)
 
 
 

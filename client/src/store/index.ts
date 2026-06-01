@@ -234,16 +234,20 @@ export const useChartStore = create<ChartStore>((set) => ({
 
   addBlock: (symbol, tf = '1m') => {
     const id = `block-${++blockCounter}`
+    const exchange = useCoinListStore.getState().coinMap.get(symbol)?.exchange
     set((s) => ({
       blocks: [...s.blocks, { id, symbol, timeframe: tf, focused: true, selected: false }],
       focusedBlockId: id,
     }))
-    wsSubscribe(`candle:${symbol}:${tf}`)
+    if (exchange) wsSubscribe(`candle:${exchange}:${symbol}:${tf}`)
   },
 
   removeBlock: (id) => set((s) => {
     const block = s.blocks.find(b => b.id === id)
-    if (block) wsUnsubscribe(`candle:${block.symbol}:${block.timeframe}`)
+    if (block) {
+      const exchange = useCoinListStore.getState().coinMap.get(block.symbol)?.exchange
+      if (exchange) wsUnsubscribe(`candle:${exchange}:${block.symbol}:${block.timeframe}`)
+    }
     const blocks = s.blocks.filter(b => b.id !== id)
     return { blocks, focusedBlockId: blocks.length > 0 ? blocks[blocks.length - 1].id : null }
   }),
@@ -253,23 +257,33 @@ export const useChartStore = create<ChartStore>((set) => ({
     focusedBlockId: id,
   })),
 
-  setTimeframe: (id, tf) => set((s) => ({
-    blocks: s.blocks.map(b => {
-      if (b.id !== id) return b
-      wsUnsubscribe(`candle:${b.symbol}:${b.timeframe}`)
-      wsSubscribe(`candle:${b.symbol}:${tf}`)
-      return { ...b, timeframe: tf }
-    }),
-  })),
+  setTimeframe: (id, tf) => set((s) => {
+    return {
+      blocks: s.blocks.map(b => {
+        if (b.id !== id) return b
+        const exchange = useCoinListStore.getState().coinMap.get(b.symbol)?.exchange
+        if (exchange) {
+          wsUnsubscribe(`candle:${exchange}:${b.symbol}:${b.timeframe}`)
+          wsSubscribe(`candle:${exchange}:${b.symbol}:${tf}`)
+        }
+        return { ...b, timeframe: tf }
+      }),
+    }
+  }),
 
-  updateSymbol: (id, symbol) => set((s) => ({
-    blocks: s.blocks.map(b => {
-      if (b.id !== id) return b
-      wsUnsubscribe(`candle:${b.symbol}:${b.timeframe}`)
-      wsSubscribe(`candle:${symbol}:${b.timeframe}`)
-      return { ...b, symbol }
-    }),
-  })),
+  updateSymbol: (id, symbol) => set((s) => {
+    return {
+      blocks: s.blocks.map(b => {
+        if (b.id !== id) return b
+        const cm = useCoinListStore.getState().coinMap
+        const oldExchange = cm.get(b.symbol)?.exchange
+        const newExchange = cm.get(symbol)?.exchange
+        if (oldExchange) wsUnsubscribe(`candle:${oldExchange}:${b.symbol}:${b.timeframe}`)
+        if (newExchange) wsSubscribe(`candle:${newExchange}:${symbol}:${b.timeframe}`)
+        return { ...b, symbol }
+      }),
+    }
+  }),
 }))
 
 interface AlertStore {
