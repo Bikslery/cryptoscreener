@@ -571,22 +571,34 @@ function useWsCandle(
     // [DIAG] Phase 4: track WS candle subscription
     console.log(`[DIAG useWsCandle] subscribing ${JSON.stringify({ channel, symbol, exchange, tf })}`)
     const unsub = wsOnChannel(channel, (msg) => {
-      if (destroyedRef.current) return
+      // [DIAG] Phase 4: track every WS message arrival
+      console.log(`[DIAG useWsCandle] message received ${JSON.stringify({ channel, destroyed: destroyedRef.current, hasData: !!msg?.data, dataType: msg?.data ? typeof msg.data : 'none', msgKeys: msg ? Object.keys(msg) : [] })}`)
+
+      if (destroyedRef.current) {
+        console.warn(`[DIAG useWsCandle] SKIP: destroyed=true ${JSON.stringify({ channel })}`)
+        return
+      }
 
       const c = msg.data as UnifiedCandle
-      if (!c) return
+      if (!c) {
+        console.warn(`[DIAG useWsCandle] SKIP: msg.data is falsy ${JSON.stringify({ channel, msgType: typeof msg, msgStr: JSON.stringify(msg).slice(0,200) })}`)
+        return
+      }
 
       if (lastUpdateRef) {
         lastUpdateRef.current = Date.now()
       }
 
       if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
-        console.warn('[useWsCandle] Invalid OHLC data', { exchange, symbol, tf, time: c.time })
+        console.warn(`[DIAG useWsCandle] SKIP: invalid OHLC ${JSON.stringify({ channel, time: c.time, o: c.open, h: c.high, l: c.low, c: c.close })}`)
         return
       }
 
       const lc = lifecycleRef.current
-      if (!lc) return
+      if (!lc) {
+        console.warn(`[DIAG useWsCandle] SKIP: lifecycleRef=null ${JSON.stringify({ channel, time: c.time })}`)
+        return
+      }
 
       const patch = lc.applyKline(c)
       if (adjustingRef?.current) return
