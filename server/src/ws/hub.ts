@@ -203,6 +203,7 @@ export function setupWsHub(wss: WebSocketServer) {
         const msg = JSON.parse(raw.toString()) as WsMessage
         if (msg.type === 'subscribe' && msg.channel) {
           const isNew = !client.subscriptions.has(msg.channel)
+          console.log(`[DIAG Hub] subscribe channel=${msg.channel} isNew=${isNew}`)
           client.subscriptions.add(msg.channel)
 
           if (msg.channel.startsWith('ticker:')) {
@@ -326,6 +327,11 @@ export function broadcast(msg: WsMessage) {
 }
 
 export function broadcastToChannel(channel: string, data: unknown, immediate = false) {
+  // [DIAG] Phase 4: track candle broadcasts
+  if (channel.startsWith('candle:')) {
+    const recipientCount = [...clients.values()].filter(c => c.subscriptions.has(channel) && c.ws.readyState === WebSocket.OPEN).length
+    console.log(`[DIAG Hub] broadcastToChannel channel=${channel} immediate=${immediate} recipients=${recipientCount}`)
+  }
   if (immediate) {
     const msg: WsMessage = { type: channel as any, channel, data }
     const raw = JSON.stringify(msg)
