@@ -103,23 +103,29 @@ function ChartCornerSpinner() {
   )
 }
 
-function LiveIndicator({ isLive, lastUpdate }: { isLive: boolean; lastUpdate: number }) {
+function LiveIndicator({ isLive, lastUpdate, hasReceivedData }: { isLive: boolean; lastUpdate: number; hasReceivedData: boolean }) {
   const timeSinceUpdate = Date.now() - lastUpdate
   const showWarning = timeSinceUpdate > 3000
+
+  const connecting = !hasReceivedData
 
   return (
     <div className="absolute top-[8px] right-[8px] z-30 pointer-events-none flex items-center gap-[6px] px-[8px] py-[4px] rounded-[4px] bg-[#141414]/95 border border-[#2a2a2a] shadow-lg">
       <div
         className={`w-[6px] h-[6px] rounded-full ${
-          isLive && !showWarning
+          connecting
+            ? 'bg-[#e8a838] connecting-indicator-pulse'
+            : isLive && !showWarning
             ? 'bg-[#26a65b] live-indicator-pulse'
             : 'bg-[#666]'
         }`}
       />
       <span className={`text-[9px] font-bold tracking-wide ${
-        isLive && !showWarning ? 'text-[#26a65b]' : 'text-[#666]'
+        connecting
+          ? 'text-[#e8a838]'
+          : isLive && !showWarning ? 'text-[#26a65b]' : 'text-[#666]'
       }`}>
-        {isLive && !showWarning ? 'LIVE' : 'PAUSED'}
+        {connecting ? 'CONNECTING' : isLive && !showWarning ? 'LIVE' : 'PAUSED'}
       </span>
     </div>
   )
@@ -467,18 +473,22 @@ function useLazyScroll(
 
 function useLiveIndicator(
   lastUpdateRef: React.RefObject<number>
-): { isLive: boolean; lastUpdate: number } {
-  const [state, setState] = useState({ isLive: true, lastUpdate: Date.now() })
+): { isLive: boolean; lastUpdate: number; hasReceivedData: boolean } {
+  const [state, setState] = useState({ isLive: true, lastUpdate: Date.now(), hasReceivedData: false })
+  const mountTimeRef = useRef(Date.now())
 
   useEffect(() => {
+    mountTimeRef.current = Date.now()
     const interval = setInterval(() => {
       const now = Date.now()
       const timeSinceUpdate = now - lastUpdateRef.current
+      const hasReceivedData = lastUpdateRef.current > mountTimeRef.current
       setState({
         isLive: timeSinceUpdate < 3000,
-        lastUpdate: lastUpdateRef.current
+        lastUpdate: lastUpdateRef.current,
+        hasReceivedData
       })
-    }, 500) // Check twice per second
+    }, 500)
 
     return () => clearInterval(interval)
   }, [])
@@ -847,7 +857,7 @@ useEffect(() => {
       </div>
       <MiniChartHeader symbol={symbol} />
       <div ref={containerRef} className="relative z-0 flex-1 min-h-0">
-        {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} />}
+        {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
         {isStale && <StaleDataOverlay visible={true} />}
       </div>
       {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
@@ -1288,7 +1298,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} />
       <div ref={containerRef} className="relative flex-1 min-h-0">
         {isInitialLoading && <ChartCornerSpinner />}
-        {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} />}
+        {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
         {!isInitialLoading && isLoadingMore && (
           <div className="absolute top-[8px] left-[8px] z-30 pointer-events-none">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-[4px] bg-[#1a1a1a]/95 border border-[#2a2a2a] shadow-lg">

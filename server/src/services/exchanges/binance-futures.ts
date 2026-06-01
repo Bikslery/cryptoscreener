@@ -335,6 +335,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     if (this.candleSubs.size === 1) {
       this.lastCandleMsgAt = Date.now()
       this.startCandleSilenceChecker()
+      this.startCandleFallback()
     }
   }
 
