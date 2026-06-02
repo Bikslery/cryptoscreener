@@ -21,7 +21,6 @@ services:
       DATABASE_URL: postgresql://screener:${POSTGRES_PASSWORD:-screener_pass}@postgres:5432/cryptoscreener
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       PORT: 3001
       ROLE: all
     depends_on:
@@ -35,21 +34,6 @@ services:
       - "80:80"
     depends_on:
       - server
-    restart: unless-stopped
-
-  broadcast-worker:
-    build: ./server
-    environment:
-      DATABASE_URL: postgresql://screener:${POSTGRES_PASSWORD:-screener_pass}@postgres:5432/cryptoscreener
-      REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
-      PORT: 3002
-      ROLE: broadcast
-    depends_on:
-      - postgres
-      - redis
-    profiles:
-      - scaled
     restart: unless-stopped
 
 volumes:
