@@ -24,7 +24,7 @@ function App() {
   const checkSession = useAuthStore(s => s.checkSession)
   const isChecking = useAuthStore(s => s.isChecking)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
-  const { showAuth, showProfile } = useUIStore()
+  const showProfile = useUIStore(s => s.showProfile)
 
   useEffect(() => {
     checkSession()

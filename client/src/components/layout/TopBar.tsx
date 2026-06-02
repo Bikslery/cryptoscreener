@@ -27,7 +27,7 @@ export function TopBar() {
   const pageIndex = useCoinListStore(s => s.pageIndex)
   const pageCount = useCoinListStore(s => s.pageCount)
   const setPageIndex = useCoinListStore(s => s.setPageIndex)
-  const { isLoggedIn, username } = useAuthStore()
+  const isLoggedIn = useAuthStore(s => s.isLoggedIn)
   const { setShowAuth, setShowProfile } = useUIStore()
 
   return (
