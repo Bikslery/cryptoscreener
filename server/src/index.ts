@@ -1,5 +1,6 @@
 import express from 'express'
 import cors from 'cors'
+import cookieParser from 'cookie-parser'
 import { WebSocketServer, WebSocket } from 'ws'
 import { createServer } from 'http'
 import { setupWsHub, setCandleManager, startRedisListener, stopWsHub, refreshMetrics } from './ws/hub.js'
@@ -30,8 +31,9 @@ async function main() {
   }
 
   const app = express()
-  app.use(cors())
+  app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173', credentials: true }))
   app.set('trust proxy', 1)
+  app.use(cookieParser())
   app.use(express.json())
 
   app.use('/api/auth', authRoutes)

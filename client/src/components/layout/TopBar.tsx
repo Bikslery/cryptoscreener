@@ -27,8 +27,8 @@ export function TopBar() {
   const pageIndex = useCoinListStore(s => s.pageIndex)
   const pageCount = useCoinListStore(s => s.pageCount)
   const setPageIndex = useCoinListStore(s => s.setPageIndex)
-  const { isLoggedIn, email } = useAuthStore()
-  const { setShowLogin, setShowProfile } = useUIStore()
+  const { isLoggedIn, username } = useAuthStore()
+  const { setShowAuth, setShowProfile } = useUIStore()
 
   return (
     <div
@@ -132,12 +132,12 @@ export function TopBar() {
             onClick={() => setShowProfile(true)}
           >
             <User size={13} />
-            <span className="max-w-[100px] truncate">{email}</span>
+            <span>Личный кабинет</span>
           </button>
         ) : (
           <button
             className="flex items-center gap-1.5 h-[30px] px-2 text-[11px] text-[#aaa] hover:text-white transition-colors cursor-pointer"
-            onClick={() => setShowLogin(true)}
+            onClick={() => setShowAuth(true)}
           >
             <LogIn size={13} />
             Вход

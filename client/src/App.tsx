@@ -3,9 +3,9 @@ import { ChartGrid } from './components/charts/ChartGrid'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { TopBar } from './components/layout/TopBar'
 import { RightPanel } from './components/layout/RightPanel'
-import { LoginModal } from './components/auth/LoginModal'
-import { ProfileModal } from './components/auth/ProfileModal'
-import { useCoinListStore, useUIStore } from './store'
+import AuthModal from './components/auth/AuthModal'
+import ProfileModal from './components/auth/ProfileModal'
+import { useCoinListStore, useAuthStore, useUIStore } from './store'
 import { wsConnect, wsDisconnect } from './services/ws'
 import type { Timeframe } from './types'
 
@@ -21,16 +21,24 @@ const TIMEFRAME_HOTKEYS: Record<string, Timeframe> = {
 
 function App() {
   const coinListInit = useCoinListStore(s => s.init)
-  const { showLogin, showProfile } = useUIStore()
+  const checkSession = useAuthStore(s => s.checkSession)
+  const isChecking = useAuthStore(s => s.isChecking)
+  const isLoggedIn = useAuthStore(s => s.isLoggedIn)
+  const { showAuth, showProfile } = useUIStore()
 
   useEffect(() => {
+    checkSession()
+  }, [checkSession])
+
+  useEffect(() => {
+    if (isChecking || !isLoggedIn) return
     wsConnect()
     const unsub = coinListInit()
     return () => {
       unsub()
       wsDisconnect()
     }
-  }, [coinListInit])
+  }, [coinListInit, isChecking, isLoggedIn])
 
   // Пробел — перейти к следующей странице мини-графиков (на последней останавливается).
   useEffect(() => {
@@ -53,7 +61,7 @@ function App() {
 
       // Не листаем при открытом модальном окне или в развёрнутом графике.
       const ui = useUIStore.getState()
-      if (ui.showLogin || ui.showProfile) return
+      if (ui.showAuth || ui.showProfile) return
       const s = useCoinListStore.getState()
 
       if (hotkeyTimeframe) {
@@ -75,6 +83,21 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
+  // Loading session check
+  if (isChecking) {
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-[#0a0a0a]">
+        <div className="text-zinc-500 text-lg">Загрузка...</div>
+      </div>
+    )
+  }
+
+  // Not logged in — auth gate (full screen, no charts behind)
+  if (!isLoggedIn) {
+    return <AuthModal />
+  }
+
+  // Logged in — main app
   return (
     <div className="w-full h-full flex flex-col bg-[#0a0a0a]">
       <TopBar />
@@ -85,7 +108,6 @@ function App() {
         <div className="w-[1px] bg-[#1f1f1f] flex-shrink-0" />
         <RightPanel />
       </div>
-      {showLogin && <LoginModal />}
       {showProfile && <ProfileModal />}
     </div>
   )

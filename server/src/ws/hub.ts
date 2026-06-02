@@ -161,7 +161,12 @@ export function setupWsHub(wss: WebSocketServer) {
     let user: JwtPayload | null = null
 
     const url = new URL(req.url || '', `http://${req.headers.host}`)
-    const token = url.searchParams.get('token')
+    let token = url.searchParams.get('token')
+    // Fallback: read token from cookie (for cookie-based auth)
+    if (!token && req.headers.cookie) {
+      const match = req.headers.cookie.match(/(?:^|;\s*)token=([^;]+)/)
+      if (match) token = match[1]
+    }
     if (token) {
       user = verifyToken(token)
     }

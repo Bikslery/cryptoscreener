@@ -8,15 +8,16 @@ datasource db {
 }
 
 model User {
-  id             String    @id @default(cuid())
-  email          String    @unique
-  passwordHash   String
-  telegramChatId String?
-  settings       String?
-  createdAt      DateTime  @default(now())
-  watchlists     Watchlist[]
-  alerts         Alert[]
-  drawings       Drawing[]
+  id               String    @id @default(cuid())
+  username         String    @unique
+  passwordHash     String
+  telegramChatId   String?
+  telegramVerified Boolean   @default(false)
+  settings         String?
+  createdAt        DateTime  @default(now())
+  watchlists       Watchlist[]
+  alerts           Alert[]
+  drawings         Drawing[]
 }
 
 model Watchlist {

@@ -27,9 +27,8 @@ function dispatch(msg: WsMessage) {
 
 function connect() {
   intentionalDisconnect = false
-  const token = localStorage.getItem('token') || ''
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const url = `${protocol}//${window.location.host}/ws?token=${token}`
+  const url = `${protocol}//${window.location.host}/ws`
   ws = new WebSocket(url)
 
   ws.onopen = () => {

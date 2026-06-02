@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { useSyncExternalStore } from 'react'
 import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, FilterExchange, Alert as AlertType } from '../types.js'
 import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
+import api from '../services/api.js'
 
 const EXCHANGE_PRIORITY: Record<Exchange, number> = {
   'binance-futures': 5,
@@ -313,41 +314,62 @@ export const useAlertStore = create<AlertStore>((set) => ({
 }))
 
 interface AuthStore {
-  token: string | null
-  email: string | null
+  userId: string | null
+  username: string | null
+  telegramVerified: boolean
   isLoggedIn: boolean
-  login: (token: string, email: string) => void
-  logout: () => void
+  isChecking: boolean
+  checkSession: () => Promise<void>
+  setUser: (user: { id: string; username: string; telegramVerified: boolean }) => void
+  logout: () => Promise<void>
 }
 
 export const useAuthStore = create<AuthStore>((set) => ({
-  token: localStorage.getItem('token'),
-  email: localStorage.getItem('email'),
-  isLoggedIn: !!localStorage.getItem('token'),
+  userId: null,
+  username: null,
+  telegramVerified: false,
+  isLoggedIn: false,
+  isChecking: true,
 
-  login: (token, email) => {
-    localStorage.setItem('token', token)
-    localStorage.setItem('email', email)
-    set({ token, email, isLoggedIn: true })
+  checkSession: async () => {
+    try {
+      const res = await api.get('/auth/me')
+      const user = res.data
+      set({
+        userId: user.id,
+        username: user.username,
+        telegramVerified: user.telegramVerified,
+        isLoggedIn: true,
+        isChecking: false,
+      })
+    } catch {
+      set({ userId: null, username: null, telegramVerified: false, isLoggedIn: false, isChecking: false })
+    }
   },
 
-  logout: () => {
-    localStorage.removeItem('token')
-    localStorage.removeItem('email')
-    set({ token: null, email: null, isLoggedIn: false })
+  setUser: (user) => set({
+    userId: user.id,
+    username: user.username,
+    telegramVerified: user.telegramVerified,
+    isLoggedIn: true,
+  }),
+
+  logout: async () => {
+    try { await api.post('/auth/logout') } catch { /* ignore */ }
+    set({ userId: null, username: null, telegramVerified: false, isLoggedIn: false })
   },
 }))
 
 interface UIStore {
-  showLogin: boolean
+  showAuth: boolean
   showProfile: boolean
-  setShowLogin: (v: boolean) => void
+  setShowAuth: (v: boolean) => void
   setShowProfile: (v: boolean) => void
 }
 
 export const useUIStore = create<UIStore>((set) => ({
-  showLogin: false,
+  showAuth: false,
   showProfile: false,
-  setShowLogin: (v) => set({ showLogin: v }),
+  setShowAuth: (v) => set({ showAuth: v }),
   setShowProfile: (v) => set({ showProfile: v }),
 }))
