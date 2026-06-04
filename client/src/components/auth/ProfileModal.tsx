@@ -56,7 +56,7 @@ export default function ProfileModal() {
     setResetError('')
     setResetLoading(true)
     try {
-      const res = await api.post('/auth/reset-request', { userId })
+      await api.post('/auth/reset-request', { userId })
       setCodeTimer(300)
       setResetStep('code')
     } catch (err: any) {
