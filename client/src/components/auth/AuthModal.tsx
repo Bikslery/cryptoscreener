@@ -6,7 +6,7 @@ import Particles from '../effects/Particles'
 import './AuthModal.css'
 
 type Tab = 'login' | 'register'
-type Step = 'form' | 'telegram' | 'success'
+type Step = 'form' | 'telegram' | 'success' | 'reset-username' | 'reset-code' | 'reset-password' | 'reset-success'
 
 export default function AuthModal() {
   const { setUser } = useAuthStore()
@@ -25,6 +25,18 @@ export default function AuthModal() {
   const [bindError, setBindError] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // Password reset
+  const [resetUsername, setResetUsername] = useState('')
+  const [resetUserId, setResetUserId] = useState('')
+  const [resetCode, setResetCode] = useState('')
+  const [resetToken, setResetToken] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [newPassword2, setNewPassword2] = useState('')
+  const [resetError, setResetError] = useState('')
+  const [resetLoading, setResetLoading] = useState(false)
+  const [codeTimer, setCodeTimer] = useState(0)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   const stopPolling = () => {
     if (pollRef.current) {
       clearInterval(pollRef.current)
@@ -32,9 +44,31 @@ export default function AuthModal() {
     }
   }
 
+  const stopTimer = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+  }
+
   useEffect(() => {
-    return () => stopPolling()
+    return () => { stopPolling(); stopTimer() }
   }, [])
+
+  useEffect(() => {
+    if (codeTimer <= 0) {
+      stopTimer()
+      return
+    }
+    if (!timerRef.current) {
+      timerRef.current = setInterval(() => {
+        setCodeTimer(prev => {
+          if (prev <= 1) { stopTimer(); return 0 }
+          return prev - 1
+        })
+      }, 1000)
+    }
+  }, [codeTimer])
 
   const POLL_MAX_ATTEMPTS = 100 // 5 minutes at 3s intervals
   let pollAttempts = 0
@@ -122,6 +156,94 @@ export default function AuthModal() {
     }
   }
 
+  // ── Password reset handlers ──
+
+  const handleResetRequest = async (e?: React.FormEvent) => {
+    e?.preventDefault()
+    setResetError('')
+    setResetLoading(true)
+    try {
+      const body = resetUsername ? { username: resetUsername } : { userId: resetUserId }
+      const res = await api.post('/auth/reset-request', body)
+      setResetUserId(res.data.userId)
+      setCodeTimer(300) // 5 min countdown
+      setStep('reset-code')
+    } catch (err: any) {
+      setResetError(err.response?.data?.error || 'Ошибка отправки кода')
+    } finally {
+      setResetLoading(false)
+    }
+  }
+
+  const handleResetResend = async () => {
+    setResetError('')
+    try {
+      const body = resetUsername ? { username: resetUsername } : { userId: resetUserId }
+      const res = await api.post('/auth/reset-request', body)
+      setResetUserId(res.data.userId)
+      setCodeTimer(300)
+    } catch (err: any) {
+      setResetError(err.response?.data?.error || 'Ошибка отправки кода')
+    }
+  }
+
+  const handleResetVerify = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setResetError('')
+    if (resetCode.length !== 6) {
+      setResetError('Введите 6-значный код')
+      return
+    }
+    setResetLoading(true)
+    try {
+      const res = await api.post('/auth/reset-verify', { userId: resetUserId, code: resetCode })
+      setResetToken(res.data.resetToken)
+      setStep('reset-password')
+    } catch (err: any) {
+      setResetError(err.response?.data?.error || 'Неверный код')
+    } finally {
+      setResetLoading(false)
+    }
+  }
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setResetError('')
+    if (newPassword.length < 6) {
+      setResetError('Пароль должен быть не менее 6 символов')
+      return
+    }
+    if (newPassword !== newPassword2) {
+      setResetError('Пароли не совпадают')
+      return
+    }
+    setResetLoading(true)
+    try {
+      await api.post('/auth/reset-password', { resetToken, password: newPassword })
+      setStep('reset-success')
+    } catch (err: any) {
+      setResetError(err.response?.data?.error || 'Ошибка смены пароля')
+    } finally {
+      setResetLoading(false)
+    }
+  }
+
+  const formatTimer = (s: number) => {
+    const m = Math.floor(s / 60)
+    const sec = s % 60
+    return `${m}:${String(sec).padStart(2, '0')}`
+  }
+
+  const goBackToForm = () => {
+    setStep('form')
+    setResetError('')
+    setResetCode('')
+    setNewPassword('')
+    setNewPassword2('')
+    setResetToken('')
+    setCodeTimer(0)
+  }
+
   return (
     <div className="auth-page">
       <Particles style="white" />
@@ -185,6 +307,140 @@ export default function AuthModal() {
               }}
               className="auth-btn"
             >
+              войти
+            </button>
+          </div>
+        )}
+
+        {/* --- Reset: enter username --- */}
+        {step === 'reset-username' && (
+          <div className="auth-step-enter">
+            <div className="auth-heading">сброс пароля</div>
+            <div className="auth-subtitle">введите логин для отправки кода</div>
+
+            {resetError && <div className="auth-error">{resetError}</div>}
+
+            <form onSubmit={handleResetRequest} className="auth-form">
+              <div className="auth-field">
+                <label>Логин</label>
+                <input
+                  type="text"
+                  value={resetUsername}
+                  onChange={(e) => setResetUsername(e.target.value)}
+                  placeholder="логин"
+                  autoFocus
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={resetLoading || !resetUsername}
+                className="auth-btn"
+              >
+                {resetLoading ? '...' : 'отправить код'}
+              </button>
+            </form>
+
+            <button className="auth-back" onClick={goBackToForm}>
+              вернуться ко входу
+            </button>
+          </div>
+        )}
+
+        {/* --- Reset: enter code --- */}
+        {step === 'reset-code' && (
+          <div className="auth-step-enter">
+            <div className="auth-heading">введите код</div>
+            <div className="auth-subtitle">код отправлен в ваш Telegram</div>
+
+            {resetError && <div className="auth-error">{resetError}</div>}
+
+            <form onSubmit={handleResetVerify} className="auth-form">
+              <div className="auth-field">
+                <label>Код подтверждения</label>
+                <input
+                  type="text"
+                  value={resetCode}
+                  onChange={(e) => setResetCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="000000"
+                  className="auth-code-input"
+                  autoFocus
+                  inputMode="numeric"
+                />
+              </div>
+
+              {codeTimer > 0 && (
+                <p className="auth-timer">Код действителен {formatTimer(codeTimer)}</p>
+              )}
+
+              <button
+                type="submit"
+                disabled={resetLoading || resetCode.length !== 6}
+                className="auth-btn"
+              >
+                {resetLoading ? '...' : 'подтвердить'}
+              </button>
+            </form>
+
+            {codeTimer === 0 && (
+              <button className="auth-resend" onClick={handleResetResend}>
+                отправить код повторно
+              </button>
+            )}
+
+            <button className="auth-back" onClick={goBackToForm}>
+              вернуться ко входу
+            </button>
+          </div>
+        )}
+
+        {/* --- Reset: new password --- */}
+        {step === 'reset-password' && (
+          <div className="auth-step-enter">
+            <div className="auth-heading">новый пароль</div>
+            <div className="auth-subtitle">придумайте новый пароль</div>
+
+            {resetError && <div className="auth-error">{resetError}</div>}
+
+            <form onSubmit={handleResetPassword} className="auth-form">
+              <div className="auth-field">
+                <label>Пароль</label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="пароль"
+                  autoFocus
+                />
+              </div>
+
+              <div className="auth-field">
+                <label>Подтверждение пароля</label>
+                <input
+                  type="password"
+                  value={newPassword2}
+                  onChange={(e) => setNewPassword2(e.target.value)}
+                  placeholder="пароль"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={resetLoading || !newPassword || !newPassword2}
+                className="auth-btn"
+              >
+                {resetLoading ? '...' : 'сменить пароль'}
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* --- Reset: success --- */}
+        {step === 'reset-success' && (
+          <div className="auth-step-enter">
+            <div className="auth-success-heading">Пароль изменён</div>
+            <p className="auth-success-text">Войдите с новым паролем.</p>
+            <button onClick={goBackToForm} className="auth-btn">
               войти
             </button>
           </div>
@@ -255,6 +511,15 @@ export default function AuthModal() {
               >
                 {loading ? '...' : tab === 'login' ? 'войти' : 'зарегистрироваться'}
               </button>
+
+              {tab === 'login' && (
+                <span
+                  className="auth-forgot"
+                  onClick={() => { setStep('reset-username'); setResetError(''); setResetUsername('') }}
+                >
+                  забыли пароль?
+                </span>
+              )}
             </form>
           </div>
         )}

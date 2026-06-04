@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken'
 import type { Request, Response, NextFunction } from 'express'
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production'
+const RESET_JWT_SECRET = process.env.RESET_JWT_SECRET || 'change-me-reset-secret'
 const COOKIE_NAME = 'token'
 const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000 // 7 days in ms
 const REFRESH_THRESHOLD = 24 * 60 * 60 * 1000 // refresh if < 1 day left
@@ -18,6 +19,20 @@ export function generateToken(payload: JwtPayload): string {
 export function verifyToken(token: string): JwtPayload | null {
   try {
     return jwt.verify(token, JWT_SECRET) as JwtPayload
+  } catch {
+    return null
+  }
+}
+
+export function generateResetToken(userId: string): string {
+  return jwt.sign({ userId, purpose: 'password-reset' }, RESET_JWT_SECRET, { expiresIn: '10m' })
+}
+
+export function verifyResetToken(token: string): string | null {
+  try {
+    const payload = jwt.verify(token, RESET_JWT_SECRET) as any
+    if (payload.purpose !== 'password-reset') return null
+    return payload.userId as string
   } catch {
     return null
   }

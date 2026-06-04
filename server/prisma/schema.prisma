@@ -19,6 +19,20 @@ model User {
   watchlists       Watchlist[]
   alerts           Alert[]
   drawings         Drawing[]
+  passwordResets   PasswordReset[]
+}
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  code      String
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([code, userId])
 }
 
 model Watchlist {
