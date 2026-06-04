@@ -53,7 +53,7 @@ router.post('/login', async (req, res) => {
     res.status(401).json({ error: 'Invalid credentials' })
     return
   }
-  const token = generateToken
+  const token = generateToken({ userId: user.id, username: user.username })
   setAuthCookie(res, token)
   res.json({
     user: { id: user.id, username: user.username, telegramVerified: user.telegramVerified },
