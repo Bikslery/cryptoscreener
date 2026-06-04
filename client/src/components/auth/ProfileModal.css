@@ -1,0 +1,266 @@
+/* ═══════════════════════════════════════════════════════
+   ProfileModal — .clinic aesthetic
+   Glow borders, sections, uppercase labels, avatar glow
+   ═══════════════════════════════════════════════════════ */
+
+.profile-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  cursor: none;
+  backdrop-filter: blur(2px);
+}
+
+/* ── Modal card ── */
+
+.profile-modal {
+  background: var(--bg-card);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-xl);
+  padding: 2rem;
+  width: 420px;
+  max-width: 90vw;
+  position: relative;
+  z-index: 1;
+  box-shadow: var(--shadow-card), var(--glow-border);
+  animation: profile-fade-in-up 0.5s ease-out;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.profile-modal:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: var(--shadow-card), var(--glow-border-hover);
+}
+
+/* ── Header: avatar + name + close ── */
+
+.profile-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1.2rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.profile-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 1.4rem;
+  color: rgba(255, 255, 255, 0.7);
+  flex-shrink: 0;
+  box-shadow: var(--glow-border);
+  transition: box-shadow var(--transition);
+}
+
+.profile-header:hover .profile-avatar {
+  box-shadow: var(--glow-border-hover);
+}
+
+.profile-header-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.profile-name {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-shadow: var(--glow-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-role {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}
+
+.profile-close {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  color: rgba(255, 255, 255, 0.3);
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition), box-shadow var(--transition);
+}
+
+.profile-close:hover {
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: var(--glow-border);
+}
+
+/* ── Section (reusable, like .clinic .section / .card) ── */
+
+.profile-section {
+  background: var(--bg-card);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-lg);
+  padding: 1.2rem 1.3rem;
+  margin-bottom: 0.8rem;
+  box-shadow: var(--shadow-card), var(--glow-border);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.profile-section:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: var(--shadow-card), var(--glow-border-hover);
+}
+
+.profile-section:last-child {
+  margin-bottom: 0;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.section-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.section-header h2 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-shadow: var(--glow-text);
+}
+
+/* ── Fields ── */
+
+.profile-field {
+  margin-bottom: 0.8rem;
+}
+
+.profile-field:last-child {
+  margin-bottom: 0;
+}
+
+.profile-field label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.35);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.3rem;
+}
+
+.profile-field .field-value {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+/* ── Badge (telegram status) ── */
+
+.profile-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.profile-badge.verified {
+  background: rgba(38, 166, 91, 0.08);
+  border: 1px solid rgba(38, 166, 91, 0.25);
+  color: #26a65b;
+  box-shadow: 0 0 10px rgba(38, 166, 91, 0.08);
+  text-shadow: 0 0 8px rgba(38, 166, 91, 0.25);
+}
+
+.profile-badge.unverified {
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.06);
+  text-shadow: 0 0 8px rgba(239, 68, 68, 0.2);
+}
+
+.profile-badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.profile-badge.verified .profile-badge-dot {
+  background: #26a65b;
+  box-shadow: 0 0 6px rgba(38, 166, 91, 0.5);
+}
+
+.profile-badge.unverified .profile-badge-dot {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+}
+
+/* ── Logout button ── */
+
+.profile-logout-btn {
+  width: 100%;
+  padding: 0.8rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  letter-spacing: 0.5px;
+  background: transparent;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  color: #ef4444;
+  cursor: pointer;
+  transition: border-color var(--transition), box-shadow var(--transition), text-shadow var(--transition);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.profile-logout-btn:hover {
+  border-color: rgba(239, 68, 68, 0.5);
+  box-shadow: 0 0 15px rgba(239, 68, 68, 0.1);
+  text-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
+}
+
+/* ── Animations ── */
+
+@keyframes profile-fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
