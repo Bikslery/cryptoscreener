@@ -63,7 +63,7 @@ export default function ProfileModal() {
 
           <button className="profile-logout-btn" onClick={handleLogout}>
             <LogOut size={15} />
-            выйти()
+            выйти
           </button>
         </div>
       </div>

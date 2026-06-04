@@ -59,6 +59,18 @@ export async function handleUpdate(update: any) {
           await sendTelegramMessage(chatId, 'ℹ️ Этот аккаунт уже привязан к Telegram.')
           return
         }
+        // Check if this Telegram account is already bound to another user
+        const existing = await prisma.user.findFirst({
+          where: { telegramChatId: chatId },
+          select: { id: true },
+        })
+        if (existing) {
+          // Unbind from the old account — one Telegram = one user
+          await prisma.user.update({
+            where: { id: existing.id },
+            data: { telegramChatId: null, telegramVerified: false },
+          })
+        }
         await prisma.user.update({
           where: { id: userId },
           data: { telegramChatId: chatId, telegramVerified: true },

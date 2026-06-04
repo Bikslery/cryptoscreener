@@ -11,7 +11,7 @@ model User {
   id               String    @id @default(cuid())
   username         String    @unique
   passwordHash     String
-  telegramChatId   String?
+  telegramChatId   String?   @unique
   telegramVerified Boolean   @default(false)
   settings         String?
   createdAt        DateTime  @default(now())

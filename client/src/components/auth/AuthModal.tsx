@@ -162,7 +162,7 @@ export default function AuthModal() {
               }}
               className="auth-btn"
             >
-              войти()
+              войти
             </button>
           </div>
         )}
@@ -198,7 +198,7 @@ export default function AuthModal() {
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="$ логин"
+                  placeholder="логин"
                   autoFocus
                 />
               </div>
@@ -209,7 +209,7 @@ export default function AuthModal() {
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="$ пароль"
+                  placeholder="пароль"
                 />
               </div>
 
@@ -220,7 +220,7 @@ export default function AuthModal() {
                     type="password"
                     value={password2}
                     onChange={(e) => setPassword2(e.target.value)}
-                    placeholder="$ пароль"
+                    placeholder="пароль"
                   />
                 </div>
               )}
@@ -230,7 +230,7 @@ export default function AuthModal() {
                 disabled={loading}
                 className="auth-btn"
               >
-                {loading ? '...' : tab === 'login' ? 'войти()' : 'зарегистрироваться()'}
+                {loading ? '...' : tab === 'login' ? 'войти' : 'зарегистрироваться'}
               </button>
             </form>
           </div>
