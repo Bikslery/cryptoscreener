@@ -10,9 +10,17 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.6);
   cursor: none;
-  backdrop-filter: blur(2px);
+}
+
+/* ── Blurred backdrop ── */
+
+.profile-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 /* ── Modal card ── */

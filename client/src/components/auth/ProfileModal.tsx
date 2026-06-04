@@ -1,7 +1,5 @@
 import { useAuthStore, useUIStore } from '../../store'
 import { X, User, LogOut, Shield } from 'lucide-react'
-import CursorGlow from '../effects/CursorGlow'
-import Particles from '../effects/Particles'
 import './ProfileModal.css'
 
 export default function ProfileModal() {
@@ -15,8 +13,7 @@ export default function ProfileModal() {
 
   return (
     <div className="profile-overlay" onClick={() => setShowProfile(false)}>
-      <CursorGlow />
-      <Particles style="white" />
+      <div className="profile-backdrop" />
       <div className="profile-modal" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="profile-header">
