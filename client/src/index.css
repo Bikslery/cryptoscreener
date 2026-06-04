@@ -190,3 +190,98 @@ a[href*="tradingview.com"] { display: none !important; }
 .stale-data-overlay {
   animation: stale-fade-in 400ms ease-out;
 }
+
+/* ═══════════════════════════════════════════════════════
+   .clinic button system — glow borders, transparent bg
+   ═══════════════════════════════════════════════════════ */
+
+.clinic-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-weight: 600 !important;
+  text-shadow: var(--glow-text);
+  transition: all var(--transition);
+}
+.clinic-btn:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.5);
+  box-shadow: var(--glow-border-hover);
+  text-shadow: var(--glow-text-strong);
+  transform: translateY(-1px);
+}
+.clinic-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: var(--glow-border);
+}
+.clinic-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ── Small ── */
+.clinic-btn-sm {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.8rem;
+  border-radius: 6px;
+}
+
+/* ── Danger ── */
+.clinic-btn-danger {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: var(--color-down);
+  text-shadow: 0 0 8px rgba(239, 68, 68, 0.3);
+}
+.clinic-btn-danger:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.7);
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.2);
+  text-shadow: 0 0 12px rgba(239, 68, 68, 0.5);
+}
+
+/* ── Secondary ── */
+.clinic-btn-secondary {
+  border-color: rgba(255, 255, 255, 0.15);
+  color: var(--text-muted);
+  text-shadow: none;
+}
+.clinic-btn-secondary:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: var(--text-primary);
+  box-shadow: var(--glow-border);
+  text-shadow: var(--glow-text);
+}
+
+/* ── Ghost ── */
+.clinic-btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+  text-shadow: none;
+}
+.clinic-btn-ghost:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.1);
+  text-shadow: var(--glow-text);
+  box-shadow: none;
+  transform: none;
+}
+
+/* ── Active/selected state (tabs, toggles) ── */
+.clinic-btn-active {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: var(--text-primary);
+  text-shadow: var(--glow-text-strong);
+  box-shadow: var(--glow-border);
+}
+
+/* ── Exchange filter — inverse style with glow ── */
+.clinic-btn-exchange-active {
+  background: #ffffff;
+  border-color: #ffffff;
+  color: #000000;
+  text-shadow: none;
+  font-weight: 700 !important;
+  box-shadow: var(--glow-border-hover);
+}

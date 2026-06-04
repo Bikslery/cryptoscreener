@@ -98,13 +98,9 @@ export function DensityMap() {
           {[1, 2].map(pct => (
             <button
               key={pct}
-              className={`
-                h-[22px] px-2 text-[10px] font-mono font-medium rounded-[3px] border transition-all cursor-pointer
-                ${thresholdPct === pct
-                  ? 'bg-white text-black border-white'
-                  : 'bg-transparent text-[#666] border-[#2a2a2a] hover:border-[#444]'
-                }
-              `}
+              className={`clinic-btn clinic-btn-sm text-[10px] h-[22px] px-2 ${
+                thresholdPct === pct ? 'clinic-btn-exchange-active' : 'clinic-btn-secondary'
+              }`}
               onClick={() => setThresholdPct(pct as 1 | 2)}
             >
               {pct}%

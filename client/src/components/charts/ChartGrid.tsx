@@ -914,7 +914,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
   return (
     <div className="flex items-center gap-3 px-3 py-[6px] bg-[#141414] border-b border-[#1f1f1f] flex-shrink-0">
       <button
-        className="flex items-center justify-center w-[28px] h-[28px] rounded-[4px] bg-[#1a1a1a] border border-[#2a2a2a] text-[#666] hover:bg-[#222] hover:text-[#ccc] hover:border-[#444] transition-all duration-150"
+        className="clinic-btn clinic-btn-sm flex items-center justify-center w-[28px] h-[28px] p-0"
         onClick={onBack}
         title="Назад к сетке"
       >

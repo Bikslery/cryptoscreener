@@ -31,10 +31,8 @@ const DrawingToolsPanel = memo(function DrawingToolsPanel({
           return (
             <button
               key={id}
-              className={`flex items-center justify-center w-[30px] h-[30px] rounded-[4px] transition-all duration-150 ${
-                isActive
-                  ? 'bg-[#3a3a3a] border border-[#505050]'
-                  : 'bg-transparent border border-transparent hover:bg-[#2a2a2a]'
+              className={`clinic-btn flex items-center justify-center w-[30px] h-[30px] p-0 ${
+                isActive ? 'clinic-btn-active' : 'clinic-btn-ghost'
               }`}
               onClick={() => setActiveTool(id)}
               title={label}
@@ -47,11 +45,11 @@ const DrawingToolsPanel = memo(function DrawingToolsPanel({
           <>
             <div className="h-[1px] bg-[#383838] mx-[3px]" />
             <button
-              className="flex items-center justify-center w-[30px] h-[30px] rounded-[4px] transition-all duration-150 bg-transparent border border-transparent hover:bg-[#2a2a2a] hover:text-[#e74c3c] group"
+              className="clinic-btn clinic-btn-danger flex items-center justify-center w-[30px] h-[30px] p-0"
               onClick={clearAllDrawings}
               title="Удалить все"
             >
-              <Trash2 size={13} color="#555" strokeWidth={1.5} className="group-hover:text-[#e74c3c]" />
+              <Trash2 size={13} strokeWidth={1.5} />
             </button>
           </>
         )}

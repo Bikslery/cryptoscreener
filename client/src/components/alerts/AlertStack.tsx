@@ -42,8 +42,8 @@ function CreateAlertForm({ onClose }: { onClose: () => void }) {
       <div className="flex gap-1">
         <button
           type="button"
-          className={`px-2 py-1 rounded text-[10px] font-medium transition-colors cursor-pointer ${
-            type === 'price' ? 'bg-[#3b82f6]/20 text-[#3b82f6]' : 'bg-[#0a0a0a] text-[#666]'
+          className={`clinic-btn clinic-btn-sm text-[10px] px-2 py-1 ${
+            type === 'price' ? 'clinic-btn-active' : 'clinic-btn-secondary'
           }`}
           onClick={() => setType('price')}
         >
@@ -51,8 +51,8 @@ function CreateAlertForm({ onClose }: { onClose: () => void }) {
         </button>
         <button
           type="button"
-          className={`px-2 py-1 rounded text-[10px] font-medium transition-colors cursor-pointer ${
-            type === 'impulse' ? 'bg-[#f59e0b]/20 text-[#f59e0b]' : 'bg-[#0a0a0a] text-[#666]'
+          className={`clinic-btn clinic-btn-sm text-[10px] px-2 py-1 ${
+            type === 'impulse' ? 'clinic-btn-active' : 'clinic-btn-secondary'
           }`}
           onClick={() => setType('impulse')}
         >
@@ -94,8 +94,8 @@ function CreateAlertForm({ onClose }: { onClose: () => void }) {
         />
       )}
       <div className="flex gap-1 justify-end pt-1">
-        <button type="button" className="px-2 py-1 text-[10px] text-[#666] hover:text-[#aaa] transition-colors" onClick={onClose}>Отмена</button>
-        <button type="submit" className="px-3 py-1 bg-white text-black rounded text-[10px] font-semibold hover:opacity-90">Создать</button>
+        <button type="button" className="clinic-btn clinic-btn-secondary clinic-btn-sm text-[10px] px-2 py-1" onClick={onClose}>Отмена</button>
+        <button type="submit" className="clinic-btn clinic-btn-sm text-[10px] px-3 py-1 clinic-btn-exchange-active">Создать</button>
       </div>
     </form>
   )
@@ -118,7 +118,7 @@ export function AlertStack() {
       <div className="flex items-center justify-between px-3 py-2 bg-[#0e0e0e] border-b border-[#1f1f1f] flex-shrink-0">
         <span className="text-[11px] font-bold text-white">Уведомления</span>
         <button
-          className="flex items-center gap-1 px-2 py-1 text-[10px] bg-white text-black rounded font-semibold hover:opacity-90 transition-opacity cursor-pointer"
+          className="clinic-btn clinic-btn-sm clinic-btn-exchange-active flex items-center gap-1 text-[10px] px-2 py-1"
           onClick={() => setShowForm(true)}
         >
           <Plus size={12} />
@@ -172,13 +172,13 @@ export function AlertStack() {
                   {count}
                 </span>
                 <button
-                  className="text-[#555] hover:text-[#aaa] transition-colors"
+                  className="clinic-btn clinic-btn-ghost p-1"
                   onClick={(e) => { e.stopPropagation(); muteAlert(alert.id) }}
                 >
                   <BellOff size={12} />
                 </button>
                 <button
-                  className="text-[#555] hover:text-[#e74c3c] transition-colors"
+                  className="clinic-btn clinic-btn-danger p-1"
                   onClick={(e) => { e.stopPropagation(); dismissAlert(alert.id) }}
                 >
                   <X size={12} />

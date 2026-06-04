@@ -42,17 +42,13 @@ export function TopBar() {
 
       {/* Центр: таймфреймы + пагинация */}
       <div className="flex items-center gap-2 shrink-0">
-        <div className="flex h-[30px] border border-[#2a2a2a] rounded-[4px] overflow-hidden bg-[#1a1a1a]">
+        <div className="flex items-center gap-[2px]">
           {TF_OPTIONS.map((opt) => (
             <button
               key={opt.value}
-              className={`
-                flex items-center justify-center h-full w-[44px] text-center leading-none text-[12px] font-mono font-medium transition-all duration-150 cursor-pointer
-                ${activeTf === opt.value
-                  ? 'bg-[#3a3a3a] text-[#fff]'
-                  : 'text-[#888] hover:bg-[#242424] hover:text-[#bbb]'
-                }
-              `}
+              className={`clinic-btn clinic-btn-sm text-[12px] leading-none ${
+                activeTf === opt.value ? 'clinic-btn-active' : 'clinic-btn-secondary'
+              }`}
               onClick={() => setTimeframe(opt.value)}
             >
               {opt.label}
@@ -65,11 +61,7 @@ export function TopBar() {
         <button
           aria-label="На первую страницу"
           disabled={pageIndex === 0}
-          className={`
-            flex items-center justify-center h-[30px] px-[9px] text-[12px] font-mono font-medium rounded-[4px] border transition-all duration-150
-            disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-[#1a1a1a] disabled:hover:text-[#888] disabled:hover:border-[#2a2a2a]
-            bg-[#1a1a1a] text-[#888] border-[#2a2a2a] hover:bg-[#242424] hover:text-[#bbb] hover:border-[#3a3a3a] cursor-pointer
-          `}
+          className="clinic-btn clinic-btn-sm flex items-center justify-center h-[30px] px-[9px] text-[12px]"
           onClick={() => setPageIndex(0)}
         >
           <ChevronFirst size={15} />
@@ -78,11 +70,7 @@ export function TopBar() {
         <button
           aria-label="Предыдущие 9 графиков"
           disabled={pageIndex === 0}
-          className={`
-            flex items-center justify-center h-[30px] px-[9px] text-[12px] font-mono font-medium rounded-[4px] border transition-all duration-150
-            disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-[#1a1a1a] disabled:hover:text-[#888] disabled:hover:border-[#2a2a2a]
-            bg-[#1a1a1a] text-[#888] border-[#2a2a2a] hover:bg-[#242424] hover:text-[#bbb] hover:border-[#3a3a3a] cursor-pointer
-          `}
+          className="clinic-btn clinic-btn-sm flex items-center justify-center h-[30px] px-[9px] text-[12px]"
           onClick={() => setPageIndex(pageIndex - 1)}
         >
           <ChevronLeft size={15} />
@@ -95,11 +83,7 @@ export function TopBar() {
         <button
           aria-label="Следующие 9 графиков"
           disabled={pageIndex >= pageCount - 1}
-          className={`
-            flex items-center justify-center h-[30px] px-[9px] text-[12px] font-mono font-medium rounded-[4px] border transition-all duration-150
-            disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-[#1a1a1a] disabled:hover:text-[#888] disabled:hover:border-[#2a2a2a]
-            bg-[#1a1a1a] text-[#888] border-[#2a2a2a] hover:bg-[#242424] hover:text-[#bbb] hover:border-[#3a3a3a] cursor-pointer
-          `}
+          className="clinic-btn clinic-btn-sm flex items-center justify-center h-[30px] px-[9px] text-[12px]"
           onClick={() => setPageIndex(pageIndex + 1)}
         >
           <ChevronRight size={15} />
@@ -111,13 +95,11 @@ export function TopBar() {
         {EXCHANGE_FILTERS.map(f => (
           <button
             key={f.value}
-            className={`
-              flex items-center justify-center h-[30px] px-[10px] text-[12px] font-medium rounded-[4px] border transition-all duration-150 cursor-pointer
-              ${filterExchange === f.value
-                ? 'bg-white text-black border-white'
-                : 'bg-transparent text-[#666] border-transparent hover:text-[#aaa] hover:border-[#2a2a2a]'
-              }
-            `}
+            className={`clinic-btn clinic-btn-sm text-[12px] ${
+              filterExchange === f.value
+                ? 'clinic-btn-exchange-active'
+                : 'clinic-btn-ghost'
+            }`}
             onClick={() => setFilterExchange(f.value)}
           >
             {f.label}
@@ -128,7 +110,7 @@ export function TopBar() {
 
         {isLoggedIn ? (
           <button
-            className="flex items-center gap-1.5 h-[30px] px-2 text-[11px] text-[#aaa] hover:text-white transition-colors cursor-pointer"
+            className="clinic-btn clinic-btn-ghost clinic-btn-sm flex items-center gap-1.5 text-[11px]"
             onClick={() => setShowProfile(true)}
           >
             <User size={13} />
@@ -136,7 +118,7 @@ export function TopBar() {
           </button>
         ) : (
           <button
-            className="flex items-center gap-1.5 h-[30px] px-2 text-[11px] text-[#aaa] hover:text-white transition-colors cursor-pointer"
+            className="clinic-btn clinic-btn-ghost clinic-btn-sm flex items-center gap-1.5 text-[11px]"
             onClick={() => setShowAuth(true)}
           >
             <LogIn size={13} />
