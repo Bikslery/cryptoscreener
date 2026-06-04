@@ -32,17 +32,34 @@ export default function AuthModal() {
     return () => stopPolling()
   }, [])
 
+  const POLL_MAX_ATTEMPTS = 100 // 5 minutes at 3s intervals
+  let pollAttempts = 0
+
   const startPolling = () => {
     stopPolling()
+    pollAttempts = 0
     pollRef.current = setInterval(async () => {
+      pollAttempts++
+      if (pollAttempts > POLL_MAX_ATTEMPTS) {
+        stopPolling()
+        setError('Время ожидания истекло. Обновите страницу и попробуйте снова.')
+        return
+      }
       try {
         const res = await api.get('/auth/telegram-status')
         if (res.data.telegramVerified) {
           stopPolling()
+          // Activate the user session with verified Telegram status
+          const pending = sessionStorage.getItem('pendingUser')
+          if (pending) {
+            const user = JSON.parse(pending)
+            setUser({ ...user, telegramVerified: true })
+            sessionStorage.removeItem('pendingUser')
+          }
           setStep('success')
         }
       } catch {
-        // ignore
+        // ignore network errors, keep polling
       }
     }, 3000)
   }
@@ -67,10 +84,14 @@ export default function AuthModal() {
     setLoading(true)
     try {
       const res = await api.post('/auth/register', { username, password })
-      setUser(res.data.user)
-      // After registration — need to bind Telegram
-      const statusRes = await api.get('/auth/telegram-status')
-      setTelegramLink(statusRes.data.telegramLink)
+      // Don't call setUser yet — stay in AuthModal until Telegram is bound
+      sessionStorage.setItem('pendingUser', JSON.stringify(res.data.user))
+      try {
+        const statusRes = await api.get('/auth/telegram-status')
+        setTelegramLink(statusRes.data.telegramLink)
+      } catch {
+        // Non-fatal: polling will retry and get a fresh link
+      }
       setStep('telegram')
       startPolling()
     } catch (err: any) {
@@ -98,25 +119,19 @@ export default function AuthModal() {
     }
   }
 
-  const handleSuccess = () => {
-    setStep('form')
-    setTab('login')
-    setUsername('')
-    setPassword('')
-    setPassword2('')
-    setError('')
-  }
-
   return (
     <div className="w-full h-full flex items-center justify-center bg-[#0a0a0a]">
       <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-8 w-full max-w-md">
 
-        {/* --- Telegram bind screen --- */}
+        {/* --- Telegram bind screen (non-closable, mandatory) --- */}
         {step === 'telegram' && (
           <div className="text-center">
             <h2 className="text-xl font-bold text-white mb-4">Привяжите Telegram</h2>
-            <p className="text-zinc-400 mb-6">
+            <p className="text-zinc-400 mb-2">
               Для завершения регистрации необходимо привязать Telegram-аккаунт
+            </p>
+            <p className="text-zinc-500 text-sm mb-6">
+              Нажмите кнопку ниже, откройте бота и напишите <code className="text-blue-400">/start</code>
             </p>
             <a
               href={telegramLink}
@@ -137,15 +152,9 @@ export default function AuthModal() {
         {step === 'success' && (
           <div className="text-center">
             <h2 className="text-xl font-bold text-green-400 mb-4">Регистрация завершена!</h2>
-            <p className="text-zinc-400 mb-6">
-              Вы успешно зарегистрировались. Теперь можно войти.
+            <p className="text-zinc-400">
+              Telegram успешно привязан. Переходим в приложение...
             </p>
-            <button
-              onClick={handleSuccess}
-              className="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-3 rounded-lg transition"
-            >
-              Войти
-            </button>
           </div>
         )}
 

@@ -3,7 +3,7 @@ import { prisma } from '../../db/index.js'
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`
 
-export const TELEGRAM_BOT_USERNAME = 'ScalpBoardBot' // Update if different
+export const TELEGRAM_BOT_USERNAME = 'clinic_screenerbot'
 
 export async function sendTelegramMessage(chatId: string, text: string) {
   try {
@@ -50,25 +50,32 @@ export async function handleUpdate(update: any) {
     if (args.startsWith('bind_')) {
       const userId = args.replace('bind_', '')
       try {
+        const user = await prisma.user.findUnique({ where: { id: userId }, select: { telegramVerified: true } })
+        if (!user) {
+          await sendTelegramMessage(chatId, '❌ Пользователь не найден.')
+          return
+        }
+        if (user.telegramVerified) {
+          await sendTelegramMessage(chatId, 'ℹ️ Этот аккаунт уже привязан к Telegram.')
+          return
+        }
         await prisma.user.update({
           where: { id: userId },
           data: { telegramChatId: chatId, telegramVerified: true },
         })
-        await sendTelegramMessage(chatId, '✅ Telegram успешно привязан к вашему аккаунту ScalpBoard!')
+        await sendTelegramMessage(chatId, '✅ Telegram успешно привязан к вашему аккаунту!')
       } catch (err) {
         await sendTelegramMessage(chatId, '❌ Не удалось привязать аккаунт. Попробуйте снова или обратитесь в поддержку.')
       }
     } else {
       await sendTelegramMessage(
         chatId,
-        `👋 Добро пожаловать в ScalpBoard Bot!\n\n` +
-        `Для привязки аккаунта:\n` +
-        `1. Авторизуйтесь на сайте scalpboard.io\n` +
-        `2. Перейдите в профиль и нажмите «Привязать Telegram»\n\n` +
-        `Вы будете получать уведомления о:\n` +
-        `• Пересечении ценовых уровней\n` +
-        `• Резких импульсах рынка\n` +
-        `• Новых листингах`
+        `👋 Добро пожаловать в Crypto Screener Bot!\n\n` +
+        `Для привязки аккаунта зарегистрируйтесь на сайте — ссылка для привязки появится автоматически.\n\n` +
+        `Уведомления:\n` +
+        `• Пересечение ценовых уровней\n` +
+        `• Резкие импульсы рынка\n` +
+        `• Новые листинги`
       )
     }
   }

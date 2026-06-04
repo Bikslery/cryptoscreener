@@ -92,7 +92,7 @@ router.get('/telegram-status', authMiddleware, async (req, res) => {
     res.status(404).json({ error: 'User not found' })
     return
   }
-  const telegramLink = `https://t.me/ScalpBoardBot?start=bind_${user.id}`
+  const telegramLink = `https://t.me/clinic_screenerbot?start=bind_${user.id}`
   res.json({ telegramVerified: user.telegramVerified, telegramLink })
 })
 
