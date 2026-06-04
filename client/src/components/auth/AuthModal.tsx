@@ -49,13 +49,6 @@ export default function AuthModal() {
         const res = await api.get('/auth/telegram-status')
         if (res.data.telegramVerified) {
           stopPolling()
-          // Activate the user session with verified Telegram status
-          const pending = sessionStorage.getItem('pendingUser')
-          if (pending) {
-            const user = JSON.parse(pending)
-            setUser({ ...user, telegramVerified: true })
-            sessionStorage.removeItem('pendingUser')
-          }
           setStep('success')
         }
       } catch {
@@ -151,10 +144,20 @@ export default function AuthModal() {
         {/* --- Success screen --- */}
         {step === 'success' && (
           <div className="text-center">
-            <h2 className="text-xl font-bold text-green-400 mb-4">Регистрация завершена!</h2>
-            <p className="text-zinc-400">
-              Telegram успешно привязан. Переходим в приложение...
-            </p>
+            <h2 className="text-xl font-bold text-green-400 mb-4">Вы успешно создали аккаунт</h2>
+            <p className="text-zinc-400 mb-6">Приятного пользования.</p>
+            <button
+              onClick={() => {
+                const pending = sessionStorage.getItem('pendingUser')
+                if (pending) {
+                  setUser({ ...JSON.parse(pending), telegramVerified: true })
+                  sessionStorage.removeItem('pendingUser')
+                }
+              }}
+              className="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-3 rounded-lg transition"
+            >
+              Войти
+            </button>
           </div>
         )}
 
