@@ -53,12 +53,7 @@ router.post('/login', async (req, res) => {
     res.status(401).json({ error: 'Invalid credentials' })
     return
   }
-  if (!user.telegramVerified) {
-    const link = `https://t.me/ScalpBoardBot?start=bind_${user.id}`
-    res.status(403).json({ error: 'Telegram not linked', telegramLink: link })
-    return
-  }
-  const token = generateToken({ userId: user.id, username: user.username })
+  const token = generateToken
   setAuthCookie(res, token)
   res.json({
     user: { id: user.id, username: user.username, telegramVerified: user.telegramVerified },

@@ -92,14 +92,7 @@ export default function AuthModal() {
       setPassword('')
     } catch (err: any) {
       const data = err.response?.data
-      if (err.response?.status === 403 && data?.telegramLink) {
-        setError('Telegram not linked. Please link it first.')
-        setTelegramLink(data.telegramLink)
-        setStep('telegram')
-        startPolling()
-      } else {
-        setError(data?.error || 'Login failed')
-      }
+      setError(data?.error || 'Login failed')
     } finally {
       setLoading(false)
     }

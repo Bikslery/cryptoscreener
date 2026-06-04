@@ -52,7 +52,7 @@ export async function handleUpdate(update: any) {
       try {
         await prisma.user.update({
           where: { id: userId },
-          data: { telegramChatId: chatId },
+          data: { telegramChatId: chatId, telegramVerified: true },
         })
         await sendTelegramMessage(chatId, '✅ Telegram успешно привязан к вашему аккаунту ScalpBoard!')
       } catch (err) {
