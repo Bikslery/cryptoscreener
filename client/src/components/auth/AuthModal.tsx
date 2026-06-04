@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAuthStore } from '../../store'
 import api from '../../services/api'
+import CursorGlow from '../effects/CursorGlow'
+import Particles from '../effects/Particles'
+import './AuthModal.css'
 
 type Tab = 'login' | 'register'
 type Step = 'form' | 'telegram' | 'success'
@@ -113,39 +116,42 @@ export default function AuthModal() {
   }
 
   return (
-    <div className="w-full h-full flex items-center justify-center bg-[#0a0a0a]">
-      <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-8 w-full max-w-md">
+    <div className="auth-page">
+      <Particles style="white" />
+      <CursorGlow />
+
+      <div className="auth-card">
 
         {/* --- Telegram bind screen (non-closable, mandatory) --- */}
         {step === 'telegram' && (
-          <div className="text-center">
-            <h2 className="text-xl font-bold text-white mb-4">Привяжите Telegram</h2>
-            <p className="text-zinc-400 mb-2">
+          <div className="auth-step-enter">
+            <div className="auth-heading">Привяжите Telegram</div>
+            <p className="auth-telegram-text">
               Для завершения регистрации необходимо привязать Telegram-аккаунт
             </p>
-            <p className="text-zinc-500 text-sm mb-6">
-              Нажмите кнопку ниже, откройте бота и напишите <code className="text-blue-400">/start</code>
+            <p className="auth-telegram-hint">
+              Нажмите кнопку ниже, откройте бота и напишите <code>/start</code>
             </p>
             <a
               href={telegramLink}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-block bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-3 rounded-lg transition mb-4"
+              className="auth-telegram-link"
             >
               Открыть Telegram
             </a>
-            <p className="text-zinc-500 text-sm">
+            <p className="auth-polling-text">
               Ожидание подтверждения привязки...
             </p>
-            {error && <p className="text-red-400 text-sm mt-2">{error}</p>}
+            {error && <div className="auth-error" style={{ marginTop: '1rem' }}>{error}</div>}
           </div>
         )}
 
         {/* --- Success screen --- */}
         {step === 'success' && (
-          <div className="text-center">
-            <h2 className="text-xl font-bold text-green-400 mb-4">Вы успешно создали аккаунт</h2>
-            <p className="text-zinc-400 mb-6">Приятного пользования.</p>
+          <div className="auth-step-enter">
+            <div className="auth-success-heading">Вы успешно создали аккаунт</div>
+            <p className="auth-success-text">Приятного пользования.</p>
             <button
               onClick={() => {
                 const pending = sessionStorage.getItem('pendingUser')
@@ -154,73 +160,67 @@ export default function AuthModal() {
                   sessionStorage.removeItem('pendingUser')
                 }
               }}
-              className="bg-blue-600 hover:bg-blue-500 text-white font-semibold px-6 py-3 rounded-lg transition"
+              className="auth-btn"
             >
-              Войти
+              войти()
             </button>
           </div>
         )}
 
         {/* --- Login / Register form --- */}
         {step === 'form' && (
-          <>
+          <div className="auth-step-enter">
+            <div className="auth-heading">с возвращением</div>
+            <div className="auth-subtitle">войдите в систему для продолжения</div>
+
             {/* Tabs */}
-            <div className="flex mb-6 border-b border-zinc-700">
+            <div className="auth-tabs">
               <button
                 onClick={() => { setTab('login'); setError('') }}
-                className={`flex-1 pb-3 text-sm font-semibold transition ${
-                  tab === 'login' ? 'text-white border-b-2 border-blue-500' : 'text-zinc-500 hover:text-zinc-300'
-                }`}
+                className={`auth-tab ${tab === 'login' ? 'active' : ''}`}
               >
                 Вход
               </button>
               <button
                 onClick={() => { setTab('register'); setError('') }}
-                className={`flex-1 pb-3 text-sm font-semibold transition ${
-                  tab === 'register' ? 'text-white border-b-2 border-blue-500' : 'text-zinc-500 hover:text-zinc-300'
-                }`}
+                className={`auth-tab ${tab === 'register' ? 'active' : ''}`}
               >
                 Регистрация
               </button>
             </div>
 
-            {error && (
-              <p className="text-red-400 text-sm mb-4">{error}</p>
-            )}
+            {error && <div className="auth-error">{error}</div>}
 
-            <form onSubmit={tab === 'login' ? handleLogin : handleRegister}>
-              <div className="mb-4">
-                <label className="block text-zinc-400 text-sm mb-1">Логин</label>
+            <form onSubmit={tab === 'login' ? handleLogin : handleRegister} className="auth-form">
+              <div className="auth-field">
+                <label>Логин</label>
                 <input
                   type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500"
-                  placeholder="username"
+                  placeholder="$ логин"
                   autoFocus
                 />
               </div>
 
-              <div className="mb-4">
-                <label className="block text-zinc-400 text-sm mb-1">Пароль</label>
+              <div className="auth-field">
+                <label>Пароль</label>
                 <input
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500"
-                  placeholder="••••••"
+                  placeholder="$ пароль"
                 />
               </div>
 
               {tab === 'register' && (
-                <div className="mb-4">
-                  <label className="block text-zinc-400 text-sm mb-1">Повторите пароль</label>
+                <div className="auth-field">
+                  <label>Повторите пароль</label>
                   <input
                     type="password"
                     value={password2}
                     onChange={(e) => setPassword2(e.target.value)}
-                    className="w-full bg-zinc-800 border border-zinc-600 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500"
-                    placeholder="••••••"
+                    placeholder="$ пароль"
                   />
                 </div>
               )}
@@ -228,12 +228,12 @@ export default function AuthModal() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold py-2.5 rounded-lg transition"
+                className="auth-btn"
               >
-                {loading ? '...' : tab === 'login' ? 'Войти' : 'Зарегистрироваться'}
+                {loading ? '...' : tab === 'login' ? 'войти()' : 'зарегистрироваться()'}
               </button>
             </form>
-          </>
+          </div>
         )}
       </div>
     </div>
