@@ -32,12 +32,12 @@ export function TopBar() {
 
   return (
     <div
-      className="flex items-center justify-between gap-3 px-4 h-[48px] bg-[#0e0e0e] border-b border-[#1f1f1f] flex-shrink-0 select-none overflow-x-auto"
+      className="flex items-center justify-between gap-3 px-[15px] h-[48px] bg-[#0e0e0e] border-b border-[#1f1f1f] flex-shrink-0 select-none overflow-x-auto"
       style={{ fontFamily: "'JetBrains Mono', monospace" }}
     >
       {/* Лево: логотип */}
       <div className="flex items-center gap-2 shrink-0">
-        <span className="font-bold text-[13px] text-white tracking-tight">.clinic</span>
+        <span className="font-bold text-[13px] text-white tracking-tight">serotonin.clinic</span>
       </div>
 
       {/* Центр: таймфреймы + пагинация */}
