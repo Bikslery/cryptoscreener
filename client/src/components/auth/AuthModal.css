@@ -238,6 +238,21 @@
   margin-top: 1rem;
 }
 
+/* ── Telegram bind error ── */
+
+.auth-bind-error {
+  margin-top: 1.2rem;
+  text-align: center;
+}
+
+.auth-bind-error-text {
+  color: #ff6b6b;
+  margin-bottom: 0.8rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  text-shadow: 0 0 8px rgba(255, 107, 107, 0.2);
+}
+
 /* ── Success step ── */
 
 .auth-success-heading {

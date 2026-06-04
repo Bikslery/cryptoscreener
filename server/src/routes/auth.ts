@@ -86,14 +86,14 @@ router.get('/telegram-status', authMiddleware, async (req, res) => {
   const { userId } = (req as any).user
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { telegramVerified: true, id: true },
+    select: { telegramVerified: true, id: true, telegramBindError: true },
   })
   if (!user) {
     res.status(404).json({ error: 'User not found' })
     return
   }
   const telegramLink = `https://t.me/clinic_screenerbot?start=bind_${user.id}`
-  res.json({ telegramVerified: user.telegramVerified, telegramLink })
+  res.json({ telegramVerified: user.telegramVerified, telegramLink, telegramBindError: user.telegramBindError })
 })
 
 export default router

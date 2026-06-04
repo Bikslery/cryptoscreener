@@ -22,6 +22,7 @@ export default function AuthModal() {
 
   // Telegram polling
   const [telegramLink, setTelegramLink] = useState('')
+  const [bindError, setBindError] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const stopPolling = () => {
@@ -40,6 +41,7 @@ export default function AuthModal() {
 
   const startPolling = () => {
     stopPolling()
+    setBindError('')
     pollAttempts = 0
     pollRef.current = setInterval(async () => {
       pollAttempts++
@@ -50,6 +52,11 @@ export default function AuthModal() {
       }
       try {
         const res = await api.get('/auth/telegram-status')
+        if (res.data.telegramBindError) {
+          stopPolling()
+          setBindError(res.data.telegramBindError)
+          return
+        }
         if (res.data.telegramVerified) {
           stopPolling()
           setStep('success')
@@ -140,10 +147,26 @@ export default function AuthModal() {
             >
               Открыть Telegram
             </a>
-            <p className="auth-polling-text">
-              Ожидание подтверждения привязки...
-            </p>
-            {error && <div className="auth-error" style={{ marginTop: '1rem' }}>{error}</div>}
+            {!bindError && (
+              <p className="auth-polling-text">
+                Ожидание подтверждения привязки...
+              </p>
+            )}
+            {bindError && (
+              <div className="auth-bind-error">
+                <div className="auth-bind-error-text">{bindError}</div>
+                <button
+                  onClick={() => {
+                    setBindError('')
+                    startPolling()
+                  }}
+                  className="auth-btn"
+                >
+                  Попробовать с другим Telegram
+                </button>
+              </div>
+            )}
+            {error && !bindError && <div className="auth-error" style={{ marginTop: '1rem' }}>{error}</div>}
           </div>
         )}
 
