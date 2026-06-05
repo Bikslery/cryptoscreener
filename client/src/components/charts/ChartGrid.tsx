@@ -3,7 +3,6 @@ import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeri
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore, useLivePrice, setLivePrice } from '../../store'
 import { useShallow } from 'zustand/shallow'
-import { debounce } from '../../utils/debounce'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import type { Timeframe, UnifiedCandle, Exchange } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
@@ -274,13 +273,14 @@ function useLazyScroll(
   adjustingRef: React.RefObject<boolean>,
   setIsLoadingMore?: (loading: boolean) => void,
   lifecycleRef?: React.RefObject<CandleLifecycle | null>,
-) {
+  ) {
   const inflightRef = useRef(false)
   const reachedStartRef = useRef(false)
   const symbolRef = useRef(symbol)
   const exchangeRef = useRef(exchange)
   const tfRef = useRef(tf)
   const emptyCountRef = useRef(0)
+  const prefetchInflightRef = useRef(false)
 
   useEffect(() => {
     symbolRef.current = symbol
@@ -290,19 +290,48 @@ function useLazyScroll(
     inflightRef.current = false
     adjustingRef.current = false
     emptyCountRef.current = 0
+    prefetchInflightRef.current = false
   }, [symbol, exchange, tf])
 
-  // Bug 3: debounce onRange — avoid dozens of redundant checks per second during fast scroll
-  const onRangeDebounced = useMemo(
-    () => debounce((range: { from: number; to: number } | null) => {
+  // Throttle instead of debounce: first call fires immediately (no delay),
+  // subsequent calls within 100ms are suppressed but the last one is replayed.
+  // This prevents both "empty space on fast scroll" (debounce too late)
+  // and "dozens of redundant checks" (no throttle at all).
+  const onRange = useMemo(() => {
+    let lastCallTime = 0
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null
+    let pendingRange: { from: number; to: number } | null = null
+
+    const fire = (range: { from: number; to: number } | null) => {
       if (!range || adjustingRef.current || inflightRef.current || reachedStartRef.current) return
 
-      // Dynamic threshold: start loading when approaching edge
-      // Bug 1a: use 60% of visible range or minimum 300 bars (was 30%/100)
       const visibleBars = range.to - range.from
-      const threshold = Math.max(300, visibleBars * 0.6)
 
-      if (range.from > threshold) return
+      // --- PREFETCH LAYER ---
+      // When user is approaching the edge (within 1.5× visible range),
+      // start prefetching into the cache BEFORE they actually need it.
+      // This is fire-and-forget — no chart redraw, just warming the cache.
+      const prefetchThreshold = Math.max(200, visibleBars * 1.5)
+      if (range.from < prefetchThreshold && !prefetchInflightRef.current) {
+        const curSymbol = symbolRef.current
+        const curExchange = exchangeRef.current
+        const curTf = tfRef.current
+        if (curExchange) {
+          const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
+          if (cached && cached.length > 0) {
+            prefetchInflightRef.current = true
+            getOrFetchOlder(curSymbol, curTf, cached[0].time, 1000)
+              .catch(() => {})
+              .finally(() => { prefetchInflightRef.current = false })
+          }
+        }
+      }
+
+      // --- LOAD LAYER ---
+      // Trigger actual chart data load when closer to the edge
+      const loadThreshold = Math.max(150, visibleBars * 0.8)
+
+      if (range.from > loadThreshold) return
 
       const curSymbol = symbolRef.current
       const curExchange = exchangeRef.current
@@ -317,8 +346,7 @@ function useLazyScroll(
       inflightRef.current = true
       setIsLoadingMore?.(true)
 
-      // Bug 1c: clamp visible range during inflight — prevents scrolling into empty space
-      // while older data is being fetched
+      // Clamp visible range during inflight — prevents scrolling into empty space
       {
         const ts = chartRef.current?.timeScale()
         const curRange = ts?.getVisibleLogicalRange()
@@ -346,7 +374,6 @@ function useLazyScroll(
 
           // Filter out candles we already have (time >= before)
           const newCandles = older.filter(c => c.time < before)
-
           if (newCandles.length === 0) {
             emptyCountRef.current++
             if (emptyCountRef.current >= 3) {
@@ -426,27 +453,8 @@ function useLazyScroll(
           }
           inflightRef.current = false
           setIsLoadingMore?.(false)
-
-          // Bug 1b: prefetch next page proactively if still near the edge
-          // This reduces the "empty space" window on continuous fast scroll
-          {
-            const ts = chartRef.current?.timeScale()
-            const curRange = ts?.getVisibleLogicalRange()
-            if (ts && curRange && !reachedStartRef.current && curExchange) {
-              const vis = curRange.to - curRange.from
-              if (curRange.from < vis * 0.6) {
-                const newCached = candleCache.getCandles(curExchange, curSymbol, curTf)
-                if (newCached && newCached.length > 0) {
-                  // Fire-and-forget: warm the cache for the next scroll trigger
-                  getOrFetchOlder(curSymbol, curTf, newCached[0].time, 1000).catch(() => {})
-                }
-              }
-            }
-          }
         })
         .catch((err: Error & { isNetworkError?: boolean }) => {
-          // Bug 4: don't increment emptyCountRef on network/server errors
-          // Only truly empty responses (HTTP 200 + []) count toward the 3-strike limit
           if (!err?.isNetworkError) {
             emptyCountRef.current++
             if (emptyCountRef.current >= 3) {
@@ -456,9 +464,30 @@ function useLazyScroll(
           inflightRef.current = false
           setIsLoadingMore?.(false)
         })
-    }, 50),
-    [] // stable — reads refs, no reactive deps needed
-  )
+    }
+
+    const throttled = (range: { from: number; to: number } | null) => {
+      if (!range) { fire(null); return }
+      const now = Date.now()
+      if (now - lastCallTime >= 100) {
+        lastCallTime = now
+        if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null }
+        fire(range)
+      } else {
+        pendingRange = range
+        if (!pendingTimer) {
+          pendingTimer = setTimeout(() => {
+            pendingTimer = null
+            lastCallTime = Date.now()
+            fire(pendingRange)
+            pendingRange = null
+          }, 100 - (now - lastCallTime))
+        }
+      }
+    }
+
+    return throttled
+  }, [])
 
   useEffect(() => {
     if (isInitialLoading) return
@@ -466,10 +495,10 @@ function useLazyScroll(
     if (!chart) return
     const ts = chart.timeScale()
 
-    ts.subscribeVisibleLogicalRangeChange(onRangeDebounced)
-    return () => { ts.unsubscribeVisibleLogicalRangeChange(onRangeDebounced) }
-  }, [symbol, tf, isInitialLoading, onRangeDebounced])
-}
+    ts.subscribeVisibleLogicalRangeChange(onRange)
+    return () => { ts.unsubscribeVisibleLogicalRangeChange(onRange) }
+  }, [symbol, tf, isInitialLoading, onRange])
+  }
 
 function useLiveIndicator(
   lastUpdateRef: React.RefObject<number>
@@ -785,37 +814,38 @@ const MiniChart = memo(function MiniChart({
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 300 }, lastUpdateRef, lifecycleRef)
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 500 }, lastUpdateRef, lifecycleRef)
 
-useEffect(() => {
+  const adjustingRef = useRef(false)
+
+  useEffect(() => {
     if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
   }, [isInitialLoading, symbol, tf, onLoaded])
 
-  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
-  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, undefined, lastUpdateRef)
-
-
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, lifecycleRef)
 
   return (
-    <div
-      className={`relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px] transition-all duration-300 ease-out ${
-        visible ? 'opacity-100 scale-100' : 'opacity-0 scale-[0.99]'
-      }`}
-    >
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
-        <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-          {extractBaseAsset(symbol)}
-        </span>
-      </div>
-      <MiniChartHeader symbol={symbol} />
-      <div ref={containerRef} className="relative z-0 flex-1 min-h-0">
-        {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
-        {isStale && <StaleDataOverlay visible={true} />}
-      </div>
-      {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
-      {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
+  <div
+    className={`relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px] transition-all duration-300 ease-out ${
+      visible ? 'opacity-100 scale-100' : 'opacity-0 scale-[0.99]'
+    }`}
+  >
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
+      <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+        {extractBaseAsset(symbol)}
+      </span>
     </div>
-  )
+    <MiniChartHeader symbol={symbol} />
+    <div ref={containerRef} className="relative z-0 flex-1 min-h-0">
+      {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
+      {isStale && <StaleDataOverlay visible={true} />}
+    </div>
+    {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
+    {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
+  </div>
+)
 })
 
 type RangeSelection = {
