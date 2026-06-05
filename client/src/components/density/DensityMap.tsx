@@ -38,8 +38,6 @@ export function DensityMap() {
   const [cells, setCells] = useState<DensityCell[]>([])
   const [thresholdPct, setThresholdPct] = useState<1 | 2>(1)
   const pendingCellsRef = useRef<DensityCell[]>([])
-  const prevSymbolsRef = useRef<Set<string>>(new Set())
-
   const flushCells = useMemo(() => debounce(() => {
     setCells(pendingCellsRef.current)
   }, 200), [])
