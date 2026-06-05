@@ -33,10 +33,6 @@ function sortCoins(coins: UnifiedTicker[], sortBy: keyof UnifiedTicker, sortDir:
   })
 }
 
-function sameTop9(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false
-  return a.every((x, i) => x === b[i])
-}
 
 function buildCoinMap(coins: UnifiedTicker[]): Map<string, UnifiedTicker> {
   const m = new Map<string, UnifiedTicker>()
@@ -70,8 +66,6 @@ interface CoinListStore {
   init: () => () => void
 }
 
-let prevTopSymbols: string[] = []
-
 function filterByExchange(coins: UnifiedTicker[], fe: FilterExchange): UnifiedTicker[] {
   if (fe === 'all') return coins
   return coins.filter(c => c.exchange.includes(fe))
@@ -83,9 +77,7 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
   const pageCount = Math.max(1, Math.ceil(sorted.length / 9))
   const safePage = Math.min(Math.max(0, state.pageIndex), pageCount - 1)
   const start = safePage * 9
-  const newTop = sorted.slice(start, start + 9).map(c => c.symbol)
-  console.log('[recompute] newTop:', JSON.stringify(newTop), 'prevTop:', JSON.stringify(prevTopSymbols), 'same:', sameTop9(newTop, prevTopSymbols), 'sortBy:', state.sortBy, 'sortDir:', state.sortDir)
-  const topChartSymbols = sameTop9(newTop, prevTopSymbols) ? prevTopSymbols : (prevTopSymbols = newTop)
+  const topChartSymbols = sorted.slice(start, start + 9).map(c => c.symbol)
   return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), topChartSymbols, pageCount, pageIndex: safePage }
 }
 
