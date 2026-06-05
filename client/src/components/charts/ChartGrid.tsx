@@ -1423,8 +1423,17 @@ export function ChartGrid() {
     getOrFetchBulk(topSymbols, tf, 300)
   }, [topSymbols, tf])
 
+  // Only remove entries for symbols that are no longer in topSymbols.
+  // Preserves loaded state for symbols that just moved position (no re-fetch needed).
   useEffect(() => {
-    setLoadedSet(new Set())
+    const currentSet = new Set(topSymbols.map(s => `${tf}:${s}`))
+    setLoadedSet(prev => {
+      const next = new Set<string>()
+      for (const key of prev) {
+        if (currentSet.has(key)) next.add(key)
+      }
+      return next
+    })
   }, [topSymbols, tf])
 
   const handleLoaded = useCallback((loadKey: string) => {
