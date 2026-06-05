@@ -1,8 +1,16 @@
 import jwt from 'jsonwebtoken'
 import type { Request, Response, NextFunction } from 'express'
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production'
-const RESET_JWT_SECRET = process.env.RESET_JWT_SECRET || 'change-me-reset-secret'
+const JWT_SECRET = process.env.JWT_SECRET || (
+  process.env.NODE_ENV === 'production'
+    ? (() => { throw new Error('JWT_SECRET env var is required in production') })()
+    : 'change-me-in-production'
+)
+const RESET_JWT_SECRET = process.env.RESET_JWT_SECRET || (
+  process.env.NODE_ENV === 'production'
+    ? (() => { throw new Error('RESET_JWT_SECRET env var is required in production') })()
+    : 'change-me-reset-secret'
+)
 const COOKIE_NAME = 'token'
 const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000 // 7 days in ms
 const REFRESH_THRESHOLD = 24 * 60 * 60 * 1000 // refresh if < 1 day left

@@ -12,6 +12,7 @@ export function startAlertEngine() {
     try {
       const activeAlerts = await prisma.alert.findMany({
         where: { active: true, muted: false },
+        take: 500,
       })
 
       const tickers = getTickers()
@@ -36,8 +37,26 @@ export function startAlertEngine() {
           const matchingTickers = tickers.filter(t =>
             Math.abs(t.change24h) >= impulseCond.percent
           )
-          for (const ticker of matchingTickers) {
-            await fireAlert(alert, ticker.price, ticker.symbol, ticker.pricePrecision)
+          // Batch: fire once per alert, include all matching symbols
+          // Instead of N separate prisma updates + broadcasts per ticker
+          if (matchingTickers.length > 0) {
+            await fireAlert(alert, matchingTickers[0].price, matchingTickers[0].symbol, matchingTickers[0].pricePrecision)
+            // Send additional symbols as separate broadcast events (no extra prisma writes)
+            for (let i = 1; i < Math.min(matchingTickers.length, 10); i++) {
+              const t = matchingTickers[i]
+              broadcast({
+                type: 'alert',
+                data: {
+                  id: alert.id,
+                  type: alert.type,
+                  symbol: t.symbol,
+                  exchange: alert.exchange,
+                  price: t.price,
+                  condition: JSON.parse(alert.condition),
+                  triggeredAt: Date.now(),
+                },
+              })
+            }
           }
         }
       }

@@ -144,6 +144,8 @@ function setupWsSubscriptions(
   console.log(`[Preload] WS subscriptions set up for ${topSymbols.length} symbols on ${WS_TFS.join('/')}`)
 }
 
+let periodicRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
 function periodicRefresh(
   topSymbols: string[],
   adapters: ExchangeAdapter[]
@@ -175,10 +177,10 @@ function periodicRefresh(
     preloadStats.lastRefreshAt = Date.now()
     preloadStats.refreshCount++
     console.log('[Preload] Periodic refresh complete')
-    setTimeout(doRefresh, PERIODIC_REFRESH_INTERVAL)
+    periodicRefreshTimer = setTimeout(doRefresh, PERIODIC_REFRESH_INTERVAL)
   }
 
-  setTimeout(doRefresh, PERIODIC_REFRESH_INTERVAL)
+  periodicRefreshTimer = setTimeout(doRefresh, PERIODIC_REFRESH_INTERVAL)
 }
 
 export async function startPreload(

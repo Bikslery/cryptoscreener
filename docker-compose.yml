@@ -4,29 +4,42 @@ services:
     environment:
       POSTGRES_DB: cryptoscreener
       POSTGRES_USER: screener
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-screener_pass}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U screener -d cryptoscreener"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
+    command: redis-server --appendonly yes
     volumes:
       - redisdata:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   server:
     build: ./server
     environment:
-      DATABASE_URL: postgresql://screener:${POSTGRES_PASSWORD:-screener_pass}@postgres:5432/cryptoscreener
+      DATABASE_URL: postgresql://screener:${POSTGRES_PASSWORD}@postgres:5432/cryptoscreener
       REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       PORT: 3001
       ROLE: all
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   client:

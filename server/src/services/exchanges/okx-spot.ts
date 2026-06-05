@@ -2,6 +2,7 @@ import WebSocket from 'ws'
 import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } from './types.js'
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
+import { fetchWithTimeout } from '../../utils/fetch.js'
 
 export class OkxSpotAdapter implements ExchangeAdapter {
   name = 'OKX Spot'
@@ -15,6 +16,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private precisionMap = new Map<string, number>()
+  private intentionalClose = false
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
@@ -52,7 +54,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
 
   private async fetchInstruments() {
     try {
-      const res = await fetch('https://www.okx.com/api/v5/public/instruments?instType=SPOT')
+      const res = await fetchWithTimeout('https://www.okx.com/api/v5/public/instruments?instType=SPOT')
       const json = await res.json()
       if (json.code !== '0' || !json.data) return
       for (const inst of json.data) {
@@ -78,6 +80,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
       symbol,
       exchange: this.exchange,
       price,
+      openPrice24h: open,
       change24h: open > 0 ? ((price - open) / open) * 100 : 0,
       high24h: parseFloat(d.high24h),
       low24h: parseFloat(d.low24h),
@@ -134,6 +137,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
   }
 
   disconnect() {
+    this.intentionalClose = true
     this.ws?.close()
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     if (this.pingTimer) clearInterval(this.pingTimer)
@@ -144,7 +148,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
     const barMap: Record<string, string> = { '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1H', '4h': '4H', '1d': '1D', '1w': '1W' }
     const bar = barMap[tf] || '1m'
     const url = `https://www.okx.com/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`
-    const res = await fetch(url)
+    const res = await fetchWithTimeout(url)
     const json = await res.json()
     if (json.code !== '0' || !json.data) return []
     return json.data.map((k: any[]) => ({
@@ -163,7 +167,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
     const instId = symbol.replace(/USDT$/, '-USDT')
     const url = `https://www.okx.com/api/v5/market/books?instId=${instId}&sz=${limit}`
-    const res = await fetch(url)
+    const res = await fetchWithTimeout(url)
     const json = await res.json()
     if (json.code !== '0' || !json.data?.[0]) {
       return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() }
@@ -179,6 +183,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
   }
 
   private scheduleReconnect() {
+    if (this.intentionalClose) return
     if (this.reconnectTimer) return
     if (this.pingTimer) clearInterval(this.pingTimer)
     this.reconnectTimer = setTimeout(() => {

@@ -140,6 +140,17 @@ const BUDGET_FILL_RATIO = 0.8
 
 const localBudgets = new Map<string, number>()
 
+// Evict stale local budget entries every 2 minutes
+setInterval(() => {
+  const currentBucket = Math.floor(Date.now() / BUDGET_WINDOW_MS)
+  for (const [key] of localBudgets) {
+    const bucket = parseInt(key.split(':')[1], 10)
+    if (!isNaN(bucket) && currentBucket - bucket > 2) {
+      localBudgets.delete(key)
+    }
+  }
+}, 120_000)
+
 function budgetKey(ipIndex: number): string {
   const minuteBucket = Math.floor(Date.now() / BUDGET_WINDOW_MS)
   return `${BUDGET_KEY_PREFIX}${ipIndex}:${minuteBucket}`

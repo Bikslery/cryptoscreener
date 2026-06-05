@@ -218,7 +218,14 @@ function getOrFetchChunk(
 
   const promise = (async () => {
     try {
-      return await fetchAndCacheChunk(chunkKey, symbol, tf, chunkStartMs, exchange)
+      // Timeout wrapper: if fetch takes > 30s, resolve with empty
+      const result = await Promise.race([
+        fetchAndCacheChunk(chunkKey, symbol, tf, chunkStartMs, exchange),
+        new Promise<UnifiedCandle[]>((resolve) =>
+          setTimeout(() => { console.warn(`[History] Chunk fetch timeout: ${chunkKey}`); resolve([]) }, 30000)
+        ),
+      ])
+      return result
     } finally {
       inflightChunks.delete(chunkKey)
     }

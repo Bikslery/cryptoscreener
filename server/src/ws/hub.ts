@@ -206,6 +206,13 @@ export function setupWsHub(wss: WebSocketServer) {
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString()) as WsMessage
+
+        // Support auth via first WS message (avoids token in URL which gets logged)
+        if (msg.type === 'auth' && msg.token && !client.user) {
+          client.user = verifyToken(msg.token as string)
+          return
+        }
+
         if (msg.type === 'subscribe' && msg.channel) {
           const isNew = !client.subscriptions.has(msg.channel)
           client.subscriptions.add(msg.channel)
@@ -279,6 +286,11 @@ export function broadcast(msg: WsMessage) {
 
     if (msg.type === 'ticker') {
       const tickers = msg.data as UnifiedTicker[]
+      const fullTickers = msg.full as UnifiedTicker[] | undefined
+
+      // For global subscribers: send full array once (not delta)
+      // For per-client: filter from full array
+      const sourceForAll = fullTickers || tickers
 
       // Serialization cache: group by ticker signature
       const sigCache = new Map<string, string>()
@@ -293,16 +305,18 @@ export function broadcast(msg: WsMessage) {
         }
 
         if (client.tickerSymbols.size === 0) {
-          // Subscribed to all tickers — same payload for everyone
-          if (fullRaw === null) fullRaw = raw
+          // Subscribed to all tickers — send full array for state merge
+          if (fullRaw === null) {
+            fullRaw = JSON.stringify({ type: 'ticker', data: sourceForAll })
+          }
           client.ws.send(fullRaw, (err) => { if (err) client.buffered++ })
           sentCount++
         } else {
-          // Per-client filtered tickers — cache by signature
+          // Per-client filtered tickers — filter from full array, cache by signature
           const sig = [...client.tickerSymbols].sort().join(',')
           let cached = sigCache.get(sig)
           if (cached === undefined) {
-            const filtered = tickers.filter(t => client.tickerSymbols.has(t.symbol))
+            const filtered = (fullTickers || tickers).filter(t => client.tickerSymbols.has(t.symbol))
             cached = filtered.length > 0
               ? JSON.stringify({ type: 'ticker', data: filtered })
               : ''

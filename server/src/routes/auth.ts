@@ -1,14 +1,31 @@
 import { Router } from 'express'
 import bcrypt from 'bcryptjs'
+import rateLimit from 'express-rate-limit'
 import { prisma } from '../db/index.js'
 import { generateToken, authMiddleware, setAuthCookie, clearAuthCookie, generateResetToken, verifyResetToken } from '../middleware/auth.js'
 import { sendTelegramMessage } from '../services/telegram/bot.js'
 
 const USERNAME_REGEX = /^[a-zA-Z0-9_]{3,20}$/
 
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 attempts per window per IP
+  message: { error: 'Too many attempts, try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+
+const resetVerifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many reset attempts, try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+
 const router = Router()
 
-router.post('/register', async (req, res) => {
+router.post('/register', authLimiter, async (req, res) => {
   const { username, password } = req.body
   if (!username || !password) {
     res.status(400).json({ error: 'Username and password required' })
@@ -38,7 +55,7 @@ router.post('/register', async (req, res) => {
   })
 })
 
-router.post('/login', async (req, res) => {
+router.post('/login', authLimiter, async (req, res) => {
   const { username, password } = req.body
   if (!username || !password) {
     res.status(400).json({ error: 'Username and password required' })
@@ -99,7 +116,7 @@ router.get('/telegram-status', authMiddleware, async (req, res) => {
 
 // ── Password reset: request code via Telegram ──
 
-router.post('/reset-request', async (req, res) => {
+router.post('/reset-request', authLimiter, async (req, res) => {
   const { username, userId } = req.body
   if (!username && !userId) {
     res.status(400).json({ error: 'Username or userId required' })
@@ -161,7 +178,7 @@ router.post('/reset-request', async (req, res) => {
 
 // ── Password reset: verify code ──
 
-router.post('/reset-verify', async (req, res) => {
+router.post('/reset-verify', resetVerifyLimiter, async (req, res) => {
   const { userId, code } = req.body
   if (!userId || !code) {
     res.status(400).json({ error: 'userId и код обязательны' })

@@ -18,6 +18,7 @@ import debugRoutes from './routes/debug.js'
 import { prisma } from './db/index.js'
 import { disconnectRedis } from './redis.js'
 import { register } from './metrics.js'
+import { authMiddleware } from './middleware/auth.js'
 
 const PORT = parseInt(process.env.PORT || '3001')
 const ROLE = process.env.ROLE || 'all'
@@ -41,11 +42,11 @@ async function main() {
   app.use('/api/watchlists', watchlistRoutes)
   app.use('/api/alerts', alertRoutes)
   app.use('/api/drawings', drawingRoutes)
-  app.use('/api/debug', debugRoutes)
+  app.use('/api/debug', authMiddleware, debugRoutes)
 
   app.get('/api/health', (_req, res) => res.json({ ok: true, role: ROLE }))
 
-  app.get('/metrics', async (_req, res) => {
+  app.get('/metrics', authMiddleware, async (_req, res) => {
     try {
       refreshMetrics()
       res.set('Content-Type', register.contentType)
@@ -112,6 +113,9 @@ async function main() {
 
   process.on('SIGTERM', () => shutdown('SIGTERM'))
   process.on('SIGINT', () => shutdown('SIGINT'))
+  process.on('unhandledRejection', (reason) => {
+    console.error('[Fatal] Unhandled promise rejection:', reason)
+  })
 }
 
 main().catch(console.error)

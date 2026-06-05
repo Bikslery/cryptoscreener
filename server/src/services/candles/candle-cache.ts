@@ -185,11 +185,18 @@ restKeys.clear()
 
 export function getTopCachedSymbols(tf: string, limit: number): string[] {
 const symbols: string[] = []
+const seen = new Set<string>()
 const keys = lru.keysFromRecent()
 for (const key of keys) {
   if (symbols.length >= limit) break
   if (key.endsWith(`:${tf}`)) {
-    symbols.push(key.split(':')[0])
+    const parts = key.split(':')
+    // Key format: "${exchange}:${symbol}:${tf}" → symbol is parts[1]
+    const symbol = parts.length >= 3 ? parts[1] : parts[0]
+    if (!seen.has(symbol)) {
+      seen.add(symbol)
+      symbols.push(symbol)
+    }
   }
 }
 return symbols
@@ -203,7 +210,8 @@ export function getCacheStats() {
 const byTimeframe: Record<string, { symbols: number; candles: number; restCached: number }> = {}
 for (const [key, candles] of cache) {
   const parts = key.split(':')
-  const tf = parts[1] || 'unknown'
+  // Key format: "${exchange}:${symbol}:${tf}" (3 parts) or "${symbol}:${tf}" (2 parts legacy)
+  const tf = parts.length >= 3 ? parts[2] : (parts[1] || 'unknown')
   const stats = byTimeframe[tf] || { symbols: 0, candles: 0, restCached: 0 }
   stats.symbols++
   stats.candles += candles.length

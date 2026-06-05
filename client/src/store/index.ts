@@ -332,7 +332,11 @@ export const useAlertStore = create<AlertStore>((set) => ({
 
   init: () => {
     const unsub = wsOnType('alert', (msg) => {
-      set((s) => ({ alerts: [msg.data as AlertType, ...s.alerts] }))
+      set((s) => {
+        const next = [msg.data as AlertType, ...s.alerts]
+        // Cap at 100 to prevent unbounded growth
+        return { alerts: next.slice(0, 100) }
+      })
     })
     return unsub
   },

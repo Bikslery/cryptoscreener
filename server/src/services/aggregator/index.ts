@@ -168,7 +168,7 @@ export function startAggregator() {
         if (isBroadcast) {
           const delta = computeDelta(best)
           if (delta.length > 0) {
-            broadcast({ type: 'ticker', data: arr })
+            broadcast({ type: 'ticker', data: delta, full: arr })
             broadcastCount++
           }
           const now2 = Date.now()
@@ -254,45 +254,49 @@ async function computeMetrics() {
       .slice(0, 200)
 
     const symbolsToRemove: string[] = []
+    const BATCH_SIZE = 10
 
-    for (const coin of topCoins) {
-      try {
-        const cached1m = getCachedCandles(coin.symbol, '1m', coin.exchange)
-        let candles1m: UnifiedCandle[]
-        if (cached1m && cached1m.length >= 2) {
-          candles1m = cached1m.slice(-5)
-        } else {
-          candles1m = await fetchCandles(coin.symbol, '1m', 5, coin.exchange)
-        }
-        if (candles1m.length >= 2) {
-          const highs = candles1m.map(c => c.high)
-          const lows = candles1m.map(c => c.low)
-          const minLow = Math.min(...lows)
-          const maxHigh = Math.max(...highs)
-          const range1m = minLow > 0 ? ((maxHigh - minLow) / minLow) * 100 : 0
-          metricsMap.set(coin.symbol, { ...(metricsMap.get(coin.symbol) || { natr5m: 0 }), range1m })
-        }
+    for (let i = 0; i < topCoins.length; i += BATCH_SIZE) {
+      const batch = topCoins.slice(i, i + BATCH_SIZE)
+      await Promise.all(batch.map(async (coin) => {
+        try {
+          const cached1m = getCachedCandles(coin.symbol, '1m', coin.exchange)
+          let candles1m: UnifiedCandle[]
+          if (cached1m && cached1m.length >= 2) {
+            candles1m = cached1m.slice(-5)
+          } else {
+            candles1m = await fetchCandles(coin.symbol, '1m', 5, coin.exchange)
+          }
+          if (candles1m.length >= 2) {
+            const highs = candles1m.map(c => c.high)
+            const lows = candles1m.map(c => c.low)
+            const minLow = Math.min(...lows)
+            const maxHigh = Math.max(...highs)
+            const range1m = minLow > 0 ? ((maxHigh - minLow) / minLow) * 100 : 0
+            metricsMap.set(coin.symbol, { ...(metricsMap.get(coin.symbol) || { natr5m: 0 }), range1m })
+          }
 
-        const cached5m = getCachedCandles(coin.symbol, '5m', coin.exchange)
-        let candles5m: UnifiedCandle[]
-        if (cached5m && cached5m.length >= 14) {
-          candles5m = cached5m.slice(-14)
-        } else {
-          candles5m = await fetchCandles(coin.symbol, '5m', 14, coin.exchange)
+          const cached5m = getCachedCandles(coin.symbol, '5m', coin.exchange)
+          let candles5m: UnifiedCandle[]
+          if (cached5m && cached5m.length >= 14) {
+            candles5m = cached5m.slice(-14)
+          } else {
+            candles5m = await fetchCandles(coin.symbol, '5m', 14, coin.exchange)
+          }
+          if (candles5m.length >= 2) {
+            const trs = candles5m.map((c, i) => {
+              if (i === 0) return c.high - c.low
+              const prevClose = candles5m[i - 1].close
+              return Math.max(c.high - c.low, Math.abs(c.high - prevClose), Math.abs(c.low - prevClose))
+            })
+            const atr = trs.reduce((s, v) => s + v, 0) / trs.length
+            const natr5m = coin.price > 0 ? (atr / coin.price) * 100 : 0
+            metricsMap.set(coin.symbol, { ...(metricsMap.get(coin.symbol) || { range1m: 0 }), natr5m })
+          }
+        } catch (e) {
+          console.warn(`[Metrics] Failed for ${coin.symbol}:`, e instanceof Error ? e.message : e)
         }
-        if (candles5m.length >= 2) {
-          const trs = candles5m.map((c, i) => {
-            if (i === 0) return c.high - c.low
-            const prevClose = candles5m[i - 1].close
-            return Math.max(c.high - c.low, Math.abs(c.high - prevClose), Math.abs(c.low - prevClose))
-          })
-          const atr = trs.reduce((s, v) => s + v, 0) / trs.length
-          const natr5m = coin.price > 0 ? (atr / coin.price) * 100 : 0
-          metricsMap.set(coin.symbol, { ...(metricsMap.get(coin.symbol) || { range1m: 0 }), natr5m })
-        }
-      } catch (e) {
-        console.warn(`[Metrics] Failed for ${coin.symbol}:`, e instanceof Error ? e.message : e)
-      }
+      }))
     }
 
     for (const [symbol] of metricsMap) {
@@ -312,10 +316,11 @@ export function updateTickerPrice(symbol: string, exchange: Exchange, price: num
   const existing = tickerMap.get(key)
   if (!existing) return
   if (existing.price === price) return
-  const open = existing.price / (1 + existing.change24h / 100)
   existing.price = price
-  if (open > 0) {
-    existing.change24h = ((price - open) / open) * 100
+  // Use stored openPrice24h directly — avoids accumulated rounding drift
+  // from reverse-calculating open via price / (1 + change24h/100)
+  if (existing.openPrice24h > 0) {
+    existing.change24h = ((price - existing.openPrice24h) / existing.openPrice24h) * 100
   }
   existing.timestamp = Date.now()
   cachedBestMap = null
@@ -337,7 +342,7 @@ export function updateTickerPrice(symbol: string, exchange: Exchange, price: num
     if (isBroadcast) {
       const delta = computeDelta(best)
       if (delta.length > 0) {
-        broadcast({ type: 'ticker', data: arr })
+        broadcast({ type: 'ticker', data: delta, full: arr })
         broadcastCount++
       }
       const now2 = Date.now()
@@ -362,6 +367,11 @@ export function getTicker(symbol: string): UnifiedTicker | undefined {
 
 export function setTickersFromRedis(tickers: UnifiedTicker[]) {
   for (const t of tickers) {
+    // Ensure openPrice24h exists — older Redis data may lack it
+    if (!t.openPrice24h && t.change24h !== undefined && t.price > 0) {
+      t.openPrice24h = t.price / (1 + t.change24h / 100)
+    }
+    if (!t.openPrice24h) t.openPrice24h = t.price
     tickerMap.set(`${t.symbol}:${t.exchange}`, t)
   }
   cachedBestMap = null

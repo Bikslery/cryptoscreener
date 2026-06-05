@@ -32,19 +32,6 @@ export default function CursorGlow() {
       trailRef.current.push({ x: -200, y: -200 })
     }
 
-    const onMouse = (e: MouseEvent) => {
-      mouseRef.current.x = e.clientX
-      mouseRef.current.y = e.clientY
-      visibleRef.current = true
-    }
-
-    const onMouseLeave = () => {
-      visibleRef.current = false
-    }
-
-    window.addEventListener('mousemove', onMouse)
-    window.addEventListener('mouseleave', onMouseLeave)
-
     const drawParticle = (x: number, y: number, size: number, alpha: number) => {
       const glowRadius = size * 10
 
@@ -83,38 +70,73 @@ export default function CursorGlow() {
       ctx.restore()
     }
 
-    const animate = () => {
-      ctx.clearRect(0, 0, w, h)
+    let animating = false
 
-      const mouse = mouseRef.current
-      const trail = trailRef.current
+    const startLoop = () => {
+      if (animating) return
+      animating = true
 
-      trail[0].x += (mouse.x - trail[0].x) * 0.22
-      trail[0].y += (mouse.y - trail[0].y) * 0.22
+      const animate = () => {
+        if (!animating) return
+        ctx.clearRect(0, 0, w, h)
 
-      for (let i = 1; i < trail.length; i++) {
-        const lag = 0.2 - i * 0.006
-        trail[i].x += (trail[i - 1].x - trail[i].x) * Math.max(lag, 0.06)
-        trail[i].y += (trail[i - 1].y - trail[i].y) * Math.max(lag, 0.06)
-      }
+        const mouse = mouseRef.current
+        const trail = trailRef.current
 
-      if (visibleRef.current) {
-        for (let i = trail.length - 1; i >= 0; i--) {
-          const t = 1 - i / trail.length
-          const alpha = t * 0.55
-          const size = 1.2 + t * 1.8
-          drawParticle(trail[i].x, trail[i].y, size, alpha)
+        trail[0].x += (mouse.x - trail[0].x) * 0.22
+        trail[0].y += (mouse.y - trail[0].y) * 0.22
+
+        for (let i = 1; i < trail.length; i++) {
+          const lag = 0.2 - i * 0.006
+          trail[i].x += (trail[i - 1].x - trail[i].x) * Math.max(lag, 0.06)
+          trail[i].y += (trail[i - 1].y - trail[i].y) * Math.max(lag, 0.06)
         }
 
-        drawParticle(mouse.x, mouse.y, 3, 0.95)
+        if (visibleRef.current) {
+          for (let i = trail.length - 1; i >= 0; i--) {
+            const t = 1 - i / trail.length
+            const alpha = t * 0.55
+            const size = 1.2 + t * 1.8
+            drawParticle(trail[i].x, trail[i].y, size, alpha)
+          }
+
+          drawParticle(mouse.x, mouse.y, 3, 0.95)
+          frameRef.current = requestAnimationFrame(animate)
+        } else {
+          // Mouse left — let trail fade to offscreen, then stop RAF
+          const allOffscreen = trail.every(p => p.x < -100 && p.y < -100)
+          if (allOffscreen) {
+            animating = false
+            return
+          }
+          frameRef.current = requestAnimationFrame(animate)
+        }
       }
 
-      frameRef.current = requestAnimationFrame(animate)
+      animate()
     }
 
-    animate()
+    const onMouse = (e: MouseEvent) => {
+      mouseRef.current.x = e.clientX
+      mouseRef.current.y = e.clientY
+      if (!visibleRef.current) {
+        visibleRef.current = true
+        startLoop()
+      }
+    }
+
+    const onMouseLeave = () => {
+      visibleRef.current = false
+    }
+
+    window.addEventListener('mousemove', onMouse)
+    window.addEventListener('mouseleave', onMouseLeave)
+
+    // Start loop initially (trail is offscreen so it will pause quickly)
+    startLoop()
 
     return () => {
+      animating = false
       cancelAnimationFrame(frameRef.current)
       window.removeEventListener('resize', resize)
       window.removeEventListener('mousemove', onMouse)

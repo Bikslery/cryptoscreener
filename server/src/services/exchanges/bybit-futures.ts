@@ -2,6 +2,7 @@ import WebSocket from 'ws'
 import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } from './types.js'
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
+import { fetchWithTimeout } from '../../utils/fetch.js'
 
 export class BybitFuturesAdapter implements ExchangeAdapter {
   name = 'Bybit Futures'
@@ -16,6 +17,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private subscribedSymbols = new Set<string>()
   private precisionMap = new Map<string, number>()
+  private intentionalClose = false
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
@@ -53,7 +55,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
 
   private async fetchInstruments() {
     try {
-      const res = await fetch('https://api.bybit.com/v5/market/instruments?category=linear')
+      const res = await fetchWithTimeout('https://api.bybit.com/v5/market/instruments?category=linear')
       const json = await res.json()
       if (json.retCode !== 0 || !json.result?.list) return
       for (const inst of json.result.list) {
@@ -77,6 +79,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
       symbol: d.symbol,
       exchange: this.exchange,
       price,
+      openPrice24h: open,
       change24h: open > 0 ? ((price - open) / open) * 100 : 0,
       high24h: parseFloat(d.highPrice24h),
       low24h: parseFloat(d.lowPrice24h),
@@ -135,6 +138,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   }
 
   disconnect() {
+    this.intentionalClose = true
     this.ws?.close()
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     if (this.pingTimer) clearInterval(this.pingTimer)
@@ -145,7 +149,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     const bybitTfMap: Record<string, string> = { '1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1d': 'D', '1w': 'W' }
     const interval = bybitTfMap[tf] || tf
     const url = `https://api.bybit.com/v5/market/kline?category=${category}&symbol=${symbol}&interval=${interval}&limit=${limit}`
-    const res = await fetch(url)
+    const res = await fetchWithTimeout(url)
     const json = await res.json()
     if (json.retCode !== 0 || !json.result?.list) return []
     return json.result.list.map((k: any[]) => ({
@@ -163,7 +167,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
 
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
     const url = `https://api.bybit.com/v5/market/orderbook?category=linear&symbol=${symbol}&limit=${limit}`
-    const res = await fetch(url)
+    const res = await fetchWithTimeout(url)
     const json = await res.json()
     if (json.retCode !== 0 || !json.result) {
       return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() }
@@ -178,6 +182,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   }
 
   private scheduleReconnect() {
+    if (this.intentionalClose) return
     if (this.reconnectTimer) return
     if (this.pingTimer) clearInterval(this.pingTimer)
     this.reconnectTimer = setTimeout(() => {

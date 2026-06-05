@@ -3,6 +3,7 @@ import { useCoinListStore } from '../../store'
 import { wsOnMessage } from '../../services/ws'
 import type { DensityCell, UnifiedDepth } from '../../types.js'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
+import { debounce } from '../../utils/debounce'
 
 function getMarketCapTier(quoteVolume: number): 'large' | 'medium' | 'small' {
   if (quoteVolume > 1e9) return 'large'
@@ -36,6 +37,12 @@ export function DensityMap() {
   coinsRef.current = coins
   const [cells, setCells] = useState<DensityCell[]>([])
   const [thresholdPct, setThresholdPct] = useState<1 | 2>(1)
+  const pendingCellsRef = useRef<DensityCell[]>([])
+  const prevSymbolsRef = useRef<Set<string>>(new Set())
+
+  const flushCells = useMemo(() => debounce(() => {
+    setCells(pendingCellsRef.current)
+  }, 200), [])
 
   useEffect(() => {
     const unsub = wsOnMessage((msg) => {
@@ -77,15 +84,15 @@ export function DensityMap() {
           }
         }
 
-        setCells(prev => {
-          const without = prev.filter(c => c.symbol !== depth.symbol)
-          return [...without, ...newCells]
-        })
+        // Merge: replace cells for this symbol, keep others
+        const without = pendingCellsRef.current.filter(c => c.symbol !== depth.symbol)
+        pendingCellsRef.current = [...without, ...newCells]
+        flushCells()
       }
     })
 
     return unsub
-  }, [thresholdPct])
+  }, [thresholdPct, flushCells])
 
   const sorted = useMemo(() => [...cells].sort((a, b) => b.volume - a.volume).slice(0, 50), [cells])
 

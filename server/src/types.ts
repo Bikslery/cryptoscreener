@@ -4,6 +4,7 @@ export interface UnifiedTicker {
   symbol: string
   exchange: Exchange
   price: number
+  openPrice24h: number
   change24h: number
   high24h: number
   low24h: number
@@ -114,6 +115,7 @@ export interface WsMessage {
   type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'alert' | 'listing' | 'initial-candles'
   channel?: string
   data?: unknown
+  full?: unknown // full array for ticker delta broadcasts
 }
 
 export interface ChartBlock {

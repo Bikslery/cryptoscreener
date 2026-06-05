@@ -3,6 +3,7 @@ import type { Agent } from 'http'
 import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } from './types.js'
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
+import { fetchWithTimeout } from '../../utils/fetch.js'
 import { BinanceRateLimiter } from './rate-limiter.js'
 import { WsStreamPool } from './ws-pool.js'
 import { getWsAgent, getFetchDispatcher } from './proxy.js'
@@ -10,19 +11,6 @@ import type { ProxyAgent } from 'undici'
 
 const WS_SILENCE_TIMEOUT = 30_000
 const MAX_KLINES_LIMIT = 1000
-
-async function fetchWithTimeout(url: string, ms = 10000, dispatcher?: ProxyAgent): Promise<Response> {
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), ms)
-  try {
-    const opts: RequestInit & { dispatcher?: ProxyAgent } = { signal: ctrl.signal }
-    if (dispatcher) opts.dispatcher = dispatcher
-    const res = await fetch(url, opts as RequestInit)
-    return res
-  } finally {
-    clearTimeout(timer)
-  }
-}
 
 const TF_MAP: Record<string, string> = {
   '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d', '1w': '1w',
@@ -300,6 +288,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       symbol,
       exchange: this.exchange,
       price,
+      openPrice24h: open,
       change24h: open > 0 ? ((price - open) / open) * 100 : 0,
       high24h: parseFloat(isWs ? t.h : t.highPrice),
       low24h: parseFloat(isWs ? t.l : t.lowPrice),

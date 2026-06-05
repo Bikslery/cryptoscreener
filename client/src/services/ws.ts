@@ -9,6 +9,9 @@ const channelCallbacks = new Map<string, Set<WsCallback>>()
 const subscriptions = new Map<string, number>()
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let intentionalDisconnect = false
+let reconnectAttempt = 0
+const MAX_BACKOFF = 30000
+const BASE_DELAY = 1000
 
 function dispatch(msg: WsMessage) {
   const t = msg.type as string | undefined
@@ -32,6 +35,7 @@ function connect() {
   ws = new WebSocket(url)
 
   ws.onopen = () => {
+    reconnectAttempt = 0
     dispatch({ type: 'open' })
     for (const ch of subscriptions.keys()) {
       ws?.send(JSON.stringify({ type: 'subscribe', channel: ch }))
@@ -53,10 +57,13 @@ function connect() {
 
 function scheduleReconnect() {
   if (reconnectTimer) return
+  const delay = Math.min(BASE_DELAY * Math.pow(2, reconnectAttempt) + Math.random() * 1000, MAX_BACKOFF)
+  reconnectAttempt++
+  console.warn(`[WS] Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttempt})`)
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
     connect()
-  }, 3000)
+  }, delay)
 }
 
 export function wsConnect() {
