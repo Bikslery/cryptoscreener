@@ -76,8 +76,7 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
   const sorted = sortCoins(filtered, state.sortBy, state.sortDir)
   const pageCount = Math.max(1, Math.ceil(sorted.length / 9))
   const safePage = Math.min(Math.max(0, state.pageIndex), pageCount - 1)
-  const start = safePage * 9
-  return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), topChartSymbols, pageCount, pageIndex: safePage }
+  return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), topChartSymbols: sorted.slice(safePage * 9, safePage * 9 + 9).map(c => c.symbol), pageCount, pageIndex: safePage }
 }
 
 // --- Live price store (decoupled from the heavy CoinListStore) ----------------
