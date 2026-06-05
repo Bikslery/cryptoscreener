@@ -1409,7 +1409,9 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
 }
 
 export function ChartGrid() {
-  const topSymbols = useCoinListStore(s => s.topChartSymbols)
+  const sortedCoins = useCoinListStore(s => s.sortedCoins)
+  const pageIndex = useCoinListStore(s => s.pageIndex)
+  const topSymbols = sortedCoins.slice(pageIndex * 9, pageIndex * 9 + 9).map(c => c.symbol)
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const expandChart = useCoinListStore(s => s.expandChart)
   const tf = useCoinListStore(s => s.activeTimeframe)

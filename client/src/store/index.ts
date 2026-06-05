@@ -44,7 +44,6 @@ interface CoinListStore {
   coins: UnifiedTicker[]
   sortedCoins: UnifiedTicker[]
   coinMap: Map<string, UnifiedTicker>
-  topChartSymbols: string[]
   sortBy: keyof UnifiedTicker
   sortDir: 'asc' | 'desc'
   selectedSymbol: string | null
@@ -76,7 +75,7 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
   const sorted = sortCoins(filtered, state.sortBy, state.sortDir)
   const pageCount = Math.max(1, Math.ceil(sorted.length / 9))
   const safePage = Math.min(Math.max(0, state.pageIndex), pageCount - 1)
-  return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), topChartSymbols: sorted.slice(safePage * 9, safePage * 9 + 9).map(c => c.symbol), pageCount, pageIndex: safePage }
+  return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), pageCount, pageIndex: safePage }
 }
 
 // --- Live price store (decoupled from the heavy CoinListStore) ----------------
@@ -119,7 +118,6 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   coins: [],
   sortedCoins: [],
   coinMap: new Map(),
-  topChartSymbols: [],
   sortBy: 'quoteVolume24h',
   sortDir: 'desc',
   selectedSymbol: null,
@@ -129,11 +127,11 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   pageIndex: 0,
   pageCount: 1,
   autoRefresh: true,
-  countdown: 3,
+  countdown: 10,
 
   toggleAutoRefresh: () => set((s) => ({
     autoRefresh: !s.autoRefresh,
-    countdown: !s.autoRefresh ? 3 : 0,
+    countdown: !s.autoRefresh ? 10 : 0,
   })),
 
   tickCountdown: () => {
@@ -141,7 +139,7 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
     if (!s.autoRefresh) return
     const next = s.countdown - 1
     if (next <= 0) {
-      set({ countdown: 3 })
+      set({ countdown: 10 })
       // Trigger re-sort
       set({ coins: s.coins, ...recompute({ ...s, coins: s.coins }) })
     } else {
@@ -174,7 +172,7 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
 
   init: () => {
     let lastSortUpdate = 0
-    const SORT_INTERVAL = 3000
+    const SORT_INTERVAL = 10000
 
     const unsubTicker = wsOnType('ticker', (msg) => {
       if (!Array.isArray(msg.data)) return
