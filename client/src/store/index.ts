@@ -84,6 +84,7 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
   const safePage = Math.min(Math.max(0, state.pageIndex), pageCount - 1)
   const start = safePage * 9
   const newTop = sorted.slice(start, start + 9).map(c => c.symbol)
+  console.log('[recompute] newTop:', JSON.stringify(newTop), 'prevTop:', JSON.stringify(prevTopSymbols), 'same:', sameTop9(newTop, prevTopSymbols), 'sortBy:', state.sortBy, 'sortDir:', state.sortDir)
   const topChartSymbols = sameTop9(newTop, prevTopSymbols) ? prevTopSymbols : (prevTopSymbols = newTop)
   return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), topChartSymbols, pageCount, pageIndex: safePage }
 }
