@@ -1,6 +1,7 @@
 import { useCoinListStore, useAuthStore, useUIStore } from '../../store'
 import type { Timeframe, FilterExchange } from '../../types'
-import { LogIn, User, ChevronFirst, ChevronLeft, ChevronRight } from 'lucide-react'
+import { LogIn, User, ChevronFirst, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react'
+import { useEffect, useRef } from 'react'
 
 const TF_OPTIONS: { value: Timeframe; label: string }[] = [
   { value: '1m', label: '1М' },
@@ -29,6 +30,17 @@ export function TopBar() {
   const setPageIndex = useCoinListStore(s => s.setPageIndex)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
   const { setShowAuth, setShowProfile } = useUIStore()
+  const autoRefresh = useCoinListStore(s => s.autoRefresh)
+  const countdown = useCoinListStore(s => s.countdown)
+  const toggleAutoRefresh = useCoinListStore(s => s.toggleAutoRefresh)
+  const tickCountdown = useCoinListStore(s => s.tickCountdown)
+  const tickRef = useRef(tickCountdown)
+  tickRef.current = tickCountdown
+
+  useEffect(() => {
+    const id = setInterval(() => tickRef.current(), 1000)
+    return () => clearInterval(id)
+  }, [])
 
   return (
     <div
@@ -87,6 +99,17 @@ export function TopBar() {
           onClick={() => setPageIndex(pageIndex + 1)}
         >
           <ChevronRight size={15} />
+        </button>
+
+        <button
+          aria-label={autoRefresh ? 'Выключить автообновление' : 'Включить автообновление'}
+          className={`clinic-btn clinic-btn-sm flex items-center justify-center h-[30px] px-[9px] text-[12px] gap-[4px] ${
+            autoRefresh ? 'clinic-btn-active' : 'clinic-btn-secondary'
+          }`}
+          onClick={toggleAutoRefresh}
+        >
+          <RefreshCw size={13} className={autoRefresh ? '' : ''} />
+          {autoRefresh && <span className="tabular-nums">{countdown}</span>}
         </button>
       </div>
 

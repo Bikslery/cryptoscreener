@@ -35,8 +35,7 @@ function sortCoins(coins: UnifiedTicker[], sortBy: keyof UnifiedTicker, sortDir:
 
 function sameTop9(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false
-  const s = new Set(a)
-  return b.every(x => s.has(x))
+  return a.every((x, i) => x === b[i])
 }
 
 function buildCoinMap(coins: UnifiedTicker[]): Map<string, UnifiedTicker> {
@@ -58,12 +57,16 @@ interface CoinListStore {
   filterExchange: FilterExchange
   pageIndex: number
   pageCount: number
+  autoRefresh: boolean
+  countdown: number
   setSort: (col: keyof UnifiedTicker) => void
   selectCoin: (symbol: string) => void
   expandChart: (symbol: string | null) => void
   setTimeframe: (tf: Timeframe) => void
   setFilterExchange: (fe: FilterExchange) => void
   setPageIndex: (n: number) => void
+  toggleAutoRefresh: () => void
+  tickCountdown: () => void
   init: () => () => void
 }
 
@@ -134,6 +137,26 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   filterExchange: 'all',
   pageIndex: 0,
   pageCount: 1,
+  autoRefresh: true,
+  countdown: 3,
+
+  toggleAutoRefresh: () => set((s) => ({
+    autoRefresh: !s.autoRefresh,
+    countdown: !s.autoRefresh ? 3 : 0,
+  })),
+
+  tickCountdown: () => {
+    const s = get()
+    if (!s.autoRefresh) return
+    const next = s.countdown - 1
+    if (next <= 0) {
+      set({ countdown: 3 })
+      // Trigger re-sort
+      set({ coins: s.coins, ...recompute({ ...s, coins: s.coins }) })
+    } else {
+      set({ countdown: next })
+    }
+  },
 
   setSort: (col) => {
     const s = get()
@@ -169,6 +192,27 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
       const now = Date.now()
       for (const c of coins) {
         setLivePrice(c.symbol, c.price)
+      }
+      if (!s.autoRefresh) {
+        // Auto-refresh off: still update prices but skip re-sorting
+        const updateMap = new Map<string, UnifiedTicker>()
+        for (const c of coins) updateMap.set(c.symbol, c)
+
+        let dirty = false
+        const newCoins = s.coins.map((c) => {
+          const u = updateMap.get(c.symbol)
+          if (!u) return c
+          if (u.price === c.price && u.change24h === c.change24h && u.quoteVolume24h === c.quoteVolume24h) return c
+          dirty = true
+          return u
+        })
+        if (!dirty) return
+
+        const newSorted = s.sortedCoins.map((c) => updateMap.get(c.symbol) || c)
+        const newCoinMap = new Map(s.coinMap)
+        for (const [sym, u] of updateMap) newCoinMap.set(sym, u)
+        set({ coins: newCoins, sortedCoins: newSorted, coinMap: newCoinMap })
+        return
       }
       if (now - lastSortUpdate > SORT_INTERVAL) {
         lastSortUpdate = now
