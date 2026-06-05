@@ -1411,7 +1411,15 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
 export function ChartGrid() {
   const sortedCoins = useCoinListStore(s => s.sortedCoins)
   const pageIndex = useCoinListStore(s => s.pageIndex)
-  const topSymbols = sortedCoins.slice(pageIndex * 9, pageIndex * 9 + 9).map(c => c.symbol)
+  const prevTopRef = useRef<string[]>([])
+  const topSymbols = useMemo(() => {
+    const next = sortedCoins.slice(pageIndex * 9, pageIndex * 9 + 9).map(c => c.symbol)
+    if (next.length === prevTopRef.current.length && next.every((s, i) => s === prevTopRef.current[i])) {
+      return prevTopRef.current
+    }
+    prevTopRef.current = next
+    return next
+  }, [sortedCoins, pageIndex])
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const expandChart = useCoinListStore(s => s.expandChart)
   const tf = useCoinListStore(s => s.activeTimeframe)
@@ -1433,6 +1441,12 @@ export function ChartGrid() {
       const next = new Set<string>()
       for (const key of prev) {
         if (currentSet.has(key)) next.add(key)
+      }
+      // Return same reference if nothing changed (prevents infinite re-render)
+      if (next.size === prev.size) {
+        let same = true
+        for (const k of next) { if (!prev.has(k)) { same = false; break } }
+        if (same) return prev
       }
       return next
     })
