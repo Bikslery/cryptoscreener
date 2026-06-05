@@ -526,38 +526,6 @@ function useStaleDataDetection(
   return isStale
 }
 
-function useFlashEffect(
-  candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  threshold = 0.005 // 0.5%
-): 'up' | 'down' | null {
-  const [flash, setFlash] = useState<'up' | 'down' | null>(null)
-  const prevCloseRef = useRef<number | null>(null)
-
-  useEffect(() => {
-    const candles = candlesDataRef.current
-    if (!candles || candles.length === 0) return
-
-    const lastCandle = candles[candles.length - 1]
-    const prevClose = prevCloseRef.current
-
-    if (prevClose !== null && isFinite(lastCandle.close) && isFinite(prevClose)) {
-      const change = Math.abs(lastCandle.close - prevClose) / prevClose
-
-      if (change > threshold) {
-        const direction = lastCandle.close > prevClose ? 'up' : 'down'
-        setFlash(direction)
-
-        const timer = setTimeout(() => setFlash(null), 300)
-        return () => clearTimeout(timer)
-      }
-    }
-
-    prevCloseRef.current = lastCandle.close
-  }, [candlesDataRef.current?.[candlesDataRef.current.length - 1]?.close, threshold])
-
-  return flash
-}
-
 function useWsCandle(
   symbol: string,
   exchange: Exchange | undefined,
@@ -674,7 +642,6 @@ function exchangeBadge(ex: string): string {
 }
 
 const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: string }) {
-  const prevPriceRef = useRef<number | null>(null)
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
     if (!c) return null
@@ -686,27 +653,13 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
       range1m: c.range1m,
     }
   }))
-  const livePrice = useLivePrice(symbol)
-  const [flash, setFlash] = useState<'green' | 'red' | null>(null)
-
-  useEffect(() => {
-    if (livePrice == null) return
-    const prev = prevPriceRef.current
-    prevPriceRef.current = livePrice
-    if (prev == null || prev === livePrice) return
-    setFlash(livePrice > prev ? 'green' : 'red')
-    const t = setTimeout(() => setFlash(null), 300)
-    return () => clearTimeout(t)
-  }, [livePrice])
 
   const isUp = coin ? coin.change24h >= 0 : true
   const badge = exchangeBadge(coin?.exchange || '')
   const vol = coin ? formatCompact(coin.quoteVolume24h) : '-'
 
   return (
-    <div className={`relative z-20 flex items-center justify-between px-[6px] py-[3px] border-b border-[#1f1f1f] flex-shrink-0 gap-2 transition-colors duration-300 ${
-      flash === 'green' ? 'bg-[#26a65b]/20' : flash === 'red' ? 'bg-[#e74c3c]/20' : 'bg-[#141414]'
-    }`}>
+    <div className="relative z-20 flex items-center justify-between px-[6px] py-[3px] border-b border-[#1f1f1f] flex-shrink-0 gap-2 bg-[#141414]">
       <div className="flex items-center gap-[5px] min-w-0">
         <span className="text-[9px] font-bold leading-none text-[#b3b3b3]">
           {badge}
@@ -759,7 +712,6 @@ const MiniChart = memo(function MiniChart({
 
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
-  const flashEffect = useFlashEffect(candlesDataRef)
 
   useEffect(() => {
     destroyedRef.current = false
@@ -848,7 +800,7 @@ useEffect(() => {
     <div
       className={`relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px] transition-all duration-300 ease-out ${
         visible ? 'opacity-100 scale-100' : 'opacity-0 scale-[0.99]'
-      } ${flashEffect ? `flash-border-${flashEffect}` : ''}`}
+      }`}
     >
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
         <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
@@ -1087,7 +1039,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef)
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
-  const flashEffect = useFlashEffect(candlesDataRef)
 
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
@@ -1294,7 +1245,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [primitiveRef])
 
   return (
-    <div className={`flex-1 flex flex-col h-full bg-[#0e0e0e] ${flashEffect ? `flash-border-${flashEffect}` : ''}`}>
+    <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
       <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} />
       <div ref={containerRef} className="relative flex-1 min-h-0">
         {isInitialLoading && <ChartCornerSpinner />}
