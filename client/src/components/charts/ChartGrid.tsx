@@ -732,8 +732,8 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
 })
 
 const MiniChart = memo(function MiniChart({
-  symbol, visible, onLoaded,
-}: { symbol: string; visible: boolean; onLoaded?: (loadKey: string) => void }) {
+  symbol, visible, onLoaded, style,
+}: { symbol: string; visible: boolean; onLoaded?: (loadKey: string) => void; style?: React.CSSProperties }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -846,6 +846,7 @@ useEffect(() => {
 
   return (
     <div
+      style={style}
       className={`relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px] transition-all duration-300 ease-out ${
         visible ? 'opacity-100 scale-100' : 'opacity-0 scale-[0.99]'
       } ${flashEffect ? `flash-border-${flashEffect}` : ''}`}
@@ -1455,8 +1456,8 @@ export function ChartGrid() {
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
       <div className="relative flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
-        {topSymbols.map((symbol) => (
-          <MiniChart key={`${tf}:${symbol}`} symbol={symbol} visible={allChartsLoaded} onLoaded={handleLoaded} />
+        {topSymbols.map((symbol, idx) => (
+          <MiniChart key={`${tf}:${symbol}`} style={{order: idx}} symbol={symbol} visible={allChartsLoaded} onLoaded={handleLoaded} />
         ))}
         {Array.from({ length: Math.max(0, 9 - topSymbols.length) }).map((_, idx) => (
           <div key={`placeholder-${idx}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f]" />

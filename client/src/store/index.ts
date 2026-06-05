@@ -77,7 +77,6 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
   const pageCount = Math.max(1, Math.ceil(sorted.length / 9))
   const safePage = Math.min(Math.max(0, state.pageIndex), pageCount - 1)
   const start = safePage * 9
-  const topChartSymbols = sorted.slice(start, start + 9).map(c => c.symbol); console.log("[RECOMPUTE] topChartSymbols:", JSON.stringify(topChartSymbols), "sortBy:", state.sortBy, "sortDir:", state.sortDir)
   return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), topChartSymbols, pageCount, pageIndex: safePage }
 }
 
