@@ -45,18 +45,40 @@ interface SegmentItem {
 
 type DrawItem = HRayItem | TRayItem | SegmentItem
 
+// DIAG-c2a4: convert LWC's Time type to a UNIX-seconds number. On
+// 1h/4h/1d/1w/1M timeframes, `getVisibleRange()`, `coordinateToTime()` and
+// `logicalToTime()` return a BusinessDay object `{year, month, day}` instead
+// of a number. Without this helper, the `as number` casts in timeToPixel
+// would silently fail and drawings would render at wrong pixel positions
+// after a TF change (the "drawings slide on TF change" bug).
+function toUnixTime(t: unknown): number | null {
+  if (t == null) return null
+  if (typeof t === 'number') return t
+  if (typeof t === 'string') {
+    const parsed = Date.parse(t)
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null
+  }
+  if (typeof t === 'object') {
+    const o = t as { year?: unknown; month?: unknown; day?: unknown }
+    if (typeof o.year === 'number' && typeof o.month === 'number' && typeof o.day === 'number') {
+      return Math.floor(Date.UTC(o.year, o.month - 1, o.day) / 1000)
+    }
+  }
+  return null
+}
+
 function timeToPixel(
   chart: IChartApi,
   time: Time,
   logical?: number,
 ): number | null {
-  // DIAG-fd0c: guard MUST run before timeToCoordinate — LWC throws on
+  // DIAG-c2a4: guard MUST run before timeToCoordinate — LWC throws on
   // null/NaN/Infinity and crashes the whole chart render. This was the
   // root cause of "Chart error" for symbols with legacy/corrupt drawings
   // (e.g. BTC/ETH/SOL had old localStorage entries with time: null).
   if (time == null) return null
-  const timeNum = time as number
-  if (typeof timeNum !== 'number' || !isFinite(timeNum)) return null
+  const timeNum = toUnixTime(time)
+  if (timeNum === null) return null
 
   const px = chart.timeScale().timeToCoordinate(time)
   if (px !== null) return px
@@ -70,11 +92,12 @@ function timeToPixel(
     return null
   }
 
-  const lFrom = visLogical.from as number
-  const lTo = visLogical.to as number
-  const tFrom = visTime.from as number
-  const tTo = visTime.to as number
-  if (lTo === lFrom || !isFinite(tFrom) || !isFinite(tTo)) return null
+  const lFrom = toUnixTime(visLogical.from)
+  const lTo = toUnixTime(visLogical.to)
+  const tFrom = toUnixTime(visTime.from)
+  const tTo = toUnixTime(visTime.to)
+  if (lFrom === null || lTo === null || tFrom === null || tTo === null) return null
+  if (lTo === lFrom) return null
 
   const estLogical = lFrom + (timeNum - tFrom) * (lTo - lFrom) / (tTo - tFrom)
   if (!isFinite(estLogical)) return null

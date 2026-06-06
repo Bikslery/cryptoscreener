@@ -1067,6 +1067,17 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   }, [symbol, tf, pricePrecision])
 
   const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef)
+
+  // DIAG-c2a4: bump chartVersion whenever new candles finish loading
+  // (initial mount + every TF / symbol change). This makes the drawings
+  // primitive re-attach and recompute pixel coordinates against the new
+  // visible range — without it, drawings drawn on 5m can sit at stale
+  // positions after switching to 1h/4h until a manual scroll/resize
+  // triggers a repaint.
+  useEffect(() => {
+    if (!isInitialLoading) setChartVersion(v => v + 1)
+  }, [isInitialLoading])
+
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
 
@@ -1114,11 +1125,20 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
           valid = true
         }
 
+        // DIAG-c2a4: LWC may return BusinessDay {year,month,day} on 1h+ TFs
+        // for coordinateToTime. Normalise to UNIX-seconds before the
+        // subtraction — `as number` is a TS-only cast and would yield NaN.
         const t1Raw = chart.timeScale().coordinateToTime(x1) as number | null
         const t2Raw = chart.timeScale().coordinateToTime(x2) as number | null
+        const t1Num = (t1Raw == null || typeof t1Raw === 'number')
+          ? t1Raw as number | null
+          : null
+        const t2Num = (t2Raw == null || typeof t2Raw === 'number')
+          ? t2Raw as number | null
+          : null
 
-        if (t1Raw !== null && t2Raw !== null) {
-          durationSec = Math.abs(t2Raw - t1Raw)
+        if (t1Num !== null && t2Num !== null) {
+          durationSec = Math.abs(t2Num - t1Num)
         }
       }
 

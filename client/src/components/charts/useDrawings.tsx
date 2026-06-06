@@ -76,11 +76,38 @@ function sanitizeDrawings(drawings: Drawing[]): Drawing[] {
   return drawings.filter(isValidDrawingData)
 }
 
+// DIAG-c2a4: convert LWC's Time type to a UNIX-seconds number. On
+// 1h/4h/1d/1w/1M timeframes, `getVisibleRange()`, `coordinateToTime()` and
+// `logicalToTime()` return a BusinessDay object `{year, month, day}` instead
+// of a number. The `as number` cast does NOT convert it at runtime — the
+// object stays an object, `isFinite({...})` returns false, the interpolation
+// fallback returns null, and drawings disappear or render at the wrong
+// pixel position (the "drawings slide on TF change" bug). Date.UTC is used
+// (not new Date) because crypto charts are UTC-anchored.
+function toUnixTime(t: unknown): number | null {
+  if (t == null) return null
+  if (typeof t === 'number') return t
+  if (typeof t === 'string') {
+    const parsed = Date.parse(t)
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null
+  }
+  if (typeof t === 'object') {
+    const o = t as { year?: unknown; month?: unknown; day?: unknown }
+    if (typeof o.year === 'number' && typeof o.month === 'number' && typeof o.day === 'number') {
+      return Math.floor(Date.UTC(o.year, o.month - 1, o.day) / 1000)
+    }
+  }
+  return null
+}
+
 function timeToPixel(
   chart: IChartApi,
   time: Time,
   logical?: number,
 ): number | null {
+  const timeNum = toUnixTime(time)
+  if (timeNum === null) return null
+
   const px = chart.timeScale().timeToCoordinate(time)
   if (px !== null) return px
 
@@ -93,14 +120,12 @@ function timeToPixel(
     return null
   }
 
-  const lFrom = visLogical.from as number
-  const lTo = visLogical.to as number
-  const tFrom = visTime.from as number
-  const tTo = visTime.to as number
-  if (lTo === lFrom || !isFinite(tFrom) || !isFinite(tTo)) return null
-
-  const timeNum = time as number
-  if (!isFinite(timeNum)) return null
+  const lFrom = toUnixTime(visLogical.from)
+  const lTo = toUnixTime(visLogical.to)
+  const tFrom = toUnixTime(visTime.from)
+  const tTo = toUnixTime(visTime.to)
+  if (lFrom === null || lTo === null || tFrom === null || tTo === null) return null
+  if (lTo === lFrom) return null
 
   const estLogical = lFrom + (timeNum - tFrom) * (lTo - lFrom) / (tTo - tFrom)
   if (!isFinite(estLogical)) return null
@@ -360,16 +385,24 @@ export function useDrawings(
       const visLogical = chart.timeScale().getVisibleLogicalRange()
       const visTime = chart.timeScale().getVisibleRange()
       if (logicalFromCoord !== null && visLogical && visTime) {
-        const lFrom = visLogical.from as number
-        const lTo = visLogical.to as number
-        const tFrom = visTime.from as number
-        const tTo = visTime.to as number
-        if (lTo !== lFrom && isFinite(tFrom) && isFinite(tTo)) {
+        // DIAG-c2a4: convert BusinessDay objects to UNIX-seconds before
+        // arithmetic. On 1h/4h/1d/1w/1M the LWC returns
+        // `{year, month, day}` objects here — `as number` is a TS-only
+        // cast and would silently produce NaN.
+        const lFrom = toUnixTime(visLogical.from)
+        const lTo = toUnixTime(visLogical.to)
+        const tFrom = toUnixTime(visTime.from)
+        const tTo = toUnixTime(visTime.to)
+        if (lFrom !== null && lTo !== null && tFrom !== null && tTo !== null && lTo !== lFrom) {
           time = tFrom + (logicalFromCoord - lFrom) * (tTo - tFrom) / (lTo - lFrom)
           logical = logicalFromCoord
         }
       }
     } else {
+      // DIAG-c2a4: also normalise the direct path — LWC may have given us a
+      // BusinessDay object (1h+ TFs). Persist UNIX-seconds so the drawing
+      // survives future TF switches.
+      time = toUnixTime(time)
       const logicalFromTime = chart.timeScale().coordinateToLogical(x) as number | null
       if (logicalFromTime !== null) logical = logicalFromTime
     }
