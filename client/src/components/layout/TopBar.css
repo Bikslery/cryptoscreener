@@ -1,7 +1,11 @@
 /* Volume filter — custom slider pill in the TopBar.
-   The pill itself handles drag via Pointer Events (mouse + touch).
-   The background is split into gray (#8a8a8a) and dark gray (#2a2a2a)
-   at the current value position via a CSS gradient driven by --vs-progress. */
+   Color palette matches .clinic-btn / .clinic-btn-secondary / .clinic-btn-active:
+   - border: rgba(255,255,255,0.15)  (matches inactive button)
+   - hover/focus border: rgba(255,255,255,0.4)  (matches active button)
+   - filled portion of the gradient: rgba(255,255,255,0.15)  (slightly stronger than
+     active button bg 0.08 so the selected region reads as filled)
+   - unfilled: rgba(255,255,255,0.02)  (barely there, lets the dark bg show)
+   - text: --text-muted for icon/label, --text-primary for the value */
 
 .volume-filter {
   position: relative;
@@ -11,17 +15,17 @@
   height: 30px;
   width: 180px;
   padding: 0 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 6px;
-  background: #2a2a2a;
+  background: transparent;
   background-image: linear-gradient(
     to right,
-    #8a8a8a 0%,
-    #8a8a8a var(--vs-progress, 0%),
-    #2a2a2a var(--vs-progress, 0%),
-    #2a2a2a 100%
+    rgba(255, 255, 255, 0.15) 0%,
+    rgba(255, 255, 255, 0.15) var(--vs-progress, 0%),
+    rgba(255, 255, 255, 0.02) var(--vs-progress, 0%),
+    rgba(255, 255, 255, 0.02) 100%
   );
-  color: #e5e5e5;
+  color: var(--text-muted, #a0a0a0);
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 11px;
   font-weight: 500 !important;
@@ -30,33 +34,34 @@
   user-select: none;
   cursor: ew-resize;
   overflow: hidden;
-  transition: border-color 0.15s ease, filter 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
   flex-shrink: 0;
   touch-action: none;
   outline: none;
 }
 
 .volume-filter:hover {
-  border-color: rgba(255, 255, 255, 0.2);
-  filter: brightness(1.05);
+  border-color: rgba(255, 255, 255, 0.4);
+  box-shadow: var(--glow-border);
 }
 
 .volume-filter:focus-visible {
-  border-color: rgba(255, 255, 255, 0.35);
+  border-color: rgba(255, 255, 255, 0.5);
+  box-shadow: var(--glow-border);
 }
 
-/* Content — children don't catch pointer events, the parent div does */
+/* Children don't catch pointer events — the parent div handles drag */
 .volume-filter > * {
   pointer-events: none;
 }
 
 .volume-filter-icon {
-  color: #d0d0d0;
+  color: var(--text-muted, #a0a0a0);
   flex-shrink: 0;
 }
 
 .volume-filter-label {
-  color: #b0b0b0;
+  color: var(--text-muted, #a0a0a0);
 }
 
 .volume-filter-value {
@@ -64,9 +69,9 @@
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  color: #ffffff;
+  color: var(--text-primary, #ffffff);
   font-weight: 600 !important;
-  text-shadow: 0 0 6px rgba(255, 255, 255, 0.25);
+  text-shadow: var(--glow-text-strong);
   white-space: nowrap;
   z-index: 0;
 }
