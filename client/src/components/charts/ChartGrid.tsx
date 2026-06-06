@@ -977,6 +977,8 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     return () => { lifecycleRef.current?.destroy() }
   }, [symbol, exchange, tf])
 
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef)
+
   const {
     activeTool,
     setActiveTool,
@@ -991,7 +993,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     previewLine,
     primitiveRef,
     CLICK_THRESHOLD,
-  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, chartVersion)
+  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, chartVersion, isInitialLoading)
 
   useEffect(() => {
     destroyedRef.current = false
@@ -1065,18 +1067,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       volumeRef.current = null
     }
   }, [symbol, tf, pricePrecision])
-
-  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef)
-
-  // DIAG-c2a4: bump chartVersion whenever new candles finish loading
-  // (initial mount + every TF / symbol change). This makes the drawings
-  // primitive re-attach and recompute pixel coordinates against the new
-  // visible range — without it, drawings drawn on 5m can sit at stale
-  // positions after switching to 1h/4h until a manual scroll/resize
-  // triggers a repaint.
-  useEffect(() => {
-    if (!isInitialLoading) setChartVersion(v => v + 1)
-  }, [isInitialLoading])
 
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)

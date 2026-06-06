@@ -103,7 +103,6 @@ function toUnixTime(t: unknown): number | null {
 function timeToPixel(
   chart: IChartApi,
   time: Time,
-  logical?: number,
 ): number | null {
   const timeNum = toUnixTime(time)
   if (timeNum === null) return null
@@ -113,12 +112,7 @@ function timeToPixel(
 
   const visLogical = chart.timeScale().getVisibleLogicalRange()
   const visTime = chart.timeScale().getVisibleRange()
-  if (!visLogical || !visTime) {
-    if (logical != null && isFinite(logical)) {
-      return chart.timeScale().logicalToCoordinate(logical as Logical)
-    }
-    return null
-  }
+  if (!visLogical || !visTime) return null
 
   const lFrom = toUnixTime(visLogical.from)
   const lTo = toUnixTime(visLogical.to)
@@ -140,6 +134,7 @@ export function useDrawings(
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   containerRef: React.RefObject<HTMLDivElement | null>,
   chartVersion: number,
+  isInitialLoading: boolean,
 ) {
   const [drawings, setDrawings] = useState<Drawing[]>([])
   const [activeTool, setActiveTool] = useState<DrawingTool | null>(null)
@@ -188,6 +183,11 @@ export function useDrawings(
   useEffect(() => {
     const chart = chartRef.current
     if (!chart) return
+    // Gate on data readiness: attaching a primitive to a chart with no
+    // series data produces stale-pixel render paths and creates a race
+    // between setData() and the first paint(). Wait for isInitialLoading
+    // to flip false so the chart has data and a valid visible range.
+    if (isInitialLoading) return
 
     const primitive = new DrawingsPrimitive()
     primitiveRef.current = primitive
@@ -221,7 +221,7 @@ export function useDrawings(
       }
       primitiveRef.current = null
     }
-  }, [chartVersion])
+  }, [chartVersion, isInitialLoading])
 
   const removeDrawing = useCallback((id: string) => {
     setDrawings(prev => {
@@ -424,7 +424,7 @@ export function useDrawings(
     const container = containerRef.current
     if (!chart || !series || !container) return
 
-    const px1 = timeToPixel(chart, pp.time as Time, pp.logical)
+    const px1 = timeToPixel(chart, pp.time as Time)
     const py1 = series.priceToCoordinate(pp.price)
     if (px1 === null || py1 === null) return
 
@@ -448,7 +448,7 @@ export function useDrawings(
     const series = candleRef.current
     if (!chart || !series) return
 
-    const px = timeToPixel(chart, pp.time as Time, pp.logical)
+    const px = timeToPixel(chart, pp.time as Time)
     const py = series.priceToCoordinate(pp.price)
     if (px !== null && py !== null) {
       pendingPointPixel.current = { x: px, y: py }

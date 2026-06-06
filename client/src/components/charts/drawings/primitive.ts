@@ -67,10 +67,9 @@ function toUnixTime(t: unknown): number | null {
   return null
 }
 
-function timeToPixel(
+export function timeToPixel(
   chart: IChartApi,
   time: Time,
-  logical?: number,
 ): number | null {
   // DIAG-c2a4: guard MUST run before timeToCoordinate — LWC throws on
   // null/NaN/Infinity and crashes the whole chart render. This was the
@@ -85,12 +84,7 @@ function timeToPixel(
 
   const visLogical = chart.timeScale().getVisibleLogicalRange()
   const visTime = chart.timeScale().getVisibleRange()
-  if (!visLogical || !visTime) {
-    if (logical != null && isFinite(logical)) {
-      return chart.timeScale().logicalToCoordinate(logical as Logical)
-    }
-    return null
-  }
+  if (!visLogical || !visTime) return null
 
   const lFrom = toUnixTime(visLogical.from)
   const lTo = toUnixTime(visLogical.to)
@@ -334,7 +328,7 @@ export class DrawingsPrimitive implements IPanePrimitive {
       if (d.type === 'h-ray') {
         const data = d.data as HRayDrawing
         const py = series.priceToCoordinate(data.price)
-        const px = timeToPixel(chart, data.time as Time, data.logical)
+        const px = timeToPixel(chart, data.time as Time)
         if (py === null || px === null) continue
         items.push({ type: 'h-ray', id: d.id, x: px, y: py, price: data.price })
       }
@@ -342,9 +336,9 @@ export class DrawingsPrimitive implements IPanePrimitive {
       if (d.type === 't-ray') {
         const data = d.data as TRayDrawing
         const y1 = series.priceToCoordinate(data.fromPrice)
-        const x1 = timeToPixel(chart, data.fromTime as Time, data.fromLogical)
+        const x1 = timeToPixel(chart, data.fromTime as Time)
         const y2 = series.priceToCoordinate(data.toPrice)
-        const x2 = timeToPixel(chart, data.toTime as Time, data.toLogical)
+        const x2 = timeToPixel(chart, data.toTime as Time)
         if (y1 === null || x1 === null || y2 === null || x2 === null) continue
 
         const dx = x2 - x1
@@ -376,9 +370,9 @@ export class DrawingsPrimitive implements IPanePrimitive {
       if (d.type === 'segment') {
         const data = d.data as SegmentDrawing
         const y1 = series.priceToCoordinate(data.fromPrice)
-        const x1 = timeToPixel(chart, data.fromTime as Time, data.fromLogical)
+        const x1 = timeToPixel(chart, data.fromTime as Time)
         const y2 = series.priceToCoordinate(data.toPrice)
-        const x2 = timeToPixel(chart, data.toTime as Time, data.toLogical)
+        const x2 = timeToPixel(chart, data.toTime as Time)
         if (y1 === null || x1 === null || y2 === null || x2 === null) continue
         items.push({ type: 'segment', id: d.id, x1, y1, x2, y2 })
       }
