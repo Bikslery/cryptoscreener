@@ -5,9 +5,9 @@ const MIN_VOLUME_M = 0
 const MAX_VOLUME_M = 250
 
 function formatVolumeLabel(millions: number): string {
-  if (millions <= 0) return '$0'
-  if (millions >= 1000) return `$${(millions / 1000).toFixed(1)}B`
-  return `$${Math.round(millions)}M`
+  if (millions <= 0) return '0M'
+  if (millions >= 1000) return `${(millions / 1000).toFixed(1)}B`
+  return `${Math.round(millions)}M`
 }
 
 export function VolumeSlider() {
