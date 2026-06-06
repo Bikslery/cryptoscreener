@@ -34,20 +34,23 @@
   -webkit-appearance: none;
   appearance: none;
   width: 110px;
-  height: 4px;
+  height: 10px;
   margin: 0;
   padding: 0;
-  background: linear-gradient(
-    to right,
-    rgba(255, 255, 255, 0.55) 0%,
-    rgba(255, 255, 255, 0.55) var(--vs-progress, 0%),
-    rgba(255, 255, 255, 0.1) var(--vs-progress, 0%),
-    rgba(255, 255, 255, 0.1) 100%
-  );
-  border-radius: 2px;
+  background: #2a2a2a;
+  border: 0;
+  border-radius: 3px;
   outline: none;
   cursor: pointer;
   transition: filter 0.15s ease;
+  /* Fill the left portion with gray up to thumb position — hard color stop, no transition */
+  background-image: linear-gradient(
+    to right,
+    #8a8a8a 0%,
+    #8a8a8a var(--vs-progress, 0%),
+    #2a2a2a var(--vs-progress, 0%),
+    #2a2a2a 100%
+  );
 }
 
 .volume-slider:hover {
@@ -58,55 +61,56 @@
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
 }
 
-/* WebKit / Blink */
+/* WebKit / Blink — thin vertical indicator on the color boundary */
 .volume-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 8px;
-  height: 14px;
+  width: 2px;
+  height: 16px;
   background: #ffffff;
   border: 0;
-  border-radius: 2px;
-  box-shadow: 0 0 6px rgba(255, 255, 255, 0.45);
+  border-radius: 1px;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
   cursor: grab;
-  transition: box-shadow 0.15s ease, transform 0.15s ease;
+  transition: box-shadow 0.15s ease;
+  /* The thumb sits ON the color boundary; offset it so its center is exactly at the
+     gradient split so it visually divides gray and dark gray. */
+  margin-top: -3px;
 }
 
 .volume-slider:hover::-webkit-slider-thumb {
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.75);
-  transform: scaleY(1.1);
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
 }
 
 .volume-slider:active::-webkit-slider-thumb {
   cursor: grabbing;
-  box-shadow: 0 0 14px rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.95);
 }
 
 /* Firefox */
 .volume-slider::-moz-range-thumb {
-  width: 8px;
-  height: 14px;
+  width: 2px;
+  height: 16px;
   background: #ffffff;
   border: 0;
-  border-radius: 2px;
-  box-shadow: 0 0 6px rgba(255, 255, 255, 0.45);
+  border-radius: 1px;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
   cursor: grab;
-  transition: box-shadow 0.15s ease, transform 0.15s ease;
+  transition: box-shadow 0.15s ease;
 }
 
 .volume-slider:hover::-moz-range-thumb {
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.75);
-  transform: scaleY(1.1);
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
 }
 
 .volume-slider::-moz-range-track {
   background: transparent;
   border: 0;
-  height: 4px;
+  height: 10px;
 }
 
 .volume-slider::-moz-range-progress {
-  background: rgba(255, 255, 255, 0.55);
-  height: 4px;
-  border-radius: 2px;
+  background: #8a8a8a;
+  height: 10px;
+  border-radius: 3px 0 0 3px;
 }
