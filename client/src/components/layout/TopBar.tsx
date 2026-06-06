@@ -2,6 +2,8 @@ import { useCoinListStore, useAuthStore, useUIStore } from '../../store'
 import type { Timeframe, FilterExchange } from '../../types'
 import { LogIn, User, ChevronFirst, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react'
 import { useEffect, useRef } from 'react'
+import { VolumeSlider } from './VolumeSlider'
+import './TopBar.css'
 
 const TF_OPTIONS: { value: Timeframe; label: string }[] = [
   { value: '1m', label: '1М' },
@@ -111,6 +113,8 @@ export function TopBar() {
           <RefreshCw size={13} className={autoRefresh ? '' : ''} />
           {autoRefresh && <span className="tabular-nums">{countdown}</span>}
         </button>
+
+        <VolumeSlider />
       </div>
 
       {/* Право: фильтры бирж + авторизация */}

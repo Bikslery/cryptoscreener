@@ -1,0 +1,112 @@
+/* Volume slider — small music-player-style control in the TopBar */
+
+.volume-slider-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 10px 0 10px;
+  height: 30px;
+  border-radius: 6px;
+  transition: background var(--transition, 0.2s ease);
+}
+
+.volume-slider-wrap:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.volume-slider-value {
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-secondary, #e5e5e5);
+  font-weight: 500 !important;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  user-select: none;
+  text-shadow: 0 0 6px rgba(255, 255, 255, 0.15);
+  min-width: 22px;
+  text-align: center;
+}
+
+.volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 110px;
+  height: 4px;
+  margin: 0;
+  padding: 0;
+  background: linear-gradient(
+    to right,
+    rgba(255, 255, 255, 0.55) 0%,
+    rgba(255, 255, 255, 0.55) var(--vs-progress, 0%),
+    rgba(255, 255, 255, 0.1) var(--vs-progress, 0%),
+    rgba(255, 255, 255, 0.1) 100%
+  );
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.volume-slider:hover {
+  filter: brightness(1.1);
+}
+
+.volume-slider:focus-visible {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+}
+
+/* WebKit / Blink */
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 8px;
+  height: 14px;
+  background: #ffffff;
+  border: 0;
+  border-radius: 2px;
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.45);
+  cursor: grab;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.volume-slider:hover::-webkit-slider-thumb {
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.75);
+  transform: scaleY(1.1);
+}
+
+.volume-slider:active::-webkit-slider-thumb {
+  cursor: grabbing;
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.9);
+}
+
+/* Firefox */
+.volume-slider::-moz-range-thumb {
+  width: 8px;
+  height: 14px;
+  background: #ffffff;
+  border: 0;
+  border-radius: 2px;
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.45);
+  cursor: grab;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.volume-slider:hover::-moz-range-thumb {
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.75);
+  transform: scaleY(1.1);
+}
+
+.volume-slider::-moz-range-track {
+  background: transparent;
+  border: 0;
+  height: 4px;
+}
+
+.volume-slider::-moz-range-progress {
+  background: rgba(255, 255, 255, 0.55);
+  height: 4px;
+  border-radius: 2px;
+}

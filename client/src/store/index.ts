@@ -40,6 +40,24 @@ function buildCoinMap(coins: UnifiedTicker[]): Map<string, UnifiedTicker> {
   return m
 }
 
+const VOLUME_FILTER_MIN = 0
+const VOLUME_FILTER_MAX = 250_000_000
+const VOLUME_FILTER_DEFAULT = 50_000_000
+const VOLUME_FILTER_STORAGE_KEY = 'serotonin.minVolume24h'
+
+function readStoredMinVolume(): number {
+  if (typeof window === 'undefined') return VOLUME_FILTER_DEFAULT
+  try {
+    const raw = window.localStorage.getItem(VOLUME_FILTER_STORAGE_KEY)
+    if (!raw) return VOLUME_FILTER_DEFAULT
+    const parsed = Number.parseFloat(raw)
+    if (!Number.isFinite(parsed)) return VOLUME_FILTER_DEFAULT
+    return Math.max(VOLUME_FILTER_MIN, Math.min(VOLUME_FILTER_MAX, parsed))
+  } catch {
+    return VOLUME_FILTER_DEFAULT
+  }
+}
+
 interface CoinListStore {
   coins: UnifiedTicker[]
   sortedCoins: UnifiedTicker[]
@@ -50,6 +68,7 @@ interface CoinListStore {
   expandedSymbol: string | null
   activeTimeframe: Timeframe
   filterExchange: FilterExchange
+  minVolume24h: number
   pageIndex: number
   pageCount: number
   autoRefresh: boolean
@@ -59,6 +78,7 @@ interface CoinListStore {
   expandChart: (symbol: string | null) => void
   setTimeframe: (tf: Timeframe) => void
   setFilterExchange: (fe: FilterExchange) => void
+  setMinVolume24h: (v: number) => void
   setPageIndex: (n: number) => void
   toggleAutoRefresh: () => void
   tickCountdown: () => void
@@ -70,8 +90,14 @@ function filterByExchange(coins: UnifiedTicker[], fe: FilterExchange): UnifiedTi
   return coins.filter(c => c.exchange.includes(fe))
 }
 
-function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; filterExchange: FilterExchange; pageIndex: number }) {
-  const filtered = filterByExchange(state.coins, state.filterExchange)
+function filterByMinVolume(coins: UnifiedTicker[], minVolume24h: number): UnifiedTicker[] {
+  if (!minVolume24h || minVolume24h <= 0) return coins
+  return coins.filter(c => (c.quoteVolume24h ?? 0) >= minVolume24h)
+}
+
+function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; filterExchange: FilterExchange; minVolume24h: number; pageIndex: number }) {
+  const byExchange = filterByExchange(state.coins, state.filterExchange)
+  const filtered = filterByMinVolume(byExchange, state.minVolume24h)
   const sorted = sortCoins(filtered, state.sortBy, state.sortDir)
   const pageCount = Math.max(1, Math.ceil(sorted.length / 9))
   const safePage = Math.min(Math.max(0, state.pageIndex), pageCount - 1)
@@ -124,6 +150,7 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   expandedSymbol: null,
   activeTimeframe: '5m',
   filterExchange: 'all',
+  minVolume24h: readStoredMinVolume(),
   pageIndex: 0,
   pageCount: 1,
   autoRefresh: true,
@@ -163,6 +190,15 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   setFilterExchange: (fe) => {
     const s = get()
     set({ filterExchange: fe, ...recompute({ ...s, filterExchange: fe, pageIndex: 0 }) })
+  },
+
+  setMinVolume24h: (v) => {
+    const s = get()
+    const clamped = Math.max(VOLUME_FILTER_MIN, Math.min(VOLUME_FILTER_MAX, v))
+    if (typeof window !== 'undefined') {
+      try { window.localStorage.setItem(VOLUME_FILTER_STORAGE_KEY, String(clamped)) } catch { /* ignore */ }
+    }
+    set({ minVolume24h: clamped, ...recompute({ ...s, minVolume24h: clamped, pageIndex: 0 }) })
   },
 
   setPageIndex: (n) => {
