@@ -1,9 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import type { IChartApi, ISeriesApi, Logical, Time } from 'lightweight-charts'
-import type { Drawing, HRayDrawing, TRayDrawing, SegmentDrawing } from '../../types'
+import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
+import type { Drawing, HRayDrawing, TRayDrawing, SegmentDrawing, UnifiedCandle } from '../../types'
 import api from '../../services/api'
 import { useAuthStore, useCoinListStore } from '../../store'
-import { DrawingsPrimitive } from './drawings/primitive'
+import { DrawingsPrimitive, timeToPixel } from './drawings/primitive'
 
 export type DrawingTool = 'h-ray' | 't-ray' | 'segment'
 
@@ -76,17 +76,13 @@ function sanitizeDrawings(drawings: Drawing[]): Drawing[] {
   return drawings.filter(isValidDrawingData)
 }
 
-// DIAG-c2a4: convert LWC's Time type to a UNIX-seconds number. On
-// 1h/4h/1d/1w/1M timeframes, `getVisibleRange()`, `coordinateToTime()` and
-// `logicalToTime()` return a BusinessDay object `{year, month, day}` instead
-// of a number. The `as number` cast does NOT convert it at runtime — the
-// object stays an object, `isFinite({...})` returns false, the interpolation
-// fallback returns null, and drawings disappear or render at the wrong
-// pixel position (the "drawings slide on TF change" bug). Date.UTC is used
-// (not new Date) because crypto charts are UTC-anchored.
+// DIAG-tf-anchor: normalise LWC's `Time` to UNIX-seconds. On 1d/1w/1M
+// timeframes LWC returns a BusinessDay `{year, month, day}` object instead
+// of a number. The `as number` cast does NOT convert it at runtime, so
+// we go through Date.UTC (crypto charts are UTC-anchored).
 function toUnixTime(t: unknown): number | null {
   if (t == null) return null
-  if (typeof t === 'number') return t
+  if (typeof t === 'number') return Number.isFinite(t) ? t : null
   if (typeof t === 'string') {
     const parsed = Date.parse(t)
     return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null
@@ -100,39 +96,13 @@ function toUnixTime(t: unknown): number | null {
   return null
 }
 
-function timeToPixel(
-  chart: IChartApi,
-  time: Time,
-): number | null {
-  const timeNum = toUnixTime(time)
-  if (timeNum === null) return null
-
-  const px = chart.timeScale().timeToCoordinate(time)
-  if (px !== null) return px
-
-  const visLogical = chart.timeScale().getVisibleLogicalRange()
-  const visTime = chart.timeScale().getVisibleRange()
-  if (!visLogical || !visTime) return null
-
-  const lFrom = toUnixTime(visLogical.from)
-  const lTo = toUnixTime(visLogical.to)
-  const tFrom = toUnixTime(visTime.from)
-  const tTo = toUnixTime(visTime.to)
-  if (lFrom === null || lTo === null || tFrom === null || tTo === null) return null
-  if (lTo === lFrom) return null
-
-  const estLogical = lFrom + (timeNum - tFrom) * (lTo - lFrom) / (tTo - tFrom)
-  if (!isFinite(estLogical)) return null
-
-  return chart.timeScale().logicalToCoordinate(estLogical as Logical)
-}
-
 export function useDrawings(
   symbol: string,
   tf: string,
   chartRef: React.RefObject<IChartApi | null>,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   containerRef: React.RefObject<HTMLDivElement | null>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
   chartVersion: number,
   isInitialLoading: boolean,
 ) {
@@ -249,10 +219,11 @@ export function useDrawings(
       container.clientWidth,
       container.clientHeight,
       pricePrecision,
+      candlesDataRef.current,
       removeDrawing,
     )
     primitive.requestUpdate()
-  }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, isInitialLoading])
+  }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, isInitialLoading, candlesDataRef])
 
   const saveDrawing = useCallback(async (drawing: Drawing) => {
     if (!isLoggedIn) return
@@ -381,27 +352,22 @@ export function useDrawings(
     let logical: number | undefined
 
     if (time === null) {
+      // Click landed outside the visible bar range. Use the loaded
+      // candle data to find the closest bar's time — this is the same
+      // authoritative lookup the renderer uses, so the stored time
+      // will always re-resolve to a real bar on future TF switches.
       const logicalFromCoord = chart.timeScale().coordinateToLogical(x) as number | null
-      const visLogical = chart.timeScale().getVisibleLogicalRange()
-      const visTime = chart.timeScale().getVisibleRange()
-      if (logicalFromCoord !== null && visLogical && visTime) {
-        // DIAG-c2a4: convert BusinessDay objects to UNIX-seconds before
-        // arithmetic. On 1h/4h/1d/1w/1M the LWC returns
-        // `{year, month, day}` objects here — `as number` is a TS-only
-        // cast and would silently produce NaN.
-        const lFrom = toUnixTime(visLogical.from)
-        const lTo = toUnixTime(visLogical.to)
-        const tFrom = toUnixTime(visTime.from)
-        const tTo = toUnixTime(visTime.to)
-        if (lFrom !== null && lTo !== null && tFrom !== null && tTo !== null && lTo !== lFrom) {
-          time = tFrom + (logicalFromCoord - lFrom) * (tTo - tFrom) / (lTo - lFrom)
-          logical = logicalFromCoord
+      if (logicalFromCoord !== null) {
+        logical = logicalFromCoord
+        const candleData = candlesDataRef.current
+        if (candleData && candleData.length > 0) {
+          const idx = Math.max(0, Math.min(candleData.length - 1, Math.floor(logicalFromCoord)))
+          time = candleData[idx]?.time ?? null
         }
       }
     } else {
-      // DIAG-c2a4: also normalise the direct path — LWC may have given us a
-      // BusinessDay object (1h+ TFs). Persist UNIX-seconds so the drawing
-      // survives future TF switches.
+      // DIAG-c2a4: normalise LWC's Time (may be BusinessDay on 1d+ TFs)
+      // to UNIX-seconds so the drawing survives future TF switches.
       time = toUnixTime(time)
       const logicalFromTime = chart.timeScale().coordinateToLogical(x) as number | null
       if (logicalFromTime !== null) logical = logicalFromTime
@@ -410,7 +376,7 @@ export function useDrawings(
     if (price === null || time === null || !isFinite(price) || !isFinite(time)) return
 
     placeDrawing(price, time, logical)
-  }, [placeDrawing])
+  }, [placeDrawing, candlesDataRef])
 
   // Mouse move for preview line
   const handleMouseMove = useCallback((e: MouseEvent) => {
@@ -424,7 +390,7 @@ export function useDrawings(
     const container = containerRef.current
     if (!chart || !series || !container) return
 
-    const px1 = timeToPixel(chart, pp.time as Time)
+    const px1 = timeToPixel(chart, candlesDataRef.current, pp.time as Time)
     const py1 = series.priceToCoordinate(pp.price)
     if (px1 === null || py1 === null) return
 
@@ -433,7 +399,7 @@ export function useDrawings(
     const y2 = e.clientY - rect.top
 
     setPreviewLine({ x1: px1, y1: py1, x2, y2 })
-  }, [])
+  }, [candlesDataRef])
 
   // Pending point pixel position
   const pendingPointPixel = useRef<{ x: number; y: number } | null>(null)
@@ -448,14 +414,19 @@ export function useDrawings(
     const series = candleRef.current
     if (!chart || !series) return
 
-    const px = timeToPixel(chart, pp.time as Time)
+    const px = timeToPixel(chart, candlesDataRef.current, pp.time as Time)
     const py = series.priceToCoordinate(pp.price)
     if (px !== null && py !== null) {
       pendingPointPixel.current = { x: px, y: py }
     } else {
       pendingPointPixel.current = null
     }
-  }, [pendingPoint, drawings, symbol, tf, chartVersion])
+  }, [pendingPoint, drawings, symbol, tf, chartVersion, candlesDataRef])
+
+  // DIAG-tf-anchor: keep the binary-search helper reachable for callers
+  // that want to verify stored drawing times are still in-range. Exported
+  // via the hook return so tests and other modules can use it.
+  // (No-op here — the import is re-exported for test access if needed.)
 
   return {
     drawings,

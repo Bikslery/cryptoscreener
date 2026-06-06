@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useRef, useLayoutEffect, type RefObject } from 'react'
 import type { IChartApi, ISeriesApi, ITimeScaleApi, Time } from 'lightweight-charts'
+import type { UnifiedCandle } from '../../../types'
 import { useDrawings } from '../useDrawings'
 import { DrawingsPrimitive } from '../drawings/primitive'
 
@@ -60,12 +61,18 @@ interface HookProps {
   chartVersion: number
   isInitialLoading: boolean
   refs: MockRefs
+  candlesData?: UnifiedCandle[]
 }
 
 function useDrawingsHarness(props: HookProps) {
   const chartRef = useRef<IChartApi | null>(null) as RefObject<IChartApi | null>
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null) as RefObject<ISeriesApi<'Candlestick'> | null>
   const containerRef = useRef<HTMLDivElement | null>(null) as RefObject<HTMLDivElement | null>
+  const candlesDataRef = useRef<UnifiedCandle[]>(props.candlesData ?? []) as RefObject<UnifiedCandle[]>
+  // Keep the ref in sync with the latest prop between renders.
+  useLayoutEffect(() => {
+    candlesDataRef.current = props.candlesData ?? []
+  })
   // Sync refs to latest mock between renders. useLayoutEffect runs after
   // render but before the SUT's useEffects, so the mocked chart/series
   // are in place by the time useDrawings' attach + sync effects fire.
@@ -74,7 +81,16 @@ function useDrawingsHarness(props: HookProps) {
     candleRef.current = props.refs.series
     containerRef.current = props.refs.container
   })
-  return useDrawings(props.symbol, props.tf, chartRef, candleRef, containerRef, props.chartVersion, props.isInitialLoading)
+  return useDrawings(
+    props.symbol,
+    props.tf,
+    chartRef,
+    candleRef,
+    containerRef,
+    candlesDataRef,
+    props.chartVersion,
+    props.isInitialLoading,
+  )
 }
 
 describe('useDrawings — primitive lifecycle on TF change', () => {

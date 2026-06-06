@@ -993,7 +993,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     previewLine,
     primitiveRef,
     CLICK_THRESHOLD,
-  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, chartVersion, isInitialLoading)
+  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
 
   useEffect(() => {
     destroyedRef.current = false

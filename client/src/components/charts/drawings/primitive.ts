@@ -9,7 +9,7 @@ import type {
   Time,
   Logical,
 } from 'lightweight-charts'
-import type { Drawing, HRayDrawing, TRayDrawing, SegmentDrawing } from '../../../types'
+import type { Drawing, HRayDrawing, TRayDrawing, SegmentDrawing, UnifiedCandle } from '../../../types'
 
 interface CanvasTarget {
   useMediaCoordinateSpace(cb: (scope: { context: CanvasRenderingContext2D }) => void): void
@@ -45,21 +45,75 @@ interface SegmentItem {
 
 type DrawItem = HRayItem | TRayItem | SegmentItem
 
-// DIAG-c2a4: convert LWC's Time type to a UNIX-seconds number. On
-// 1h/4h/1d/1w/1M timeframes, `getVisibleRange()`, `coordinateToTime()` and
-// `logicalToTime()` return a BusinessDay object `{year, month, day}` instead
-// of a number. Without this helper, the `as number` casts in timeToPixel
-// would silently fail and drawings would render at wrong pixel positions
-// after a TF change (the "drawings slide on TF change" bug).
-function toUnixTime(t: unknown): number | null {
-  if (t == null) return null
-  if (typeof t === 'number') return t
-  if (typeof t === 'string') {
-    const parsed = Date.parse(t)
+// DIAG-tf-anchor: return the index of the bar whose time is the largest
+// <= `targetTime`. Returns null when the target is BEFORE the first bar
+// of the dataset (rendering nothing is the correct behaviour — the drawing
+// is anchored to a moment that hasn't been loaded yet).
+//
+// The previous implementation used linear interpolation between
+// (visLogical.from, visTime.from) and (visLogical.to, visTime.to). That
+// was wrong in two ways:
+//   1. The visible range is a *window*; it doesn't tell us anything about
+//      bars that exist but are scrolled out of view. For those bars the
+//      extrapolation silently produced a pixel far from the bar's real
+//      position, which manifested as the "drawings slide on TF change"
+//      bug.
+//   2. The visible range anchors are bar-bounded — i.e., a 1h TF's first
+//      visible bar is at HH:00:00. A click at 14:23 (inside the 14:00
+//      bar) is NOT a 1h bar time, so `timeToCoordinate` returns null and
+//      the fallback was triggered for every sub-bar click after a TF
+//      switch.
+//
+// This binary search is O(log n), exact for the bar that contains the
+// target time, and uses the actual loaded candle data so off-screen bars
+// still resolve correctly. Combined with LWC's `logicalToCoordinate` (which
+// returns null for logicals outside the visible range), off-screen
+// drawings naturally hide without a special case.
+export function findBarByTime(
+  candleData: ReadonlyArray<UnifiedCandle> | null | undefined,
+  targetTime: number,
+): number | null {
+  if (!candleData || candleData.length === 0) return null
+  if (!Number.isFinite(targetTime)) return null
+
+  const first = candleData[0]
+  const last = candleData[candleData.length - 1]
+  if (targetTime < first.time) return null
+
+  let lo = 0
+  let hi = candleData.length - 1
+
+  // Fast paths for the common boundaries.
+  if (targetTime >= last.time) return hi
+
+  // Standard lower-bound binary search: find the rightmost bar with
+  // time <= targetTime.
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >>> 1
+    if (candleData[mid].time <= targetTime) {
+      lo = mid
+    } else {
+      hi = mid - 1
+    }
+  }
+  return lo
+}
+
+// DIAG-c2a4: guard against corrupt drawing data. LWC's `timeToCoordinate`
+// throws on null/NaN/Infinity, which crashed the whole chart render for
+// symbols with legacy localStorage entries.
+function sanitizeTime(time: unknown): number | null {
+  if (time == null) return null
+  if (typeof time === 'number') {
+    return Number.isFinite(time) ? time : null
+  }
+  if (typeof time === 'string') {
+    const parsed = Date.parse(time)
     return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null
   }
-  if (typeof t === 'object') {
-    const o = t as { year?: unknown; month?: unknown; day?: unknown }
+  if (typeof time === 'object') {
+    // LWC may return BusinessDay {year, month, day} on 1d/1w/1M TFs.
+    const o = time as { year?: unknown; month?: unknown; day?: unknown }
     if (typeof o.year === 'number' && typeof o.month === 'number' && typeof o.day === 'number') {
       return Math.floor(Date.UTC(o.year, o.month - 1, o.day) / 1000)
     }
@@ -67,36 +121,31 @@ function toUnixTime(t: unknown): number | null {
   return null
 }
 
+// DIAG-tf-anchor: time → pixel conversion. Order of attempts:
+//   1. LWC's cached `timeToCoordinate` (fast path, exact-bar lookup).
+//   2. Binary search in the loaded candle data → bar index →
+//      `logicalToCoordinate` (correct for sub-bar times and for any time
+//      inside the loaded data range, on-screen or not).
+//   3. Returns null if the time is outside the loaded data — drawing is
+//      off-chart, no pixel exists.
 export function timeToPixel(
   chart: IChartApi,
+  candleData: ReadonlyArray<UnifiedCandle> | null | undefined,
   time: Time,
 ): number | null {
-  // DIAG-c2a4: guard MUST run before timeToCoordinate — LWC throws on
-  // null/NaN/Infinity and crashes the whole chart render. This was the
-  // root cause of "Chart error" for symbols with legacy/corrupt drawings
-  // (e.g. BTC/ETH/SOL had old localStorage entries with time: null).
-  if (time == null) return null
-  const timeNum = toUnixTime(time)
+  const timeNum = sanitizeTime(time)
   if (timeNum === null) return null
 
-  const px = chart.timeScale().timeToCoordinate(time)
-  if (px !== null) return px
+  // 1. Fast path: exact bar match in LWC's coordinate cache.
+  const cached = chart.timeScale().timeToCoordinate(time as Time)
+  if (cached !== null) return cached
 
-  const visLogical = chart.timeScale().getVisibleLogicalRange()
-  const visTime = chart.timeScale().getVisibleRange()
-  if (!visLogical || !visTime) return null
+  // 2. Authoritative fallback: find the bar containing the time in the
+  // actual candle data, then ask LWC where that logical position is.
+  const barIndex = findBarByTime(candleData, timeNum)
+  if (barIndex === null) return null
 
-  const lFrom = toUnixTime(visLogical.from)
-  const lTo = toUnixTime(visLogical.to)
-  const tFrom = toUnixTime(visTime.from)
-  const tTo = toUnixTime(visTime.to)
-  if (lFrom === null || lTo === null || tFrom === null || tTo === null) return null
-  if (lTo === lFrom) return null
-
-  const estLogical = lFrom + (timeNum - tFrom) * (lTo - lFrom) / (tTo - tFrom)
-  if (!isFinite(estLogical)) return null
-
-  return chart.timeScale().logicalToCoordinate(estLogical as Logical)
+  return chart.timeScale().logicalToCoordinate(barIndex as Logical)
 }
 
 class DrawingsRenderer implements IPrimitivePaneRenderer {
@@ -224,6 +273,7 @@ export class DrawingsPrimitive implements IPanePrimitive {
   private _drawings: Drawing[] = []
   private _chart: IChartApi | null = null
   private _series: ISeriesApi<'Candlestick'> | null = null
+  private _candleData: ReadonlyArray<UnifiedCandle> | null = null
   private _pricePrecision = 2
   private _onRemove: ((id: string) => void) | null = null
   private _requestUpdate: (() => void) | null = null
@@ -246,6 +296,7 @@ export class DrawingsPrimitive implements IPanePrimitive {
     cw: number,
     ch: number,
     pricePrecision: number,
+    candleData: ReadonlyArray<UnifiedCandle> | null,
     onRemove: (id: string) => void,
   ) {
     this._drawings = drawings.filter(
@@ -253,6 +304,7 @@ export class DrawingsPrimitive implements IPanePrimitive {
     )
     this._chart = chart
     this._series = series
+    this._candleData = candleData
     this._cw = cw
     this._ch = ch
     this._pricePrecision = pricePrecision
@@ -324,11 +376,13 @@ export class DrawingsPrimitive implements IPanePrimitive {
       return
     }
 
+    const candleData = this._candleData
+
     for (const d of this._drawings) {
       if (d.type === 'h-ray') {
         const data = d.data as HRayDrawing
         const py = series.priceToCoordinate(data.price)
-        const px = timeToPixel(chart, data.time as Time)
+        const px = timeToPixel(chart, candleData, data.time as Time)
         if (py === null || px === null) continue
         items.push({ type: 'h-ray', id: d.id, x: px, y: py, price: data.price })
       }
@@ -336,9 +390,9 @@ export class DrawingsPrimitive implements IPanePrimitive {
       if (d.type === 't-ray') {
         const data = d.data as TRayDrawing
         const y1 = series.priceToCoordinate(data.fromPrice)
-        const x1 = timeToPixel(chart, data.fromTime as Time)
+        const x1 = timeToPixel(chart, candleData, data.fromTime as Time)
         const y2 = series.priceToCoordinate(data.toPrice)
-        const x2 = timeToPixel(chart, data.toTime as Time)
+        const x2 = timeToPixel(chart, candleData, data.toTime as Time)
         if (y1 === null || x1 === null || y2 === null || x2 === null) continue
 
         const dx = x2 - x1
@@ -370,9 +424,9 @@ export class DrawingsPrimitive implements IPanePrimitive {
       if (d.type === 'segment') {
         const data = d.data as SegmentDrawing
         const y1 = series.priceToCoordinate(data.fromPrice)
-        const x1 = timeToPixel(chart, data.fromTime as Time)
+        const x1 = timeToPixel(chart, candleData, data.fromTime as Time)
         const y2 = series.priceToCoordinate(data.toPrice)
-        const x2 = timeToPixel(chart, data.toTime as Time)
+        const x2 = timeToPixel(chart, candleData, data.toTime as Time)
         if (y1 === null || x1 === null || y2 === null || x2 === null) continue
         items.push({ type: 'segment', id: d.id, x1, y1, x2, y2 })
       }
