@@ -252,7 +252,7 @@ export function useDrawings(
       removeDrawing,
     )
     primitive.requestUpdate()
-  }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing])
+  }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, isInitialLoading])
 
   const saveDrawing = useCallback(async (drawing: Drawing) => {
     if (!isLoggedIn) return
