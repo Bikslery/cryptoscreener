@@ -50,6 +50,14 @@ function timeToPixel(
   time: Time,
   logical?: number,
 ): number | null {
+  // DIAG-fd0c: guard MUST run before timeToCoordinate — LWC throws on
+  // null/NaN/Infinity and crashes the whole chart render. This was the
+  // root cause of "Chart error" for symbols with legacy/corrupt drawings
+  // (e.g. BTC/ETH/SOL had old localStorage entries with time: null).
+  if (time == null) return null
+  const timeNum = time as number
+  if (typeof timeNum !== 'number' || !isFinite(timeNum)) return null
+
   const px = chart.timeScale().timeToCoordinate(time)
   if (px !== null) return px
 
@@ -67,9 +75,6 @@ function timeToPixel(
   const tFrom = visTime.from as number
   const tTo = visTime.to as number
   if (lTo === lFrom || !isFinite(tFrom) || !isFinite(tTo)) return null
-
-  const timeNum = time as number
-  if (!isFinite(timeNum)) return null
 
   const estLogical = lFrom + (timeNum - tFrom) * (lTo - lFrom) / (tTo - tFrom)
   if (!isFinite(estLogical)) return null

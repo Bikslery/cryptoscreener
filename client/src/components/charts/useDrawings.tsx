@@ -47,6 +47,35 @@ function saveToStorage(symbol: string, drawings: Drawing[]) {
   } catch {}
 }
 
+// DIAG-fd0c: validate drawing data shape before rendering. Legacy localStorage
+// entries (pre-drawings-rewrite) may have `time: null`, `time: NaN`, or
+// `logical` coords stored as the only time source. Passing those to LWC's
+// timeToCoordinate throws an uncaught error that crashes the whole ChartGrid.
+function isFiniteNum(n: unknown): n is number {
+  return typeof n === 'number' && isFinite(n)
+}
+
+function isValidDrawingData(d: Drawing): boolean {
+  if (!d || !d.data) return false
+  if (d.type === 'h-ray') {
+    const data = d.data as { price?: unknown; time?: unknown; logical?: unknown }
+    return isFiniteNum(data.price) && isFiniteNum(data.time)
+  }
+  if (d.type === 't-ray' || d.type === 'segment') {
+    const data = d.data as {
+      fromPrice?: unknown; fromTime?: unknown;
+      toPrice?: unknown; toTime?: unknown;
+    }
+    return isFiniteNum(data.fromPrice) && isFiniteNum(data.fromTime)
+        && isFiniteNum(data.toPrice)   && isFiniteNum(data.toTime)
+  }
+  return false
+}
+
+function sanitizeDrawings(drawings: Drawing[]): Drawing[] {
+  return drawings.filter(isValidDrawingData)
+}
+
 function timeToPixel(
   chart: IChartApi,
   time: Time,
@@ -111,7 +140,7 @@ export function useDrawings(
   // Load drawings: localStorage first (instant), then server (if auth)
   useEffect(() => {
     const reqSymbol = symbol
-    const stored = loadFromStorage(reqSymbol).filter(
+    const stored = sanitizeDrawings(loadFromStorage(reqSymbol)).filter(
       d => d.type === 'h-ray' || d.type === 't-ray' || d.type === 'segment'
     )
     setDrawings(stored)
@@ -120,7 +149,7 @@ export function useDrawings(
     api.get('/drawings', { params: { symbol: reqSymbol } })
       .then(res => {
         if (symbolRef.current !== reqSymbol) return
-        const serverDrawings = (res.data as Drawing[]).filter(
+        const serverDrawings = sanitizeDrawings(res.data as Drawing[]).filter(
           d => d.type === 'h-ray' || d.type === 't-ray' || d.type === 'segment'
         )
         const final = serverDrawings.length > 0 ? serverDrawings : stored
@@ -138,9 +167,22 @@ export function useDrawings(
     const primitive = new DrawingsPrimitive()
     primitiveRef.current = primitive
 
-    const pane = chart.panes()[0]
+    // DIAG-fd0c: wrap panes() in try-catch — chart.panes() may throw or
+    // return an empty array during chart init/destroy. Without this guard,
+    // the whole ChartGrid unmounts and the user sees "Chart error".
+    let pane: ReturnType<typeof chart.panes>[number] | undefined
+    try {
+      pane = chart.panes()[0]
+    } catch (err) {
+      console.debug('[useDrawings] Failed to read chart.panes()', err)
+      pane = undefined
+    }
     if (pane) {
-      pane.attachPrimitive(primitive)
+      try {
+        pane.attachPrimitive(primitive)
+      } catch (err) {
+        console.debug('[useDrawings] Failed to attach primitive', err)
+      }
     }
 
     return () => {
