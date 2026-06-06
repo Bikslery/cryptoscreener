@@ -1,142 +1,20 @@
-/* Volume filter — pill button + popover with the actual slider */
+/* Volume filter — inline pill slider in the TopBar.
+   The pill itself is a slider: dragging anywhere changes the value.
+   The background is split into gray (#8a8a8a) and dark gray (#2a2a2a)
+   at the current value position. The native input is fully transparent
+   and overlays the pill to handle drag/clicks. */
 
 .volume-filter {
   position: relative;
   display: inline-flex;
   align-items: center;
-}
-
-/* ── Button (always visible in TopBar) ── */
-.volume-filter-button {
-  display: inline-flex;
-  align-items: center;
   gap: 6px;
   height: 30px;
+  width: 180px;
   padding: 0 10px;
-  background: #141414;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 6px;
-  color: #e5e5e5;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 11px;
-  font-weight: 500 !important;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
-  white-space: nowrap;
-  user-select: none;
-}
-
-.volume-filter-button:hover {
-  background: #1a1a1a;
-  border-color: rgba(255, 255, 255, 0.18);
-}
-
-.volume-filter-button.is-open {
-  background: #1f1f1f;
-  border-color: rgba(255, 255, 255, 0.28);
-}
-
-.volume-filter-icon {
-  color: #b0b0b0;
-  flex-shrink: 0;
-}
-
-.volume-filter-button:hover .volume-filter-icon,
-.volume-filter-button.is-open .volume-filter-icon {
-  color: #ffffff;
-}
-
-.volume-filter-label {
-  color: #888;
-}
-
-.volume-filter-button:hover .volume-filter-label,
-.volume-filter-button.is-open .volume-filter-label {
-  color: #b0b0b0;
-}
-
-.volume-filter-value {
-  color: #ffffff;
-  font-weight: 600 !important;
-  min-width: 38px;
-  text-align: right;
-  text-shadow: 0 0 6px rgba(255, 255, 255, 0.2);
-}
-
-/* ── Popover (appears below the button) ── */
-.volume-filter-popover {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: #0f0f0f;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  padding: 14px 18px 12px;
-  z-index: 100;
-  box-shadow:
-    0 8px 28px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(0, 0, 0, 0.4) inset;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 10px;
-  min-width: 220px;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  animation: volume-filter-popover-in 120ms ease-out;
-}
-
-@keyframes volume-filter-popover-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
-  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
-}
-
-/* Caret pointing up to the button */
-.volume-filter-popover::before {
-  content: '';
-  position: absolute;
-  top: -5px;
-  left: 50%;
-  transform: translateX(-50%) rotate(45deg);
-  width: 8px;
-  height: 8px;
-  background: #0f0f0f;
-  border-left: 1px solid rgba(255, 255, 255, 0.12);
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-.volume-filter-popover-label {
-  font-size: 9px;
-  color: #888;
-  letter-spacing: 0.08em;
-  text-align: center;
-  font-weight: 600 !important;
-}
-
-.volume-filter-popover-bounds {
-  display: flex;
-  justify-content: space-between;
-  font-size: 9px;
-  color: #555;
-  letter-spacing: 0.05em;
-  margin-top: -4px;
-}
-
-/* ── Slider (used inside the popover) ── */
-.volume-slider {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 100%;
-  height: 10px;
-  margin: 0;
-  padding: 0;
   background: #2a2a2a;
-  border: 0;
-  border-radius: 3px;
-  outline: none;
-  cursor: pointer;
-  transition: filter 0.15s ease;
   background-image: linear-gradient(
     to right,
     #8a8a8a 0%,
@@ -144,64 +22,106 @@
     #2a2a2a var(--vs-progress, 0%),
     #2a2a2a 100%
   );
+  color: #e5e5e5;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500 !important;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
+  cursor: ew-resize;
+  overflow: hidden;
+  transition: border-color 0.15s ease, filter 0.15s ease;
+  flex-shrink: 0;
 }
 
-.volume-slider:hover {
-  filter: brightness(1.1);
+.volume-filter:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  filter: brightness(1.05);
 }
 
-.volume-slider:focus-visible {
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+.volume-filter:focus-within {
+  border-color: rgba(255, 255, 255, 0.35);
 }
 
-/* WebKit / Blink — thin vertical indicator on the color boundary */
-.volume-slider::-webkit-slider-thumb {
+/* Content — pointer-events disabled so the input catches all clicks */
+.volume-filter-icon,
+.volume-filter-label,
+.volume-filter-value {
+  pointer-events: none;
+}
+
+.volume-filter-icon {
+  color: #d0d0d0;
+  flex-shrink: 0;
+}
+
+.volume-filter-label {
+  color: #b0b0b0;
+}
+
+.volume-filter-value {
+  margin-left: auto;
+  color: #ffffff;
+  font-weight: 600 !important;
+  min-width: 40px;
+  text-align: right;
+  text-shadow: 0 0 6px rgba(255, 255, 255, 0.25);
+}
+
+/* Invisible native input — fills the pill and handles drag */
+.volume-filter-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: ew-resize;
   -webkit-appearance: none;
   appearance: none;
-  width: 2px;
-  height: 16px;
-  background: #ffffff;
-  border: 0;
-  border-radius: 1px;
-  box-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
-  cursor: grab;
-  transition: box-shadow 0.15s ease;
-  margin-top: -3px;
+  outline: none;
+  z-index: 1;
 }
 
-.volume-slider:hover::-webkit-slider-thumb {
-  box-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
-}
-
-.volume-slider:active::-webkit-slider-thumb {
-  cursor: grabbing;
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.95);
-}
-
-/* Firefox */
-.volume-slider::-moz-range-thumb {
-  width: 2px;
-  height: 16px;
-  background: #ffffff;
-  border: 0;
-  border-radius: 1px;
-  box-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
-  cursor: grab;
-  transition: box-shadow 0.15s ease;
-}
-
-.volume-slider:hover::-moz-range-thumb {
-  box-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
-}
-
-.volume-slider::-moz-range-track {
+.volume-filter-input::-webkit-slider-runnable-track {
+  -webkit-appearance: none;
+  appearance: none;
   background: transparent;
   border: 0;
-  height: 10px;
+  width: 100%;
+  height: 100%;
 }
 
-.volume-slider::-moz-range-progress {
-  background: #8a8a8a;
-  height: 10px;
-  border-radius: 3px 0 0 3px;
+.volume-filter-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  width: 100%;
+  height: 100%;
+  box-shadow: none;
+  cursor: ew-resize;
+}
+
+.volume-filter-input::-moz-range-track {
+  background: transparent;
+  border: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.volume-filter-input::-moz-range-thumb {
+  background: transparent;
+  border: 0;
+  width: 100%;
+  height: 100%;
+  box-shadow: none;
+  cursor: ew-resize;
+}
+
+.volume-filter-input::-moz-range-progress {
+  background: transparent;
 }
