@@ -5,6 +5,7 @@ import { TopBar } from './components/layout/TopBar'
 import { RightPanel } from './components/layout/RightPanel'
 import AuthModal from './components/auth/AuthModal'
 import ProfileModal from './components/auth/ProfileModal'
+import ExchangeModal from './components/exchange/ExchangeModal'
 import { useCoinListStore, useAuthStore, useUIStore } from './store'
 import { wsConnect, wsDisconnect } from './services/ws'
 import type { Timeframe } from './types'
@@ -25,6 +26,7 @@ function App() {
   const isChecking = useAuthStore(s => s.isChecking)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
   const showProfile = useUIStore(s => s.showProfile)
+  const showExchangeModal = useUIStore(s => s.showExchangeModal)
 
   useEffect(() => {
     checkSession()
@@ -61,7 +63,7 @@ function App() {
 
       // Не листаем при открытом модальном окне или в развёрнутом графике.
       const ui = useUIStore.getState()
-      if (ui.showAuth || ui.showProfile) return
+      if (ui.showAuth || ui.showProfile || ui.showExchangeModal) return
       const s = useCoinListStore.getState()
 
       if (hotkeyTimeframe) {
@@ -109,6 +111,7 @@ function App() {
         <RightPanel />
       </div>
       {showProfile && <ProfileModal />}
+      {showExchangeModal && <ExchangeModal />}
     </div>
   )
 }

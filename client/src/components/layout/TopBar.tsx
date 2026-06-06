@@ -1,6 +1,6 @@
 import { useCoinListStore, useAuthStore, useUIStore } from '../../store'
-import type { Timeframe, FilterExchange } from '../../types'
-import { LogIn, User, ChevronFirst, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react'
+import type { Timeframe } from '../../types'
+import { LogIn, User, ChevronFirst, ChevronLeft, ChevronRight, RefreshCw, ArrowLeftRight } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { VolumeSlider } from './VolumeSlider'
 import './TopBar.css'
@@ -15,23 +15,14 @@ const TF_OPTIONS: { value: Timeframe; label: string }[] = [
   { value: '1w', label: 'Н' },
 ]
 
-const EXCHANGE_FILTERS: { value: FilterExchange; label: string }[] = [
-  { value: 'all', label: 'Все' },
-  { value: 'binance', label: 'Binance' },
-  { value: 'bybit', label: 'Bybit' },
-  { value: 'okx', label: 'OKX' },
-]
-
 export function TopBar() {
   const activeTf = useCoinListStore(s => s.activeTimeframe)
   const setTimeframe = useCoinListStore(s => s.setTimeframe)
-  const filterExchange = useCoinListStore(s => s.filterExchange)
-  const setFilterExchange = useCoinListStore(s => s.setFilterExchange)
   const pageIndex = useCoinListStore(s => s.pageIndex)
   const pageCount = useCoinListStore(s => s.pageCount)
   const setPageIndex = useCoinListStore(s => s.setPageIndex)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
-  const { setShowAuth, setShowProfile } = useUIStore()
+  const { setShowAuth, setShowProfile, setShowExchangeModal } = useUIStore()
   const autoRefresh = useCoinListStore(s => s.autoRefresh)
   const countdown = useCoinListStore(s => s.countdown)
   const toggleAutoRefresh = useCoinListStore(s => s.toggleAutoRefresh)
@@ -117,21 +108,15 @@ export function TopBar() {
         <VolumeSlider />
       </div>
 
-      {/* Право: фильтры бирж + авторизация */}
+      {/* Право: сменить биржу + авторизация */}
       <div className="flex items-center gap-[2px] shrink-0">
-        {EXCHANGE_FILTERS.map(f => (
-          <button
-            key={f.value}
-            className={`clinic-btn clinic-btn-sm text-[12px] ${
-              filterExchange === f.value
-                ? 'clinic-btn-exchange-active'
-                : 'clinic-btn-ghost'
-            }`}
-            onClick={() => setFilterExchange(f.value)}
-          >
-            {f.label}
-          </button>
-        ))}
+        <button
+          className="clinic-btn clinic-btn-ghost clinic-btn-sm flex items-center gap-1.5 text-[11px]"
+          onClick={() => setShowExchangeModal(true)}
+        >
+          <ArrowLeftRight size={13} />
+          <span>Сменить биржу</span>
+        </button>
 
         <div className="w-[1px] h-[20px] bg-[#1f1f1f] mx-2" />
 

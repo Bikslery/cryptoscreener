@@ -1,0 +1,204 @@
+/* ═══════════════════════════════════════════════════════
+   ExchangeModal — .clinic aesthetic, mirrors ProfileModal
+   ═══════════════════════════════════════════════════════ */
+
+.exchange-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Blurred backdrop ── */
+
+.exchange-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* ── Modal card ── */
+
+.exchange-modal {
+  background: var(--bg-card);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-xl);
+  padding: 2rem;
+  width: 420px;
+  max-width: 90vw;
+  position: relative;
+  z-index: 1;
+  box-shadow: var(--shadow-card), var(--glow-border);
+  animation: exchange-fade-in-up 0.5s ease-out;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.exchange-modal:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: var(--shadow-card), var(--glow-border-hover);
+}
+
+/* ── Header ── */
+
+.exchange-header {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin-bottom: 1.4rem;
+  padding-bottom: 1.2rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.exchange-header-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.6);
+  flex-shrink: 0;
+  box-shadow: var(--glow-border);
+  transition: box-shadow var(--transition);
+}
+
+.exchange-header:hover .exchange-header-icon {
+  box-shadow: var(--glow-border-hover);
+}
+
+.exchange-header-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.exchange-title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-shadow: var(--glow-text);
+}
+
+.exchange-subtitle {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}
+
+.exchange-close {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  color: rgba(255, 255, 255, 0.3);
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition), box-shadow var(--transition);
+  flex-shrink: 0;
+}
+
+.exchange-close:hover {
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: var(--glow-border);
+}
+
+/* ── Options list ── */
+
+.exchange-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.exchange-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.9rem 1.1rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+}
+
+.exchange-option:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: var(--glow-border);
+}
+
+.exchange-option.active {
+  border-color: rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: var(--glow-border);
+}
+
+.exchange-option-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.exchange-option-label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-shadow: var(--glow-text);
+}
+
+.exchange-option-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.exchange-option-check {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-primary);
+  flex-shrink: 0;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity var(--transition), transform var(--transition), background var(--transition), border-color var(--transition);
+}
+
+.exchange-option-check.visible {
+  opacity: 1;
+  transform: scale(1);
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.4);
+  box-shadow: var(--glow-border);
+}
+
+/* ── Animations ── */
+
+@keyframes exchange-fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

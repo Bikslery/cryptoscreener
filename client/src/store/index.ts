@@ -1,8 +1,25 @@
 import { create } from 'zustand'
 import { useSyncExternalStore } from 'react'
-import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, FilterExchange, Alert as AlertType } from '../types.js'
+import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, Alert as AlertType } from '../types.js'
 import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
 import api from '../services/api.js'
+
+export type ChartExchange = 'binance-spot' | 'binance-futures'
+
+const CHART_EXCHANGE_STORAGE_KEY = 'serotonin.chartExchange'
+const VALID_CHART_EXCHANGES: ChartExchange[] = ['binance-spot', 'binance-futures']
+const DEFAULT_CHART_EXCHANGE: ChartExchange = 'binance-futures'
+
+function readStoredChartExchange(): ChartExchange {
+  if (typeof window === 'undefined') return DEFAULT_CHART_EXCHANGE
+  try {
+    const raw = window.localStorage.getItem(CHART_EXCHANGE_STORAGE_KEY)
+    if (raw && (VALID_CHART_EXCHANGES as string[]).includes(raw)) {
+      return raw as ChartExchange
+    }
+  } catch { /* ignore */ }
+  return DEFAULT_CHART_EXCHANGE
+}
 
 const EXCHANGE_PRIORITY: Record<Exchange, number> = {
   'binance-futures': 5,
@@ -67,7 +84,7 @@ interface CoinListStore {
   selectedSymbol: string | null
   expandedSymbol: string | null
   activeTimeframe: Timeframe
-  filterExchange: FilterExchange
+  chartExchange: ChartExchange
   minVolume24h: number
   pageIndex: number
   pageCount: number
@@ -77,7 +94,7 @@ interface CoinListStore {
   selectCoin: (symbol: string) => void
   expandChart: (symbol: string | null) => void
   setTimeframe: (tf: Timeframe) => void
-  setFilterExchange: (fe: FilterExchange) => void
+  setChartExchange: (ce: ChartExchange) => void
   setMinVolume24h: (v: number) => void
   setPageIndex: (n: number) => void
   toggleAutoRefresh: () => void
@@ -85,9 +102,8 @@ interface CoinListStore {
   init: () => () => void
 }
 
-function filterByExchange(coins: UnifiedTicker[], fe: FilterExchange): UnifiedTicker[] {
-  if (fe === 'all') return coins
-  return coins.filter(c => c.exchange.includes(fe))
+function filterByChartExchange(coins: UnifiedTicker[], ce: ChartExchange): UnifiedTicker[] {
+  return coins.filter(c => c.exchange === ce)
 }
 
 function filterByMinVolume(coins: UnifiedTicker[], minVolume24h: number): UnifiedTicker[] {
@@ -95,8 +111,8 @@ function filterByMinVolume(coins: UnifiedTicker[], minVolume24h: number): Unifie
   return coins.filter(c => (c.quoteVolume24h ?? 0) >= minVolume24h)
 }
 
-function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; filterExchange: FilterExchange; minVolume24h: number; pageIndex: number }) {
-  const byExchange = filterByExchange(state.coins, state.filterExchange)
+function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; chartExchange: ChartExchange; minVolume24h: number; pageIndex: number }) {
+  const byExchange = filterByChartExchange(state.coins, state.chartExchange)
   const filtered = filterByMinVolume(byExchange, state.minVolume24h)
   const sorted = sortCoins(filtered, state.sortBy, state.sortDir)
   const pageCount = Math.max(1, Math.ceil(sorted.length / 9))
@@ -149,7 +165,7 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   selectedSymbol: null,
   expandedSymbol: null,
   activeTimeframe: '5m',
-  filterExchange: 'all',
+  chartExchange: readStoredChartExchange(),
   minVolume24h: readStoredMinVolume(),
   pageIndex: 0,
   pageCount: 1,
@@ -187,9 +203,13 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
 
   setTimeframe: (tf) => set({ activeTimeframe: tf }),
 
-  setFilterExchange: (fe) => {
+  setChartExchange: (ce) => {
     const s = get()
-    set({ filterExchange: fe, ...recompute({ ...s, filterExchange: fe, pageIndex: 0 }) })
+    if (s.chartExchange === ce) return
+    if (typeof window !== 'undefined') {
+      try { window.localStorage.setItem(CHART_EXCHANGE_STORAGE_KEY, ce) } catch { /* ignore */ }
+    }
+    set({ chartExchange: ce, ...recompute({ ...s, chartExchange: ce, pageIndex: 0 }) })
   },
 
   setMinVolume24h: (v) => {
@@ -436,13 +456,17 @@ export const useAuthStore = create<AuthStore>((set) => ({
 interface UIStore {
   showAuth: boolean
   showProfile: boolean
+  showExchangeModal: boolean
   setShowAuth: (v: boolean) => void
   setShowProfile: (v: boolean) => void
+  setShowExchangeModal: (v: boolean) => void
 }
 
 export const useUIStore = create<UIStore>((set) => ({
   showAuth: false,
   showProfile: false,
+  showExchangeModal: false,
   setShowAuth: (v) => set({ showAuth: v }),
   setShowProfile: (v) => set({ showProfile: v }),
+  setShowExchangeModal: (v) => set({ showExchangeModal: v }),
 }))

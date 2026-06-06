@@ -2,6 +2,7 @@ import { useEffect, useRef, memo, useState, useCallback, useMemo } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore, useLivePrice, setLivePrice } from '../../store'
+import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import type { Timeframe, UnifiedCandle, Exchange } from '../../types'
@@ -232,7 +233,7 @@ function useFullHistory(
 
       // Fallback: individual fetch (server does seamless stitching)
       try {
-        const fetched = await getOrFetchHistory(symbol, tf, limit)
+        const fetched = await getOrFetchHistory(symbol, tf, limit, exchange)
         if (cancelled.value || destroyedRef.current) return
         if (fetched.length > 0) {
           renderCandles(fetched)
@@ -316,15 +317,15 @@ function useLazyScroll(
         const curSymbol = symbolRef.current
         const curExchange = exchangeRef.current
         const curTf = tfRef.current
-        if (curExchange) {
-          const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
-          if (cached && cached.length > 0) {
-            prefetchInflightRef.current = true
-            getOrFetchOlder(curSymbol, curTf, cached[0].time, 1000)
-              .catch(() => {})
-              .finally(() => { prefetchInflightRef.current = false })
+          if (curExchange) {
+            const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
+            if (cached && cached.length > 0) {
+              prefetchInflightRef.current = true
+              getOrFetchOlder(curSymbol, curTf, cached[0].time, 1000, curExchange)
+                .catch(() => {})
+                .finally(() => { prefetchInflightRef.current = false })
+            }
           }
-        }
       }
 
       // --- LOAD LAYER ---
@@ -364,7 +365,7 @@ function useLazyScroll(
 
       const before = cached[0].time
 
-      getOrFetchOlder(curSymbol, curTf, before, 1000)
+      getOrFetchOlder(curSymbol, curTf, before, 1000, curExchange)
         .then(older => {
           if (destroyedRef.current) {
             inflightRef.current = false
@@ -670,7 +671,7 @@ function exchangeBadge(ex: string): string {
   return 'EX'
 }
 
-const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: string }) {
+const MiniChartHeader = memo(function MiniChartHeader({ symbol, chartExchange }: { symbol: string; chartExchange: ChartExchange }) {
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
     if (!c) return null
@@ -684,7 +685,7 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
   }))
 
   const isUp = coin ? coin.change24h >= 0 : true
-  const badge = exchangeBadge(coin?.exchange || '')
+  const badge = exchangeBadge(chartExchange)
   const vol = coin ? formatCompact(coin.quoteVolume24h) : '-'
 
   return (
@@ -714,8 +715,8 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol }: { symbol: stri
 })
 
 const MiniChart = memo(function MiniChart({
-  symbol, visible, onLoaded,
-}: { symbol: string; visible: boolean; onLoaded?: (loadKey: string) => void }) {
+  symbol, visible, onLoaded, chartExchange,
+}: { symbol: string; visible: boolean; onLoaded?: (loadKey: string) => void; chartExchange: ChartExchange }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -723,7 +724,7 @@ const MiniChart = memo(function MiniChart({
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
-  const exchange = useCoinListStore(s => s.coinMap.get(symbol)?.exchange)
+  const exchange: Exchange | undefined = chartExchange
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const lastUpdateRef = useRef<number>(Date.now())
 
@@ -819,8 +820,8 @@ const MiniChart = memo(function MiniChart({
   const adjustingRef = useRef(false)
 
   useEffect(() => {
-    if (!isInitialLoading) onLoaded?.(`${tf}:${symbol}`)
-  }, [isInitialLoading, symbol, tf, onLoaded])
+    if (!isInitialLoading) onLoaded?.(`${chartExchange}:${tf}:${symbol}`)
+  }, [isInitialLoading, symbol, tf, chartExchange, onLoaded])
 
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
@@ -837,7 +838,7 @@ const MiniChart = memo(function MiniChart({
         {extractBaseAsset(symbol)}
       </span>
     </div>
-    <MiniChartHeader symbol={symbol} />
+    <MiniChartHeader symbol={symbol} chartExchange={chartExchange} />
     <div ref={containerRef} className="relative z-0 flex-1 min-h-0">
       {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
       {isStale && <StaleDataOverlay visible={true} />}
@@ -872,7 +873,7 @@ function formatDuration(sec: number): string {
   return h % 24 ? `${d}d ${h % 24}h` : `${d}d`
 }
 
-const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, activeTool }: { symbol: string; onBack: () => void; activeTool: DrawingTool | null }) {
+const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, activeTool, chartExchange }: { symbol: string; onBack: () => void; activeTool: DrawingTool | null; chartExchange: ChartExchange }) {
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
     if (!c) return null
@@ -889,7 +890,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
   const livePrice = useLivePrice(symbol)
   const price = livePrice ?? coin?.price ?? 0
   const isUp = coin ? coin.change24h >= 0 : true
-  const badge = exchangeBadge(coin?.exchange || '')
+  const badge = exchangeBadge(chartExchange)
   const precision = coin?.pricePrecision ?? 2
   const volDisplay = coin ? formatCompact(coin.quoteVolume24h) : '-'
 
@@ -949,7 +950,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
   )
 })
 
-function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void }) {
+function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBack: () => void; chartExchange: ChartExchange }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -959,7 +960,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
   const destroyedRef = useRef(false)
   const adjustingRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
-  const exchange = useCoinListStore(s => s.coinMap.get(symbol)?.exchange)
+  const exchange: Exchange | undefined = chartExchange
   const [selection, setSelection] = useState<RangeSelection | null>(null)
   const [chartVersion, setChartVersion] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
@@ -1286,7 +1287,7 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
-      <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} />
+      <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} chartExchange={chartExchange} />
       <div ref={containerRef} className="relative flex-1 min-h-0">
         {isInitialLoading && <ChartCornerSpinner />}
         {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
@@ -1414,6 +1415,7 @@ export function ChartGrid() {
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const expandChart = useCoinListStore(s => s.expandChart)
   const tf = useCoinListStore(s => s.activeTimeframe)
+  const chartExchange = useCoinListStore(s => s.chartExchange)
   const [loadedSet, setLoadedSet] = useState<Set<string>>(() => new Set())
 
   useInitialCandlesPush()
@@ -1421,13 +1423,13 @@ export function ChartGrid() {
   // Bulk prefetch: fetch all top symbols in one request instead of 9 individual
   useEffect(() => {
     if (topSymbols.length === 0) return
-    getOrFetchBulk(topSymbols, tf, 300)
-  }, [topSymbols, tf])
+    getOrFetchBulk(topSymbols, tf, 300, chartExchange)
+  }, [topSymbols, tf, chartExchange])
 
   // Only remove entries for symbols that are no longer in topSymbols.
   // Preserves loaded state for symbols that just moved position (no re-fetch needed).
   useEffect(() => {
-    const currentSet = new Set(topSymbols.map(s => `${tf}:${s}`))
+    const currentSet = new Set(topSymbols.map(s => `${chartExchange}:${tf}:${s}`))
     setLoadedSet(prev => {
       const next = new Set<string>()
       for (const key of prev) {
@@ -1441,7 +1443,7 @@ export function ChartGrid() {
       }
       return next
     })
-  }, [topSymbols, tf])
+  }, [topSymbols, tf, chartExchange])
 
   const handleLoaded = useCallback((loadKey: string) => {
     setLoadedSet(prev => {
@@ -1453,17 +1455,23 @@ export function ChartGrid() {
   }, [])
 
   if (expandedSymbol) {
-    return <ExpandedChart symbol={expandedSymbol} onBack={() => expandChart(null)} />
+    return <ExpandedChart symbol={expandedSymbol} onBack={() => expandChart(null)} chartExchange={chartExchange} />
   }
 
-  const allChartsLoaded = topSymbols.length > 0 && topSymbols.every(symbol => loadedSet.has(`${tf}:${symbol}`))
+  const allChartsLoaded = topSymbols.length > 0 && topSymbols.every(symbol => loadedSet.has(`${chartExchange}:${tf}:${symbol}`))
   const showOverlay = !allChartsLoaded
 
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
       <div className="relative flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
         {topSymbols.map((symbol, idx) => (
-          <MiniChart key={`${tf}:${idx}:${symbol}`} symbol={symbol} visible={allChartsLoaded} onLoaded={handleLoaded} />
+          <MiniChart
+            key={`${chartExchange}:${tf}:${idx}:${symbol}`}
+            symbol={symbol}
+            visible={allChartsLoaded}
+            onLoaded={handleLoaded}
+            chartExchange={chartExchange}
+          />
         ))}
         {Array.from({ length: Math.max(0, 9 - topSymbols.length) }).map((_, idx) => (
           <div key={`placeholder-${idx}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f]" />
