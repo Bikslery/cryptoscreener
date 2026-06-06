@@ -977,24 +977,6 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
     return () => { lifecycleRef.current?.destroy() }
   }, [symbol, exchange, tf])
 
-  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef)
-
-  const {
-    activeTool,
-    setActiveTool,
-    removeDrawing,
-    clearAllDrawings,
-    hasDrawings,
-    deactivateTool,
-    handleClick: drawingClickHandler,
-    handleMouseMove: drawingMouseMoveHandler,
-    pendingPoint,
-    pendingPointPixel,
-    previewLine,
-    primitiveRef,
-    CLICK_THRESHOLD,
-  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
-
   useEffect(() => {
     destroyedRef.current = false
     if (!containerRef.current) return
@@ -1067,6 +1049,24 @@ function ExpandedChart({ symbol, onBack }: { symbol: string; onBack: () => void 
       volumeRef.current = null
     }
   }, [symbol, tf, pricePrecision])
+
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef)
+
+  const {
+    activeTool,
+    setActiveTool,
+    removeDrawing,
+    clearAllDrawings,
+    hasDrawings,
+    deactivateTool,
+    handleClick: drawingClickHandler,
+    handleMouseMove: drawingMouseMoveHandler,
+    pendingPoint,
+    pendingPointPixel,
+    previewLine,
+    primitiveRef,
+    CLICK_THRESHOLD,
+  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
 
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
