@@ -3,7 +3,7 @@ import { verifyToken, type JwtPayload } from '../middleware/auth.js'
 import type { WsMessage } from '../types.js'
 import type { UnifiedTicker, UnifiedCandle } from '../types.js'
 import { getTopCachedSymbols, getCachedCandles } from '../services/candles/candle-cache.js'
-import { getTickers, getTicker, setTickersFromRedis } from '../services/aggregator/index.js'
+import { getAllTickers, getTickers, getTicker, setTickersFromRedis } from '../services/aggregator/index.js'
 import { INITIAL_CANDLES_TF } from '../services/candles/preload.js'
 import { getRedisSub } from '../redis.js'
 import {
@@ -194,7 +194,7 @@ export function setupWsHub(wss: WebSocketServer) {
     }
 
     try {
-      const tickers = getTickers()
+      const tickers = getAllTickers()
       if (tickers.length > 0) {
         ws.send(JSON.stringify({ type: 'ticker', data: tickers }))
         console.log(`[Hub] Sent initial tickers to new client: ${tickers.length} tickers`)

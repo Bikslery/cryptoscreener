@@ -112,21 +112,22 @@ function getBestMap(): Map<string, UnifiedTicker> {
   return cachedBestMap
 }
 
-function computeDelta(best: Map<string, UnifiedTicker>): UnifiedTicker[] {
+function computeDelta(tickers: UnifiedTicker[]): UnifiedTicker[] {
   const delta: UnifiedTicker[] = []
   const seen = new Set<string>()
-  for (const [symbol, t] of best) {
-    seen.add(symbol)
-    const prev = lastBroadcastedTickers.get(symbol)
+  for (const t of tickers) {
+    const key = `${t.symbol}:${t.exchange}`
+    seen.add(key)
+    const prev = lastBroadcastedTickers.get(key)
     if (!prev || prev.price !== t.price || prev.change24h !== t.change24h || prev.quoteVolume24h !== t.quoteVolume24h) {
       delta.push(t)
     }
   }
-  for (const [symbol] of lastBroadcastedTickers) {
-    if (!seen.has(symbol)) delta.push({ symbol, exchange: 'binance-spot' } as UnifiedTicker)
+  for (const [key, prev] of lastBroadcastedTickers) {
+    if (!seen.has(key)) delta.push(prev as UnifiedTicker)
   }
   lastBroadcastedTickers = new Map(
-    Array.from(best.entries()).map(([s, t]) => [s, { symbol: s, price: t.price, change24h: t.change24h, quoteVolume24h: t.quoteVolume24h }])
+    tickers.map(t => [`${t.symbol}:${t.exchange}`, { symbol: t.symbol, exchange: t.exchange, price: t.price, change24h: t.change24h, quoteVolume24h: t.quoteVolume24h }])
   )
   return delta
 }
@@ -156,7 +157,8 @@ export function startAggregator() {
       if (now - lastBroadcast > BROADCAST_INTERVAL) {
         lastBroadcast = now
         const best = getBestMap()
-        const arr = Array.from(best.values())
+        const arr = getAllTickers()
+        const bestArr = Array.from(best.values())
 
         if (isIngestion && REDIS_ENABLED) {
           try {
@@ -166,7 +168,7 @@ export function startAggregator() {
         }
 
         if (isBroadcast) {
-          const delta = computeDelta(best)
+          const delta = computeDelta(arr)
           if (delta.length > 0) {
             broadcast({ type: 'ticker', data: delta, full: arr })
             broadcastCount++
@@ -180,8 +182,8 @@ export function startAggregator() {
 
         if (!loggedFirst) {
           loggedFirst = true
-          console.log(`[Aggregator] First broadcast: ${arr.length} coins (received ${tickerCount} ticks), top: ${arr.slice(0, 3).map(t => t.symbol).join(', ')}`)
-          subscribeTopAggTrades(arr)
+          console.log(`[Aggregator] First broadcast: ${arr.length} exchange tickers / ${bestArr.length} best coins (received ${tickerCount} ticks), top: ${bestArr.slice(0, 3).map(t => t.symbol).join(', ')}`)
+          subscribeTopAggTrades(bestArr)
         }
       }
     })
@@ -330,7 +332,7 @@ export function updateTickerPrice(symbol: string, exchange: Exchange, price: num
   if (now - lastBroadcast > BROADCAST_INTERVAL) {
     lastBroadcast = now
     const best = getBestMap()
-    const arr = Array.from(best.values())
+    const arr = getAllTickers()
 
     if (isIngestion && REDIS_ENABLED) {
       try {
@@ -340,7 +342,7 @@ export function updateTickerPrice(symbol: string, exchange: Exchange, price: num
     }
 
     if (isBroadcast) {
-      const delta = computeDelta(best)
+      const delta = computeDelta(arr)
       if (delta.length > 0) {
         broadcast({ type: 'ticker', data: delta, full: arr })
         broadcastCount++
@@ -359,6 +361,10 @@ export function getTickers(): UnifiedTicker[] {
     cachedBest = Array.from(getBestMap().values())
   }
   return cachedBest
+}
+
+export function getAllTickers(): UnifiedTicker[] {
+  return Array.from(tickerMap.values()).filter(t => !isBlacklisted(t.exchange, t.symbol))
 }
 
 export function getTicker(symbol: string): UnifiedTicker | undefined {

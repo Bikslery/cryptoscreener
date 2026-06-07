@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import rateLimit from 'express-rate-limit'
-import { fetchCandles, fetchDepth, getTickers, getTicker } from '../services/aggregator/index.js'
+import { fetchCandles, fetchDepth, getAllTickers, getTickers, getTicker } from '../services/aggregator/index.js'
 import { getCachedCandles, setCachedCandlesFromRest } from '../services/candles/candle-cache.js'
 import { getHistory } from '../services/candles/history.js'
 import type { Exchange } from '../types.js'
@@ -32,7 +32,7 @@ function normalizeLimit(value: unknown, fallback: number): number {
 router.use(apiLimiter)
 
 router.get('/', (_req, res) => {
-  const tickers = getTickers()
+  const tickers = getAllTickers()
   const sorted = tickers.sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
   res.setHeader('Cache-Control', 'public, max-age=2')
   res.json(sorted)
