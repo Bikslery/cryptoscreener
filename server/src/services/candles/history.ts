@@ -28,7 +28,7 @@ function chunkStartMs(timeMs: number, tfMs: number): number {
   return Math.floor(timeMs / (CHUNK_SIZE * tfMs)) * CHUNK_SIZE * tfMs
 }
 
-function chunkKeysFor(symbol: string, tf: string, beforeMs: number, limit: number): { key: string; csMs: number }[] {
+function chunkKeysFor(exchange: Exchange, symbol: string, tf: string, beforeMs: number, limit: number): { key: string; csMs: number }[] {
   const tfMs = TF_MS[tf]
   if (!tfMs) return []
   const keys: { key: string; csMs: number }[] = []
@@ -36,7 +36,7 @@ function chunkKeysFor(symbol: string, tf: string, beforeMs: number, limit: numbe
   const numChunks = Math.ceil(limit / CHUNK_SIZE)
   for (let i = 0; i < numChunks; i++) {
     const cs = chunkStartMs(cursor, tfMs)
-    keys.push({ key: `${CHUNK_PREFIX}${symbol}:${tf}:${cs}`, csMs: cs })
+    keys.push({ key: `${CHUNK_PREFIX}${exchange}:${symbol}:${tf}:${cs}`, csMs: cs })
     cursor = cs - 1
     if (cursor <= 0) break
   }
@@ -265,7 +265,7 @@ export async function getHistory(
   const resolvedExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
   const beforeMs = before ? before * 1000 - 1 : Date.now()
 
-  const chunkInfos = chunkKeysFor(symbol, tf, beforeMs, limit)
+  const chunkInfos = chunkKeysFor(resolvedExchange, symbol, tf, beforeMs, limit)
   if (chunkInfos.length === 0) return []
 
   const keys = chunkInfos.map(ci => ci.key)

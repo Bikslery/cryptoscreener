@@ -3,6 +3,7 @@ import rateLimit from 'express-rate-limit'
 import { fetchCandles, fetchDepth, getTickers, getTicker } from '../services/aggregator/index.js'
 import { getCachedCandles, setCachedCandlesFromRest } from '../services/candles/candle-cache.js'
 import { getHistory } from '../services/candles/history.js'
+import type { Exchange } from '../types.js'
 
 const apiLimiter = rateLimit({
   windowMs: 1000,
@@ -14,7 +15,13 @@ const apiLimiter = rateLimit({
 
 const router = Router()
 const SUPPORTED_TIMEFRAMES = new Set(['1m', '5m', '15m', '1h', '4h', '1d', '1w'])
+const SUPPORTED_EXCHANGES = new Set<Exchange>(['binance-spot', 'binance-futures', 'bybit-futures', 'okx-spot', 'okx-futures'])
 const MAX_CANDLE_LIMIT = 1000
+
+function normalizeExchange(value: unknown): Exchange | undefined {
+  if (typeof value !== 'string') return undefined
+  return SUPPORTED_EXCHANGES.has(value as Exchange) ? value as Exchange : undefined
+}
 
 function normalizeLimit(value: unknown, fallback: number): number {
   const parsed = parseInt(String(value ?? ''), 10)
@@ -42,8 +49,9 @@ router.get('/top-symbols', (_req, res) => {
 })
 
 router.post('/candles-bulk', async (req, res) => {
-  const { symbols, tf } = req.body as { symbols: string[]; tf: string; limit: number }
+  const { symbols, tf } = req.body as { symbols: string[]; tf: string; limit: number; exchange?: string }
   const limit = normalizeLimit(req.body?.limit, 500)
+  const exchange = normalizeExchange(req.body?.exchange)
   if (!Array.isArray(symbols) || !tf) {
     res.status(400).json({ error: 'Missing symbols, tf, or limit' })
     return
@@ -56,12 +64,16 @@ router.post('/candles-bulk', async (req, res) => {
     res.status(400).json({ error: 'Too many symbols (max 50)' })
     return
   }
+  if (req.body?.exchange && !exchange) {
+    res.status(400).json({ error: 'Unsupported exchange' })
+    return
+  }
   const result: Record<string, any[]> = {}
   const missing: string[] = []
 
   // Check server in-memory cache first (fastest path)
   for (const symbol of symbols) {
-    const ex = getTicker(symbol)?.exchange
+    const ex = exchange || getTicker(symbol)?.exchange
     const cached = getCachedCandles(symbol, tf, ex)
     if (cached && cached.length > 0) {
       result[symbol] = cached.slice(-limit)
@@ -74,11 +86,10 @@ router.post('/candles-bulk', async (req, res) => {
   if (missing.length > 0) {
     const fetches = missing.map(async (symbol) => {
       try {
-        // getHistory now uses fetchCandlesSeamless internally —
-        // automatically stitches data from multiple exchanges
-        const candles = await getHistory(symbol, tf, { limit })
+        // Explicit exchange requests are strict; auto mode may stitch/fallback.
+        const candles = await getHistory(symbol, tf, { limit, exchange })
         if (candles.length > 0) {
-          const ex = getTicker(symbol)?.exchange || candles[0]?.exchange
+          const ex = exchange || getTicker(symbol)?.exchange || candles[0]?.exchange
           setCachedCandlesFromRest(symbol, tf, candles, ex)
           result[symbol] = candles
         } else {

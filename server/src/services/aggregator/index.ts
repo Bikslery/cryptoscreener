@@ -412,6 +412,15 @@ function logPriorityConfig() {
 
 export async function fetchCandles(symbol: string, tf: string, limit: number, exchange?: Exchange, startTime?: number, endTime?: number, options?: import('../exchanges/types.js').FetchCandlesOptions): Promise<UnifiedCandle[]> {
   const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
+  if (exchange) {
+    const adapter = adapters.find(a => a.exchange === exchange)
+    if (!adapter) return []
+    try {
+      return await adapter.fetchCandles(symbol, tf, limit, startTime, endTime, options)
+    } catch {
+      return []
+    }
+  }
   // Try target first, then all others by priority
   const ordered = adaptersByPriority(symbol)
   const targetIdx = ordered.findIndex(a => a.exchange === targetExchange)
@@ -448,7 +457,9 @@ export async function fetchCandlesSeamless(
   options?: import('../exchanges/types.js').FetchCandlesOptions,
 ): Promise<UnifiedCandle[]> {
   const targetExchange = exchange || getTicker(symbol)?.exchange || 'binance-futures'
-  const ordered = adaptersByPriority(symbol)
+  const ordered = exchange
+    ? adapters.filter(a => a.exchange === exchange)
+    : adaptersByPriority(symbol)
   const targetIdx = ordered.findIndex(a => a.exchange === targetExchange)
   if (targetIdx > 0) { const [t] = ordered.splice(targetIdx, 1); ordered.unshift(t) }
 
