@@ -829,7 +829,7 @@ const MiniChart = memo(function MiniChart({
 
   return (
   <div
-    className={`relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px] transition-all duration-300 ease-out ${
+    className={`relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px] transition-[opacity,transform] duration-300 ease-out ${
       visible ? 'opacity-100 scale-100' : 'opacity-0 scale-[0.99]'
     }`}
   >
@@ -839,7 +839,7 @@ const MiniChart = memo(function MiniChart({
       </span>
     </div>
     <MiniChartHeader symbol={symbol} chartExchange={chartExchange} />
-    <div ref={containerRef} className="relative z-0 flex-1 min-h-0">
+    <div ref={containerRef} className="relative z-0 flex-1 min-h-0 [transform:translateZ(0)] [backface-visibility:hidden] [contain:paint]">
       {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
       {isStale && <StaleDataOverlay visible={true} />}
     </div>
@@ -1288,7 +1288,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   return (
     <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
       <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} chartExchange={chartExchange} />
-      <div ref={containerRef} className="relative flex-1 min-h-0">
+      <div ref={containerRef} className="relative flex-1 min-h-0 [transform:translateZ(0)] [backface-visibility:hidden] [contain:paint]">
         {isInitialLoading && <ChartCornerSpinner />}
         {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
         {!isInitialLoading && isLoadingMore && (
@@ -1463,7 +1463,7 @@ export function ChartGrid() {
 
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
-      <div className="relative flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px]">
+      <div className="relative flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px] isolate">
         {topSymbols.map((symbol, idx) => (
           <MiniChart
             key={`${chartExchange}:${tf}:${idx}:${symbol}`}
