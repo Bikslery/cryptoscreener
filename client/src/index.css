@@ -160,10 +160,12 @@ a[href*="tradingview.com"] { display: none !important; }
   50% { opacity: 0.4; }
 }
 
-/* Stale data overlay */
+/* Stale data overlay — opacity-only fade; static blur comes from the
+   Tailwind backdrop-blur-[3px] class, not animated, to avoid per-frame
+   re-rasterization of the chart canvas behind it. */
 @keyframes stale-fade-in {
-  from { opacity: 0; backdrop-filter: blur(0px); }
-  to   { opacity: 1; backdrop-filter: blur(3px); }
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 .stale-data-overlay {

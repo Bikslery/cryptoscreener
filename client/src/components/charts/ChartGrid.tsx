@@ -1464,9 +1464,9 @@ export function ChartGrid() {
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
       <div className="relative flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px] isolate">
-        {topSymbols.map((symbol, idx) => (
+        {topSymbols.map((symbol) => (
           <MiniChart
-            key={`${chartExchange}:${tf}:${idx}:${symbol}`}
+            key={`${chartExchange}:${tf}:${symbol}`}
             symbol={symbol}
             visible={allChartsLoaded}
             onLoaded={handleLoaded}
