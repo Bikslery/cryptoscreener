@@ -25,7 +25,11 @@ export function getOrFetchBulk(
   limit: number = PREFETCH_LIMIT,
   exchange?: Exchange,
 ): Promise<Record<string, UnifiedCandle[]>> {
-  const bulkKey = `${exchange ?? 'auto'}:${symbols.sort().join(',')}:${tf}:${limit}`
+  // NB: copy before sort — Array.prototype.sort mutates in place, and `symbols`
+  // is ChartGrid's memoized topSymbols (prevTopRef.current). Sorting it directly
+  // corrupted the cached order to alphabetical, making the grid re-sort on every
+  // timeframe / page change. The key only needs to be order-independent.
+  const bulkKey = `${exchange ?? 'auto'}:${[...symbols].sort().join(',')}:${tf}:${limit}`
   const existing = inflightBulk.get(bulkKey)
   if (existing) return existing
 
