@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { useCoinListStore, useUIStore } from '../../store'
 import type { ChartExchange } from '../../store'
 import { X, ArrowLeftRight, Check } from 'lucide-react'
@@ -40,7 +41,9 @@ export default function ExchangeModal() {
     setShowExchangeModal(false)
   }
 
-  return (
+  if (typeof document === 'undefined') return null
+
+  return createPortal(
     <div className="exchange-overlay" onClick={() => setShowExchangeModal(false)}>
       <div className="exchange-backdrop" />
       <div className="exchange-modal" onClick={(e) => e.stopPropagation()}>
@@ -82,6 +85,16 @@ export default function ExchangeModal() {
           })}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
+}
+
+// Изолированный gate: подписан ТОЛЬКО на флаг показа модалки.
+// App не подписан на этот флаг и не ре-рендерится при открытии/закрытии,
+// благодаря чему ChartGrid не дёргается.
+export function ExchangeModalGate() {
+  const show = useUIStore(s => s.showExchangeModal)
+  if (!show) return null
+  return <ExchangeModal />
 }

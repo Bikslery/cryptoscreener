@@ -783,9 +783,17 @@ const MiniChart = memo(function MiniChart({
     volumeRef.current = volumeSeries
 
 
+    let prevW = containerRef.current.clientWidth
+    let prevH = containerRef.current.clientHeight
     const ro = new ResizeObserver(() => {
       if (containerRef.current && !destroyedRef.current) {
-        chart.applyOptions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight })
+        const w = containerRef.current.clientWidth
+        const h = containerRef.current.clientHeight
+        if (w < 10 || h < 10) return
+        if (w === prevW && h === prevH) return
+        prevW = w
+        prevH = h
+        chart.applyOptions({ width: w, height: h })
       }
     })
     ro.observe(containerRef.current)
@@ -1019,9 +1027,17 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
 
     setChartVersion(v => v + 1)
 
+    let prevW = containerRef.current.clientWidth
+    let prevH = containerRef.current.clientHeight
     const ro = new ResizeObserver(() => {
       if (containerRef.current && !destroyedRef.current) {
-        chart.applyOptions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight })
+        const w = containerRef.current.clientWidth
+        const h = containerRef.current.clientHeight
+        if (w < 10 || h < 10) return
+        if (w === prevW && h === prevH) return
+        prevW = w
+        prevH = h
+        chart.applyOptions({ width: w, height: h })
       }
     })
     ro.observe(containerRef.current)
@@ -1400,7 +1416,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   )
 }
 
-export function ChartGrid() {
+export const ChartGrid = memo(function ChartGrid() {
   const sortedCoins = useCoinListStore(s => s.sortedCoins)
   const pageIndex = useCoinListStore(s => s.pageIndex)
   const prevTopRef = useRef<string[]>([])
@@ -1420,14 +1436,11 @@ export function ChartGrid() {
 
   useInitialCandlesPush()
 
-  // Bulk prefetch: fetch all top symbols in one request instead of 9 individual
   useEffect(() => {
     if (topSymbols.length === 0) return
     getOrFetchBulk(topSymbols, tf, 300, chartExchange)
   }, [topSymbols, tf, chartExchange])
 
-  // Only remove entries for symbols that are no longer in topSymbols.
-  // Preserves loaded state for symbols that just moved position (no re-fetch needed).
   useEffect(() => {
     const currentSet = new Set(topSymbols.map(s => `${chartExchange}:${tf}:${s}`))
     setLoadedSet(prev => {
@@ -1435,7 +1448,6 @@ export function ChartGrid() {
       for (const key of prev) {
         if (currentSet.has(key)) next.add(key)
       }
-      // Return same reference if nothing changed (prevents infinite re-render)
       if (next.size === prev.size) {
         let same = true
         for (const k of next) { if (!prev.has(k)) { same = false; break } }
@@ -1487,4 +1499,4 @@ export function ChartGrid() {
       </div>
     </div>
   )
-}
+})

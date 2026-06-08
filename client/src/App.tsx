@@ -4,8 +4,8 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { TopBar } from './components/layout/TopBar'
 import { RightPanel } from './components/layout/RightPanel'
 import AuthModal from './components/auth/AuthModal'
-import ProfileModal from './components/auth/ProfileModal'
-import ExchangeModal from './components/exchange/ExchangeModal'
+import { ProfileModalGate } from './components/auth/ProfileModal'
+import { ExchangeModalGate } from './components/exchange/ExchangeModal'
 import { useCoinListStore, useAuthStore, useUIStore } from './store'
 import { wsConnect, wsDisconnect } from './services/ws'
 import type { Timeframe } from './types'
@@ -25,8 +25,6 @@ function App() {
   const checkSession = useAuthStore(s => s.checkSession)
   const isChecking = useAuthStore(s => s.isChecking)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
-  const showProfile = useUIStore(s => s.showProfile)
-  const showExchangeModal = useUIStore(s => s.showExchangeModal)
 
   useEffect(() => {
     checkSession()
@@ -110,8 +108,8 @@ function App() {
         <div className="w-[1px] bg-[#1f1f1f] flex-shrink-0" />
         <RightPanel />
       </div>
-      {showProfile && <ProfileModal />}
-      {showExchangeModal && <ExchangeModal />}
+      <ProfileModalGate />
+      <ExchangeModalGate />
     </div>
   )
 }

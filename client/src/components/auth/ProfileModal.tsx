@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { useAuthStore, useUIStore } from '../../store'
 import api from '../../services/api'
 import { X, User, LogOut, Shield, KeyRound } from 'lucide-react'
@@ -135,7 +136,9 @@ export default function ProfileModal() {
 
   const canChangePassword = telegramVerified
 
-  return (
+  if (typeof document === 'undefined') return null
+
+  return createPortal(
     <div className="profile-overlay" onClick={() => setShowProfile(false)}>
       <div className="profile-backdrop" />
       <div className="profile-modal" onClick={(e) => e.stopPropagation()}>
@@ -304,6 +307,16 @@ export default function ProfileModal() {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
+}
+
+// Изолированный gate: подписан ТОЛЬКО на флаг показа модалки.
+// App не подписан на этот флаг и не ре-рендерится при открытии/закрытии,
+// благодаря чему ChartGrid не дёргается.
+export function ProfileModalGate() {
+  const show = useUIStore(s => s.showProfile)
+  if (!show) return null
+  return <ProfileModal />
 }

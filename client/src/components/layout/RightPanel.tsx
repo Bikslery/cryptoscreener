@@ -1,11 +1,11 @@
-import { useState } from 'react'
+import { useState, memo } from 'react'
 import { CoinList } from '../coinlist/CoinList'
 import { DensityMap } from '../density/DensityMap'
 import { AlertStack } from '../alerts/AlertStack'
 
 type Tab = 'charts' | 'density' | 'alerts'
 
-export function RightPanel() {
+export const RightPanel = memo(function RightPanel() {
   const [tab, setTab] = useState<Tab>('charts')
 
   return (
@@ -52,4 +52,4 @@ export function RightPanel() {
       </div>
     </div>
   )
-}
+})
