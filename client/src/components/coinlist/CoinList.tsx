@@ -4,6 +4,7 @@ import { useCoinListStore } from '../../store'
 import type { UnifiedTicker } from '../../types'
 import { formatCompact, extractBaseAsset } from '../../utils/format'
 import { getOrFetchHistory } from '../../services/candle-prefetch'
+import { VOLUME_HIGH_THRESHOLD } from '../../constants/volume'
 
 type ColKey = keyof UnifiedTicker
 
@@ -51,7 +52,7 @@ interface RowProps {
   onPrefetch: (symbol: string) => void
 }
 
-const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage, onClick, onPrefetch }: RowProps) {
+export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage, onClick, onPrefetch }: RowProps) {
   const isUp = coin.change24h >= 0
   const bg = isSelected
     ? 'bg-white/[0.10]'
@@ -84,7 +85,7 @@ const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage, onClic
       <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
         {formatVal('natr5m', coin)}
       </div>
-      <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0]">
+      <div data-testid="vol-cell" className={`flex items-center justify-end px-2 text-[11px] ${coin.quoteVolume24h >= VOLUME_HIGH_THRESHOLD ? 'text-[#fff] font-medium' : 'text-[#a0a0a0]'}`}>
         {formatVal('quoteVolume24h', coin)}
       </div>
     </div>

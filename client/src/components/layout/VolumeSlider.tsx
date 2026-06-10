@@ -1,9 +1,10 @@
 import { useCallback, useRef } from 'react'
 import { AudioLines } from 'lucide-react'
 import { useCoinListStore } from '../../store'
+import { VOLUME_HIGH_THRESHOLD_M } from '../../constants/volume'
 
 const MIN_VOLUME_M = 0
-const MAX_VOLUME_M = 250
+const MAX_VOLUME_M = VOLUME_HIGH_THRESHOLD_M
 
 function formatVolumeLabel(millions: number): string {
   if (millions <= 0) return '0M'

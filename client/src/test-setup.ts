@@ -1,5 +1,5 @@
 import { afterEach, vi } from 'vitest'
-import '@testing-library/react'
+import { cleanup } from '@testing-library/react'
 
 // Minimal canvas getContext stub — jsdom does not implement Canvas 2D, but
 // the primitive's renderer is never invoked in these unit tests. Without this
@@ -9,5 +9,6 @@ if (typeof HTMLCanvasElement !== 'undefined') {
 }
 
 afterEach(() => {
+  cleanup()
   vi.restoreAllMocks()
 })

@@ -3,6 +3,7 @@ import { useSyncExternalStore } from 'react'
 import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, Alert as AlertType } from '../types.js'
 import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
 import api from '../services/api.js'
+import { VOLUME_HIGH_THRESHOLD, VOLUME_FILTER_DEFAULT } from '../constants/volume.js'
 
 export type ChartExchange = 'binance-spot' | 'binance-futures'
 
@@ -58,8 +59,7 @@ function buildCoinMap(coins: UnifiedTicker[]): Map<string, UnifiedTicker> {
 }
 
 const VOLUME_FILTER_MIN = 0
-const VOLUME_FILTER_MAX = 250_000_000
-const VOLUME_FILTER_DEFAULT = 50_000_000
+const VOLUME_FILTER_MAX = VOLUME_HIGH_THRESHOLD
 const VOLUME_FILTER_STORAGE_KEY = 'serotonin.minVolume24h'
 
 function readStoredMinVolume(): number {
