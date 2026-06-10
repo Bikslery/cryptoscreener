@@ -7,7 +7,7 @@ import AuthModal from './components/auth/AuthModal'
 import { ProfileModalGate } from './components/auth/ProfileModal'
 import { ExchangeModalGate } from './components/exchange/ExchangeModal'
 import { useCoinListStore, useAuthStore, useUIStore } from './store'
-import { wsConnect, wsDisconnect } from './services/ws'
+import { wsConnect, wsDisconnect, ensureHealthyConnection } from './services/ws'
 import type { Timeframe } from './types'
 
 const TIMEFRAME_HOTKEYS: Record<string, Timeframe> = {
@@ -34,7 +34,30 @@ function App() {
     if (isChecking || !isLoggedIn) return
     wsConnect()
     const unsub = coinListInit()
+
+    // Browsers throttle/suspend background tabs, which can silently kill the
+    // WebSocket. Re-validate the connection the instant the user comes back or
+    // the network returns, so charts never sit dead after a minimized tab.
+    let lastCheck = 0
+    const revive = () => {
+      const now = Date.now()
+      if (now - lastCheck < 1000) return // debounce focus/visibility storms
+      lastCheck = now
+      ensureHealthyConnection()
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') revive()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('focus', revive)
+    window.addEventListener('online', revive)
+    window.addEventListener('pageshow', revive) // bfcache restore
+
     return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('focus', revive)
+      window.removeEventListener('online', revive)
+      window.removeEventListener('pageshow', revive)
       unsub()
       wsDisconnect()
     }

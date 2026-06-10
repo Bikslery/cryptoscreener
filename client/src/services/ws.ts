@@ -13,6 +13,16 @@ let reconnectAttempt = 0
 const MAX_BACKOFF = 30000
 const BASE_DELAY = 1000
 
+// Liveness tracking: browsers throttle/suspend background tabs, which can
+// silently break the socket (half-open) or delay timer-based reconnects for
+// minutes. We track the last inbound message and force a fresh connection the
+// moment the user returns (visibilitychange/online/pageshow/focus in App).
+let lastMessageAt = 0
+// If we haven't heard anything from the server in this window, treat the
+// socket as dead even if readyState still reports OPEN. Server pings every
+// 30s (see server hub), so 45s gives one full miss of slack.
+const STALE_THRESHOLD = 45000
+
 function dispatch(msg: WsMessage) {
   const t = msg.type as string | undefined
   if (t) {
@@ -36,6 +46,7 @@ function connect() {
 
   ws.onopen = () => {
     reconnectAttempt = 0
+    lastMessageAt = Date.now()
     dispatch({ type: 'open' })
     for (const ch of subscriptions.keys()) {
       ws?.send(JSON.stringify({ type: 'subscribe', channel: ch }))
@@ -43,6 +54,7 @@ function connect() {
   }
 
   ws.onmessage = (e) => {
+    lastMessageAt = Date.now()
     try {
       const msg = JSON.parse(e.data) as WsMessage
       dispatch(msg)
@@ -68,6 +80,47 @@ function scheduleReconnect() {
 
 export function wsConnect() {
   if (!ws || ws.readyState === WebSocket.CLOSED) connect()
+}
+
+/**
+ * Force the socket back to a healthy state immediately. Call this when the
+ * user returns to the tab (visibilitychange/focus/pageshow) or the network
+ * comes back (online). Background tabs get throttled, so the normal
+ * timer-based reconnect can lag by minutes — this bypasses that delay.
+ */
+export function ensureHealthyConnection() {
+  if (intentionalDisconnect) return
+
+  // Cancel any pending (throttled) reconnect and reset backoff so the retry
+  // below is instant rather than waiting out an exponential delay.
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  reconnectAttempt = 0
+
+  const state = ws?.readyState
+
+  // No socket, or it's closing/closed → (re)connect now.
+  if (!ws || state === WebSocket.CLOSED || state === WebSocket.CLOSING) {
+    connect()
+    return
+  }
+
+  // Socket still connecting → let it finish.
+  if (state === WebSocket.CONNECTING) return
+
+  // OPEN but stale (half-open / suspended): no data for too long. Tear it down
+  // and reconnect from scratch. onclose will be suppressed because we null the
+  // handler, so we schedule the reconnect explicitly via connect().
+  if (state === WebSocket.OPEN && Date.now() - lastMessageAt > STALE_THRESHOLD) {
+    const dead = ws
+    ws = null
+    dead.onclose = null
+    dead.onerror = null
+    try { dead.close() } catch { /* noop */ }
+    connect()
+  }
 }
 
 export function wsDisconnect() {
