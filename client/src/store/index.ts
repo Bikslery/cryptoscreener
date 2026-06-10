@@ -192,8 +192,9 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
 
   setSort: (col) => {
     const s = get()
-    const newDir: 'asc' | 'desc' = s.sortBy === col && s.sortDir === 'desc' ? 'asc' : 'desc'
-    const next = { sortBy: col, sortDir: newDir, pageIndex: 0 }
+    const targetCol: keyof UnifiedTicker = col === 'symbol' ? 'quoteVolume24h' : col
+    const newDir: 'asc' | 'desc' = s.sortBy === targetCol && s.sortDir === 'desc' ? 'asc' : 'desc'
+    const next = { sortBy: targetCol, sortDir: newDir, pageIndex: 0 }
     set({ ...next, ...recompute({ ...s, ...next }) })
   },
 
