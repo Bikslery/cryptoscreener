@@ -6,7 +6,9 @@ const MAX_CANDLES_PER_KEY = 5000
 const MAX_TOTAL_CANDLES = 300_000
 
 const cache = new Map<string, UnifiedCandle[]>()
-const lruOrder: string[] = []  // most-recent at end
+// LRU via Set insertion order: delete+add to touch (O(1)), first value = oldest.
+// Previously an array with indexOf/splice — O(n) on every cache read.
+const lruOrder = new Set<string>()
 let totalCandleCount = 0
 
 function key(exchange: Exchange, symbol: string, tf: string): string {
@@ -14,14 +16,14 @@ function key(exchange: Exchange, symbol: string, tf: string): string {
 }
 
 function touchLru(k: string) {
-  const idx = lruOrder.indexOf(k)
-  if (idx !== -1) lruOrder.splice(idx, 1)
-  lruOrder.push(k)
+  lruOrder.delete(k)
+  lruOrder.add(k)
 }
 
 function evictIfNeeded() {
-  while (totalCandleCount > MAX_TOTAL_CANDLES && lruOrder.length > 0) {
-    const oldest = lruOrder.shift()!
+  while (totalCandleCount > MAX_TOTAL_CANDLES && lruOrder.size > 0) {
+    const oldest = lruOrder.values().next().value as string
+    lruOrder.delete(oldest)
     const arr = cache.get(oldest)
     if (arr) totalCandleCount -= arr.length
     cache.delete(oldest)
@@ -155,6 +157,6 @@ export function hasCandles(exchange: Exchange, symbol: string, tf: string): bool
 
 export function clearAll(): void {
   cache.clear()
-  lruOrder.length = 0
+  lruOrder.clear()
   totalCandleCount = 0
 }

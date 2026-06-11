@@ -5,6 +5,7 @@ import type { UnifiedTicker, UnifiedCandle } from '../types.js'
 import { getTopCachedSymbols, getCachedCandles } from '../services/candles/candle-cache.js'
 import { getAllTickers, getTickers, getTicker, setTickersFromRedis } from '../services/aggregator/index.js'
 import { INITIAL_CANDLES_TF } from '../services/candles/preload.js'
+import { compactCandles, type CompactCandle } from '../services/candles/compact.js'
 import { getRedisSub } from '../redis.js'
 import {
   wsClientsGauge,
@@ -111,9 +112,13 @@ function parseDepthChannel(channel: string): string | null {
   return match[1]
 }
 
-const INITIAL_CANDLES_LIMIT = 100
+// 300 candles matches the grid's initial load (GRID_CANDLE_LIMIT on the
+// client), so the first screen can render entirely from this push without
+// falling back to REST. Compact tuples keep the payload small (+ ws
+// perMessageDeflate is enabled).
+const INITIAL_CANDLES_LIMIT = 300
 
-function buildInitialCandlesData(): Record<string, any[]> {
+function buildInitialCandlesData(): Record<string, CompactCandle[]> {
   let topSymbols = getTopCachedSymbols(INITIAL_CANDLES_TF, 9)
   if (topSymbols.length < 9) {
     const tickers = getTickers()
@@ -128,18 +133,18 @@ function buildInitialCandlesData(): Record<string, any[]> {
     topSymbols = combined
   }
 
-  const result: Record<string, any[]> = {}
+  const result: Record<string, CompactCandle[]> = {}
   for (const symbol of topSymbols) {
     const exchange = getTicker(symbol)?.exchange
     const cached = getCachedCandles(symbol, INITIAL_CANDLES_TF, exchange)
     if (cached && cached.length > 0) {
       // Key with exchange so it matches the client cache's
-      // `${exchange}:${symbol}:${tf}` lookup (storeBulk).
+      // `${exchange}:${symbol}:${tf}` lookup (storeBulk). Entries without a
+      // known exchange are skipped — the client could never read them back.
       const ex = exchange || cached[0]?.exchange
-      const payloadKey = ex
-        ? `${ex}:${symbol}:${INITIAL_CANDLES_TF}`
-        : `${symbol}:${INITIAL_CANDLES_TF}`
-      result[payloadKey] = cached.slice(-INITIAL_CANDLES_LIMIT)
+      if (!ex) continue
+      const payloadKey = `${ex}:${symbol}:${INITIAL_CANDLES_TF}`
+      result[payloadKey] = compactCandles(cached.slice(-INITIAL_CANDLES_LIMIT))
     }
   }
   return result
@@ -187,7 +192,7 @@ export function setupWsHub(wss: WebSocketServer) {
     try {
       const initialCandles = buildInitialCandlesData()
       if (Object.keys(initialCandles).length > 0) {
-        ws.send(JSON.stringify({ type: 'initial-candles', data: initialCandles }))
+        ws.send(JSON.stringify({ type: 'initial-candles', format: 'compact', data: initialCandles }))
       }
     } catch (err) {
       console.warn('[Hub] Failed to send initial-candles', err)

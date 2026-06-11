@@ -3,11 +3,14 @@ import rateLimit from 'express-rate-limit'
 import { fetchCandles, fetchDepth, getAllTickers, getTickers, getTicker } from '../services/aggregator/index.js'
 import { getCachedCandles, setCachedCandlesFromRest } from '../services/candles/candle-cache.js'
 import { getHistory } from '../services/candles/history.js'
+import { compactCandles } from '../services/candles/compact.js'
 import type { Exchange } from '../types.js'
 
 const apiLimiter = rateLimit({
   windowMs: 1000,
-  max: 10,
+  // NB: one page load легально шлёт несколько запросов (bulk + tickers + ...).
+  // 10/s душил собственный фронтенд и отдавал 429, которые клиент молча глотал.
+  max: 30,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests' },
@@ -49,9 +52,10 @@ router.get('/top-symbols', (_req, res) => {
 })
 
 router.post('/candles-bulk', async (req, res) => {
-  const { symbols, tf } = req.body as { symbols: string[]; tf: string; limit: number; exchange?: string }
+  const { symbols, tf } = req.body as { symbols: string[]; tf: string; limit: number; exchange?: string; compact?: boolean }
   const limit = normalizeLimit(req.body?.limit, 500)
   const exchange = normalizeExchange(req.body?.exchange)
+  const compact = req.body?.compact === true
   if (!Array.isArray(symbols) || !tf) {
     res.status(400).json({ error: 'Missing symbols, tf, or limit' })
     return
@@ -102,6 +106,17 @@ router.post('/candles-bulk', async (req, res) => {
     await Promise.all(fetches)
   }
 
+  if (compact) {
+    // [t,o,h,l,c,v] tuples + per-symbol exchange — ~2-3x smaller payload
+    const data: Record<string, { exchange: string | null; candles: ReturnType<typeof compactCandles> }> = {}
+    for (const [symbol, candles] of Object.entries(result)) {
+      const ex = candles[0]?.exchange || exchange || getTicker(symbol)?.exchange || null
+      data[symbol] = { exchange: ex, candles: compactCandles(candles) }
+    }
+    res.json({ format: 'compact', data })
+    return
+  }
+
   res.json(result)
 })
 
@@ -111,6 +126,16 @@ router.get('/:symbol/candles', async (req, res) => {
   const limit = normalizeLimit(req.query.limit, 500)
   const exchange = req.query.exchange as string | undefined
   const before = req.query.before ? parseInt(req.query.before as string) : undefined
+  const compact = req.query.compact === '1' || req.query.compact === 'true'
+
+  const send = (candles: Awaited<ReturnType<typeof getHistory>>) => {
+    if (compact) {
+      const ex = candles[0]?.exchange || exchange || getTicker(symbol)?.exchange || null
+      res.json({ format: 'compact', exchange: ex, candles: compactCandles(candles) })
+    } else {
+      res.json(candles)
+    }
+  }
 
   if (!SUPPORTED_TIMEFRAMES.has(tf)) {
     res.status(400).json({ error: 'Unsupported timeframe' })
@@ -119,7 +144,7 @@ router.get('/:symbol/candles', async (req, res) => {
 
   if (before !== undefined) {
     const candles = await getHistory(symbol, tf, { before, limit, exchange: exchange as any })
-    res.json(candles)
+    send(candles)
     return
   }
 
@@ -128,7 +153,7 @@ router.get('/:symbol/candles', async (req, res) => {
   const minUsable = Math.min(Math.floor(limit * 0.5), 100)
   if (cached && cached.length >= minUsable) {
     res.setHeader('Cache-Control', 'public, max-age=5')
-    res.json(cached.slice(-limit))
+    send(cached.slice(-limit))
     return
   }
 
@@ -137,7 +162,7 @@ router.get('/:symbol/candles', async (req, res) => {
     // Key by the same exchange used for reads/WS updates so cache hits align.
     setCachedCandlesFromRest(symbol, tf, candles, cacheExchange || candles[0]?.exchange)
   }
-  res.json(candles)
+  send(candles)
 })
 
 router.get('/:symbol/depth', async (req, res) => {

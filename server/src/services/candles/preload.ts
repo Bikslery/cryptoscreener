@@ -2,7 +2,9 @@ import type { ExchangeAdapter } from '../exchanges/types.js'
 import { setCachedCandlesFromRest, getCachedCandles } from './candle-cache.js'
 import { getTickers, getTicker } from '../aggregator/index.js'
 
-export const PRELOAD_TFS = ['5m', '15m', '1h', '4h'] as const
+// 1m включён: это рабочий таймфрейм для скальпинга, без прелоада первый
+// переход на 1m всегда был холодным (REST к бирже). Топ-50 символов достаточно.
+export const PRELOAD_TFS = ['5m', '15m', '1h', '4h', '1m'] as const
 export const INITIAL_CANDLES_TF = '5m'
 const TOP_SYMBOLS_COUNT = 100
 const P1_CONCURRENCY = 10
@@ -13,6 +15,7 @@ const PRELOAD_MATRIX: Record<string, { symbols: number; candles: number }> = {
   '15m': { symbols: 100, candles: 1000 },
   '1h': { symbols: 100, candles: 1000 },
   '4h': { symbols: 75, candles: 750 },
+  '1m': { symbols: 50, candles: 1000 },
 }
 const WS_TFS = ['5m', '1m', '1h', '4h'] as const
 const REFRESH_TFS = ['5m', '1m', '15m', '1h', '4h'] as const

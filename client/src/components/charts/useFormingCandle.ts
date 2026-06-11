@@ -4,6 +4,7 @@ import { setLivePrice } from '../../store'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
 import * as candleCache from '../../services/candle-cache'
 import type { Timeframe, UnifiedCandle, Exchange } from '../../types'
+import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL } from './chart-colors'
 
 const TF_SECONDS: Record<string, number> = {
   '1m': 60, '5m': 300, '15m': 900,
@@ -18,16 +19,6 @@ function candleTimeFor(tf: Timeframe, timestampSec: number): number {
   const tfSec = getTfSeconds(tf)
   return Math.floor(timestampSec / tfSec) * tfSec
 }
-
-function getCssVar(name: string, fallback: string): string {
-  if (typeof document === 'undefined') return fallback
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
-}
-
-const UP_COLOR_VOL = () => getCssVar('--chart--candle-up-vol', 'rgba(38,166,91,0.27)')
-const DOWN_COLOR_VOL = () => getCssVar('--chart--candle-down-vol', 'rgba(231,76,60,0.27)')
-const UP_COLOR = () => getCssVar('--chart--candle-up', '#26a65b')
-const DOWN_COLOR = () => getCssVar('--chart--candle-down', '#e74c3c')
 
 function volumeColor(close: number, open: number): string {
   return close >= open ? UP_COLOR_VOL() : DOWN_COLOR_VOL()

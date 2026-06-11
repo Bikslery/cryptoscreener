@@ -1,4 +1,4 @@
-import { useEffect, useRef, memo, useState, useCallback, useMemo } from 'react'
+import { useEffect, useRef, memo, useState, useMemo } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore, useLivePrice, setLivePrice } from '../../store'
@@ -9,22 +9,13 @@ import type { Timeframe, UnifiedCandle, Exchange } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
-import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk } from '../../services/candle-prefetch'
+import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT } from '../../services/candle-prefetch'
+import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
+import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
 import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload } from '../../services/candle-lifecycle'
 import { useDrawings, type DrawingTool } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
 
-// CSS-variable driven colors (Step 5)
-function getCssVar(name: string, fallback: string): string {
-  if (typeof document === 'undefined') return fallback
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
-}
-const UP_COLOR = () => getCssVar('--chart--candle-up', '#26a65b')
-const DOWN_COLOR = () => getCssVar('--chart--candle-down', '#e74c3c')
-const UP_COLOR_VOL = () => getCssVar('--chart--candle-up-vol', 'rgba(38,166,91,0.27)')
-const DOWN_COLOR_VOL = () => getCssVar('--chart--candle-down-vol', 'rgba(231,76,60,0.27)')
-const UP_BORDER = () => getCssVar('--chart--candle-border-up', '#26a65b')
-const DOWN_BORDER = () => getCssVar('--chart--candle-border-down', '#e74c3c')
 
 const TF_SECONDS: Record<string, number> = {
   '1m': 60, '5m': 300, '15m': 900,
@@ -154,9 +145,21 @@ function useInitialCandlesPush() {
     const unsubPush = wsOnType('initial-candles', (msg) => {
       if (initialPushReceived) return
       initialPushReceived = true
-      const data = msg.data as Record<string, UnifiedCandle[]> | undefined
+      const data = msg.data as Record<string, UnifiedCandle[] | CompactCandle[]> | undefined
       if (!data) return
-      candleCache.storeBulk(data)
+      if ((msg as { format?: string }).format === 'compact') {
+        // Keys are `${exchange}:${symbol}:${tf}`, values are [t,o,h,l,c,v] tuples
+        const expanded: Record<string, UnifiedCandle[]> = {}
+        for (const [key, tuples] of Object.entries(data)) {
+          const parts = key.split(':')
+          if (parts.length !== 3) continue
+          const [ex, symbol, tf] = parts
+          expanded[key] = expandCompactCandles(tuples as CompactCandle[], symbol, ex as Exchange, tf)
+        }
+        candleCache.storeBulk(expanded)
+        return
+      }
+      candleCache.storeBulk(data as Record<string, UnifiedCandle[]>)
     })
     return () => { unsubReconnect(); unsubPush() }
   }, [])
@@ -715,8 +718,8 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol, chartExchange }:
 })
 
 const MiniChart = memo(function MiniChart({
-  symbol, visible, onLoaded, chartExchange,
-}: { symbol: string; visible: boolean; onLoaded?: (loadKey: string) => void; chartExchange: ChartExchange }) {
+  symbol, chartExchange,
+}: { symbol: string; chartExchange: ChartExchange }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -821,36 +824,41 @@ const MiniChart = memo(function MiniChart({
       candleRef.current = null
       volumeRef.current = null
     }
-  }, [symbol, tf, pricePrecision])
+    // NB: `tf` is deliberately NOT a dependency — a timeframe switch only needs
+    // new data (useFullHistory handles setData + visible range), not a full
+    // chart destroy/recreate. This makes TF switching near-instant on warm cache.
+  }, [symbol, pricePrecision])
 
-  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 500 }, lastUpdateRef, lifecycleRef)
+  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: GRID_CANDLE_LIMIT }, lastUpdateRef, lifecycleRef)
 
   const adjustingRef = useRef(false)
-
-  useEffect(() => {
-    if (!isInitialLoading) onLoaded?.(`${chartExchange}:${tf}:${symbol}`)
-  }, [isInitialLoading, symbol, tf, chartExchange, onLoaded])
 
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, lifecycleRef)
 
   return (
-  <div
-    className={`relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px] transition-[opacity,transform] duration-300 ease-out ${
-      visible ? 'opacity-100 scale-100' : 'opacity-0 scale-[0.99]'
-    }`}
-  >
+  <div className="relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px]">
     <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
       <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
         {extractBaseAsset(symbol)}
       </span>
     </div>
     <MiniChartHeader symbol={symbol} chartExchange={chartExchange} />
-    <div ref={containerRef} className="relative z-0 flex-1 min-h-0 [transform:translateZ(0)] [backface-visibility:hidden] [contain:paint]">
+    <div
+      ref={containerRef}
+      className={`relative z-0 flex-1 min-h-0 [transform:translateZ(0)] [backface-visibility:hidden] [contain:paint] transition-opacity duration-300 ease-out ${
+        isInitialLoading ? 'opacity-0' : 'opacity-100'
+      }`}
+    >
       {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
       {isStale && <StaleDataOverlay visible={true} />}
     </div>
+    {isInitialLoading && (
+      <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+        <div className="w-[18px] h-[18px] border-2 border-[#333] border-t-[#999] rounded-full animate-spin" />
+      </div>
+    )}
     {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
     {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
   </div>
@@ -1432,70 +1440,35 @@ export const ChartGrid = memo(function ChartGrid() {
   const expandChart = useCoinListStore(s => s.expandChart)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const chartExchange = useCoinListStore(s => s.chartExchange)
-  const [loadedSet, setLoadedSet] = useState<Set<string>>(() => new Set())
 
   useInitialCandlesPush()
 
   useEffect(() => {
     if (topSymbols.length === 0) return
-    getOrFetchBulk(topSymbols, tf, 300, chartExchange)
+    getOrFetchBulk(topSymbols, tf, GRID_CANDLE_LIMIT, chartExchange)
   }, [topSymbols, tf, chartExchange])
-
-  useEffect(() => {
-    const currentSet = new Set(topSymbols.map(s => `${chartExchange}:${tf}:${s}`))
-    setLoadedSet(prev => {
-      const next = new Set<string>()
-      for (const key of prev) {
-        if (currentSet.has(key)) next.add(key)
-      }
-      if (next.size === prev.size) {
-        let same = true
-        for (const k of next) { if (!prev.has(k)) { same = false; break } }
-        if (same) return prev
-      }
-      return next
-    })
-  }, [topSymbols, tf, chartExchange])
-
-  const handleLoaded = useCallback((loadKey: string) => {
-    setLoadedSet(prev => {
-      if (prev.has(loadKey)) return prev
-      const next = new Set(prev)
-      next.add(loadKey)
-      return next
-    })
-  }, [])
 
   if (expandedSymbol) {
     return <ExpandedChart symbol={expandedSymbol} onBack={() => expandChart(null)} chartExchange={chartExchange} />
   }
 
-  const allChartsLoaded = topSymbols.length > 0 && topSymbols.every(symbol => loadedSet.has(`${chartExchange}:${tf}:${symbol}`))
-  const showOverlay = !allChartsLoaded
-
+  // Each chart shows itself as soon as its own data is ready (per-cell spinner
+  // inside MiniChart). Previously a full-grid blur overlay waited for ALL 9
+  // charts, so one slow symbol blocked everything.
+  // NB: key intentionally excludes `tf` — see MiniChart's createChart effect.
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
       <div className="relative flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px] isolate">
         {topSymbols.map((symbol) => (
           <MiniChart
-            key={`${chartExchange}:${tf}:${symbol}`}
+            key={`${chartExchange}:${symbol}`}
             symbol={symbol}
-            visible={allChartsLoaded}
-            onLoaded={handleLoaded}
             chartExchange={chartExchange}
           />
         ))}
         {Array.from({ length: Math.max(0, 9 - topSymbols.length) }).map((_, idx) => (
           <div key={`placeholder-${idx}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f]" />
         ))}
-
-        {showOverlay && (
-          <div className="chart-loading-overlay absolute inset-0 z-30 flex items-center justify-center pointer-events-none backdrop-blur-[5px]">
-            <span className="chart-loading-text text-[18px] font-semibold text-[#e8e8e8] tracking-wide">
-              Графики загружаются<span className="chart-loading-dots" aria-hidden="true" />
-            </span>
-          </div>
-        )}
       </div>
     </div>
   )

@@ -1,4 +1,5 @@
 import express from 'express'
+import compression from 'compression'
 import cors from 'cors'
 import cookieParser from 'cookie-parser'
 import { WebSocketServer, WebSocket } from 'ws'
@@ -32,6 +33,9 @@ async function main() {
   }
 
   const app = express()
+  // Gzip API responses. In prod nginx also gzips, but this covers direct
+  // access and the dev vite proxy; candle payloads are highly compressible.
+  app.use(compression())
   app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173', credentials: true }))
   app.set('trust proxy', 1)
   app.use(cookieParser())
