@@ -63,8 +63,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 $SUDO docker compose version
 
 cd "$(dirname "$SCRIPT_DIR")"
+echo ">>> Removing any stale docker-compose v1 containers"
+$SUDO "$SCRIPT_DIR/cleanup-v1.sh" || true
 echo ">>> docker compose up -d --build"
-$SUDO docker compose -f compose.yaml -p crypto-screener up -d --build
+$SUDO docker compose -f compose.yaml -p crypto-screener up -d --build --remove-orphans
 
 echo
 $SUDO docker compose -f compose.yaml -p crypto-screener ps

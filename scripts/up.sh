@@ -7,7 +7,8 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 if docker compose version >/dev/null 2>&1; then
-  exec docker compose -f compose.yaml -p crypto-screener up -d --build "$@"
+  "$(dirname "$0")/cleanup-v1.sh" || true
+  exec docker compose -f compose.yaml -p crypto-screener up -d --build --remove-orphans "$@"
 fi
 
 echo "============================================================" >&2
