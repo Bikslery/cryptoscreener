@@ -13,6 +13,7 @@ import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT }
 import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
 import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
 import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload } from '../../services/candle-lifecycle'
+import { isFiniteOHLCV, validateCandle, normalizeCandle } from '../../services/candle-utils'
 import { useDrawings, type DrawingTool } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
 
@@ -32,13 +33,15 @@ function applyChartPatch(
   tf: Timeframe,
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
 ) {
-  for (const c of patch.candleUpdates) {
-    if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) continue
+  for (const raw of patch.candleUpdates) {
+    const c = normalizeCandle(raw)
+    if (!isFiniteOHLCV(c)) continue
     candleRef.current?.update({
       time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
     })
   }
-  for (const v of patch.volumeUpdates) {
+  for (const raw of patch.volumeUpdates) {
+    const v = normalizeCandle(raw)
     if (!isFinite(v.volume)) continue
     volumeRef.current?.update({
       time: v.time as Time, value: v.volume,
@@ -50,7 +53,7 @@ function applyChartPatch(
   }
   if (patch.cacheWrites && exchange) {
     for (const c of patch.cacheWrites) {
-      candleCache.updateCandle(exchange, symbol, tf, c)
+      candleCache.updateCandle(exchange, symbol, tf, normalizeCandle(c))
     }
   }
   if (candlesDataRef?.current && patch.candleUpdates.length > 0) {
@@ -192,10 +195,7 @@ function useFullHistory(
       if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
       candlesDataRef.current = candles
       // Filter out invalid candles before rendering
-      const validCandles = candles.filter(c =>
-        isFinite(c.open) && isFinite(c.high) && isFinite(c.low) && isFinite(c.close) &&
-        isFinite(c.volume) && c.volume >= 0 && c.time > 0
-      )
+      const validCandles = candles.filter(validateCandle).map(normalizeCandle)
       const candleData = validCandles.map(c => ({
         time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
       }))
@@ -424,10 +424,11 @@ function useLazyScroll(
           const barSpacing = (ts.options() as any).barSpacing
 
           try {
-            const candleData = merged.map(c => ({
+            const normalized = merged.map(normalizeCandle)
+            const candleData = normalized.map(c => ({
               time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
             }))
-            const volumeData = merged.map(c => ({
+            const volumeData = normalized.map(c => ({
               time: c.time as Time, value: c.volume,
               color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
             }))
@@ -584,7 +585,7 @@ function useWsCandle(
         lastUpdateRef.current = Date.now()
       }
 
-      if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) return
+      if (!isFiniteOHLCV(c)) return
 
       const lc = lifecycleRef.current
       if (!lc) return

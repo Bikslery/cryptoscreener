@@ -69,8 +69,8 @@ describe('candle-lifecycle', () => {
     })
   })
 
-  describe('trade new interval creates new candle with open = previous close', () => {
-    it('uses previous close as open for new candle', () => {
+  describe('trade new interval creates new candle with open = first trade price', () => {
+    it('uses first trade price as open for new candle', () => {
       const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
       const hist = [makeCandle(300, 100, 110, 95, 105, 50)]
       lc.applyHistory(hist)
@@ -79,7 +79,7 @@ describe('candle-lifecycle', () => {
       expect(patch.candleUpdates).toHaveLength(1)
       const c = patch.candleUpdates[0]
       expect(c.time).toBe(360)
-      expect(c.open).toBe(105)
+      expect(c.open).toBe(107)
       expect(c.close).toBe(107)
       expect(c.volume).toBe(3)
     })

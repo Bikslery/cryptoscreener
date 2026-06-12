@@ -1,4 +1,5 @@
 import type { UnifiedCandle, Exchange } from '../types'
+import { isFiniteOHLCV, normalizeCandle } from './candle-utils'
 
 export interface CandlePatch {
   candleUpdates: UnifiedCandle[]
@@ -43,10 +44,6 @@ function emptyPatch(): CandlePatch {
   return { candleUpdates: [], volumeUpdates: [] }
 }
 
-function isFiniteOHLCV(c: { open: number; high: number; low: number; close: number; volume: number }): boolean {
-  return isFinite(c.open) && isFinite(c.high) && isFinite(c.low) && isFinite(c.close) && isFinite(c.volume)
-}
-
 let seq = 0
 function nextSeq(): number { return ++seq }
 
@@ -61,11 +58,6 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
 
   function getTailIndex(time: number): number {
     return tail.findIndex(t => t.candle.time === time)
-  }
-
-  function getPreviousClose(): number | null {
-    if (tail.length === 0) return null
-    return tail[tail.length - 1].candle.close
   }
 
   function getCurrentForming(): TailEntry | null {
@@ -91,10 +83,11 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
 
   function patchFromCandles(candles: UnifiedCandle[], livePrice?: number, cacheWrites?: UnifiedCandle[]): CandlePatch {
     const patch = emptyPatch()
-    patch.candleUpdates = candles
-    patch.volumeUpdates = candles
+    const normalized = candles.map(normalizeCandle)
+    patch.candleUpdates = normalized
+    patch.volumeUpdates = normalized
     if (livePrice != null) patch.livePrice = livePrice
-    if (cacheWrites && cacheWrites.length > 0) patch.cacheWrites = cacheWrites
+    if (cacheWrites && cacheWrites.length > 0) patch.cacheWrites = normalized
     return patch
   }
 
@@ -140,8 +133,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     let updatedCandles: UnifiedCandle[] = []
 
     if (!current) {
-      const prevClose = getPreviousClose()
-      const open = prevClose != null ? prevClose : trade.price
+      const open = trade.price
       const newCandle: UnifiedCandle = {
         symbol, exchange, timeframe: tf,
         time: candleTime,
@@ -174,8 +166,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     } else if (tradeSec < current.candle.time) {
       return EMPTY_PATCH
     } else {
-      const prevClose = current.candle.close
-      const open = prevClose
+      const open = trade.price
       const newCandle: UnifiedCandle = {
         symbol, exchange, timeframe: tf,
         time: candleTime,

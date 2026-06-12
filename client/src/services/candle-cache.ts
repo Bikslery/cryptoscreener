@@ -1,13 +1,10 @@
 import type { UnifiedCandle, Exchange } from '../types'
+import { validateCandle, normalizeCandle } from './candle-utils'
 
-// Reasonable limit: ~5000 candles per symbol+tf pair keeps memory bounded
-// (5000 * 8 fields * 8 bytes ≈ 320KB per key max)
 const MAX_CANDLES_PER_KEY = 5000
 const MAX_TOTAL_CANDLES = 300_000
 
 const cache = new Map<string, UnifiedCandle[]>()
-// LRU via Set insertion order: delete+add to touch (O(1)), first value = oldest.
-// Previously an array with indexOf/splice — O(n) on every cache read.
 const lruOrder = new Set<string>()
 let totalCandleCount = 0
 
@@ -28,21 +25,6 @@ function evictIfNeeded() {
     if (arr) totalCandleCount -= arr.length
     cache.delete(oldest)
   }
-}
-
-function validateCandle(c: UnifiedCandle): boolean {
-  // Validate all OHLC fields are finite numbers
-  if (!isFinite(c.open) || !isFinite(c.high) || !isFinite(c.low) || !isFinite(c.close)) {
-    return false
-  }
-  // Validate OHLC relationships
-  if (c.high < c.low) return false
-  if (c.high < c.open || c.high < c.close) return false
-  if (c.low > c.open || c.low > c.close) return false
-  // Validate volume and time
-  if (!isFinite(c.volume) || c.volume < 0) return false
-  if (!c.time || c.time <= 0) return false
-  return true
 }
 
 function dedupSort(candles: UnifiedCandle[]): UnifiedCandle[] {
@@ -110,8 +92,8 @@ export function prependCandles(exchange: Exchange, symbol: string, tf: string, o
 }
 
 export function updateCandle(exchange: Exchange, symbol: string, tf: string, candle: UnifiedCandle): void {
-  // Validate before updating cache
-  if (!validateCandle(candle)) {
+  const normalized = normalizeCandle(candle)
+  if (!validateCandle(normalized)) {
     console.warn('[candle-cache] Invalid candle rejected', { exchange, symbol, tf, time: candle.time })
     return
   }
@@ -120,10 +102,10 @@ export function updateCandle(exchange: Exchange, symbol: string, tf: string, can
   const arr = cache.get(k)
   if (!arr) return
   const last = arr[arr.length - 1]
-  if (last && last.time === candle.time) {
-    arr[arr.length - 1] = candle
-  } else if (!last || candle.time > last.time) {
-    arr.push(candle)
+  if (last && last.time === normalized.time) {
+    arr[arr.length - 1] = normalized
+  } else if (!last || normalized.time > last.time) {
+    arr.push(normalized)
     totalCandleCount++
     if (arr.length > MAX_CANDLES_PER_KEY + 200) {
       const excess = arr.length - MAX_CANDLES_PER_KEY
@@ -132,8 +114,8 @@ export function updateCandle(exchange: Exchange, symbol: string, tf: string, can
     }
     touchLru(k)
   } else {
-    const idx = arr.findIndex(c => c.time === candle.time)
-    if (idx >= 0) arr[idx] = candle
+    const idx = arr.findIndex(c => c.time === normalized.time)
+    if (idx >= 0) arr[idx] = normalized
   }
 }
 
