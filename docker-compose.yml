@@ -35,6 +35,7 @@ services:
       DATABASE_URL: postgresql://screener:${POSTGRES_PASSWORD}@postgres:5432/cryptoscreener
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      RESET_JWT_SECRET: ${RESET_JWT_SECRET:?RESET_JWT_SECRET must be set}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       PORT: 3001
       ROLE: all
