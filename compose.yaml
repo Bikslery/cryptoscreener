@@ -1,3 +1,5 @@
+name: crypto-screener
+
 services:
   postgres:
     image: postgres:16.4-alpine
@@ -29,7 +31,9 @@ services:
       start_period: 5s
 
   server:
-    build: ./server
+    build:
+      context: ./server
+      dockerfile: Dockerfile
     image: crypto-screener-server:local
     environment:
       DATABASE_URL: postgresql://screener:${POSTGRES_PASSWORD}@postgres:5432/cryptoscreener
@@ -57,7 +61,9 @@ services:
       start_period: 30s
 
   client:
-    build: ./client
+    build:
+      context: ./client
+      dockerfile: Dockerfile
     image: crypto-screener-client:local
     ports:
       - "80:80"
@@ -75,3 +81,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+
+networks:
+  default:
+    name: crypto-screener
