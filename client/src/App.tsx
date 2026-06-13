@@ -6,6 +6,7 @@ import { RightPanel } from './components/layout/RightPanel'
 import AuthModal from './components/auth/AuthModal'
 import { ProfileModalGate } from './components/auth/ProfileModal'
 import { ExchangeModalGate } from './components/exchange/ExchangeModal'
+import { TickerSearchModalGate } from './components/search/TickerSearchModal'
 import { useCoinListStore, useAuthStore, useUIStore } from './store'
 import { wsConnect, wsDisconnect, ensureHealthyConnection } from './services/ws'
 import type { Timeframe } from './types'
@@ -64,11 +65,13 @@ function App() {
   }, [coinListInit, isChecking, isLoggedIn])
 
   // Пробел — перейти к следующей странице мини-графиков (на последней останавливается).
+  // Любая буква — открыть модалку поиска тикера и ввести её в поле.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const hotkeyTimeframe = TIMEFRAME_HOTKEYS[e.key]
       const isSpace = e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar'
-      if ((!hotkeyTimeframe && !isSpace) || e.isComposing) return
+      const isLetter = e.key.length === 1 && /^\p{L}$/u.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey
+      if ((!hotkeyTimeframe && !isSpace && !isLetter) || e.isComposing) return
 
       // Не перехватываем горячие клавиши, когда в фокусе поле ввода или интерактивный элемент —
       // пусть отрабатывает их штатное поведение (ввод текста, активация кнопки/ссылки).
@@ -82,10 +85,16 @@ function App() {
         if (role === 'button' || role === 'link' || role === 'tab' || role === 'checkbox' || role === 'menuitem' || role === 'switch') return
       }
 
-      // Не листаем при открытом модальном окне или в развёрнутом графике.
+      // Не листаем и не открываем поиск при открытом модальном окне или в развёрнутом графике.
       const ui = useUIStore.getState()
-      if (ui.showAuth || ui.showProfile || ui.showExchangeModal) return
+      if (ui.showAuth || ui.showProfile || ui.showExchangeModal || ui.showTickerSearch) return
       const s = useCoinListStore.getState()
+
+      if (isLetter) {
+        e.preventDefault()
+        useUIStore.setState({ showTickerSearch: true, tickerSearchQuery: e.key })
+        return
+      }
 
       if (hotkeyTimeframe) {
         e.preventDefault()
@@ -133,6 +142,7 @@ function App() {
       </div>
       <ProfileModalGate />
       <ExchangeModalGate />
+      <TickerSearchModalGate />
     </div>
   )
 }

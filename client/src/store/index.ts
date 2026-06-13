@@ -458,16 +458,24 @@ interface UIStore {
   showAuth: boolean
   showProfile: boolean
   showExchangeModal: boolean
+  showTickerSearch: boolean
+  tickerSearchQuery: string
   setShowAuth: (v: boolean) => void
   setShowProfile: (v: boolean) => void
   setShowExchangeModal: (v: boolean) => void
+  setShowTickerSearch: (v: boolean) => void
+  setTickerSearchQuery: (v: string) => void
 }
 
 export const useUIStore = create<UIStore>((set) => ({
   showAuth: false,
   showProfile: false,
   showExchangeModal: false,
+  showTickerSearch: false,
+  tickerSearchQuery: '',
   setShowAuth: (v) => set({ showAuth: v }),
   setShowProfile: (v) => set({ showProfile: v }),
   setShowExchangeModal: (v) => set({ showExchangeModal: v }),
+  setShowTickerSearch: (v) => set({ showTickerSearch: v }),
+  setTickerSearchQuery: (v) => set({ tickerSearchQuery: v }),
 }))
