@@ -119,7 +119,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     }
   }
 
-  function patchFromCandles(candles: UnifiedCandle[], livePrice?: number, cacheWrites?: UnifiedCandle[], gapBackfill?: GapBackfill): CandlePatch {
+  function patchFromCandles(candles: UnifiedCandle[], livePrice?: number, cacheWrites?: UnifiedCandle[], gapBackfill?: GapBackfill | null): CandlePatch {
     const patch = emptyPatch()
     const normalized = candles.map(normalizeCandle)
     patch.candleUpdates = normalized
