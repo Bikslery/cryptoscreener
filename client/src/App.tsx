@@ -69,8 +69,8 @@ function App() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const hotkeyTimeframe = TIMEFRAME_HOTKEYS[e.key]
-      const isSpace = e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar'
-      const isLetter = e.key.length === 1 && /^\p{L}$/u.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey
+      const isSpace = e.code === 'Space'
+      const isLetter = e.key.length === 1 && /[A-Za-z]/.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey
       if ((!hotkeyTimeframe && !isSpace && !isLetter) || e.isComposing) return
 
       // Не перехватываем горячие клавиши, когда в фокусе поле ввода или интерактивный элемент —
@@ -92,7 +92,7 @@ function App() {
 
       if (isLetter) {
         e.preventDefault()
-        useUIStore.setState({ showTickerSearch: true, tickerSearchQuery: e.key })
+        useUIStore.setState({ showTickerSearch: true })
         return
       }
 

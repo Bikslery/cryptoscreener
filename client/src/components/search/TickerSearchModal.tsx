@@ -2,33 +2,23 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useCoinListStore, useUIStore } from '../../store'
 import { extractBaseAsset } from '../../utils/format'
-import { Search, X } from 'lucide-react'
+import { X } from 'lucide-react'
 import './TickerSearchModal.css'
 
 const MAX_RESULTS = 50
 
-function isLetterKey(key: string): boolean {
-  return key.length === 1 && /^\p{L}$/u.test(key)
-}
-
 export default function TickerSearchModal() {
-  const { setShowTickerSearch, tickerSearchQuery, setTickerSearchQuery } = useUIStore()
+  const { setShowTickerSearch } = useUIStore()
   const sortedCoins = useCoinListStore(s => s.sortedCoins)
   const expandChart = useCoinListStore(s => s.expandChart)
-  const [query, setQuery] = useState(() => tickerSearchQuery)
+  const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
-  const resultsRef = useRef<HTMLDivElement>(null)
   const selectedRef = useRef<HTMLButtonElement>(null)
 
-  // Consume the initial hotkey character on mount, then clear the store value.
   useEffect(() => {
-    if (tickerSearchQuery) {
-      setQuery(tickerSearchQuery)
-      setTickerSearchQuery('')
-    }
     inputRef.current?.focus()
-  }, [tickerSearchQuery, setTickerSearchQuery])
+  }, [])
 
   const filtered = useMemo(() => {
     const raw = query.trim().toLowerCase()
@@ -40,29 +30,9 @@ export default function TickerSearchModal() {
     }).slice(0, MAX_RESULTS)
   }, [query, sortedCoins])
 
-  // Reset selection when query or results change.
   useEffect(() => {
-    setSelectedIndex(0)
-  }, [query, filtered.length])
-
-  // Keep selected item visible in the scrollable list.
-  useEffect(() => {
-    const el = selectedRef.current
-    if (!el || !resultsRef.current) return
-    const container = resultsRef.current
-    const containerRect = container.getBoundingClientRect()
-    const elRect = el.getBoundingClientRect()
-    if (elRect.top < containerRect.top) {
-      el.scrollIntoView({ block: 'nearest' })
-    } else if (elRect.bottom > containerRect.bottom) {
-      el.scrollIntoView({ block: 'nearest' })
-    }
+    selectedRef.current?.scrollIntoView({ block: 'nearest' })
   }, [selectedIndex])
-
-  const handleSelect = (symbol: string) => {
-    expandChart(symbol)
-    setShowTickerSearch(false)
-  }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -88,36 +58,27 @@ export default function TickerSearchModal() {
         const coin = filtered[selectedIndex]
         if (coin) {
           e.preventDefault()
-          handleSelect(coin.symbol)
+          expandChart(coin.symbol)
+          setShowTickerSearch(false)
         }
         return
       }
 
-      // If a letter is typed while the modal is open, focus the input so it
-      // lands in the search field (unless the input already has focus).
-      if (isLetterKey(e.key) && document.activeElement !== inputRef.current) {
+      if (/[A-Za-z]/.test(e.key) && e.key.length === 1 && document.activeElement !== inputRef.current) {
         inputRef.current?.focus()
       }
     }
 
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [filtered, selectedIndex, setShowTickerSearch])
-
-  if (typeof document === 'undefined') return null
+  }, [filtered, selectedIndex, setShowTickerSearch, expandChart])
 
   return createPortal(
     <div className="ticker-search-overlay" onClick={() => setShowTickerSearch(false)}>
       <div className="ticker-search-backdrop" />
       <div className="ticker-search-modal" onClick={(e) => e.stopPropagation()}>
         <div className="ticker-search-header">
-          <div className="ticker-search-header-icon">
-            <Search size={16} />
-          </div>
-          <div className="ticker-search-header-info">
-            <div className="ticker-search-title">Поиск тикера</div>
-            <div className="ticker-search-subtitle">начните вводить символ или базовый актив</div>
-          </div>
+          <div className="ticker-search-title">Поиск тикера</div>
           <button
             className="ticker-search-close"
             onClick={() => setShowTickerSearch(false)}
@@ -132,18 +93,15 @@ export default function TickerSearchModal() {
             ref={inputRef}
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => { setQuery(e.target.value); setSelectedIndex(0) }}
             placeholder="BTC, ETH, SOL..."
             className="ticker-search-input"
             spellCheck={false}
             autoComplete="off"
           />
-          <span className="ticker-search-input-icon">
-            <Search size={16} />
-          </span>
         </div>
 
-        <div className="ticker-search-results" ref={resultsRef}>
+        <div className="ticker-search-results">
           {filtered.length === 0 ? (
             <div className="ticker-search-empty">Ничего не найдено</div>
           ) : (
@@ -155,8 +113,7 @@ export default function TickerSearchModal() {
                   key={coin.symbol}
                   ref={isSelected ? selectedRef : null}
                   className={`ticker-search-result ${isSelected ? 'selected' : ''}`}
-                  onClick={() => handleSelect(coin.symbol)}
-                  onMouseEnter={() => setSelectedIndex(idx)}
+                  onClick={() => { expandChart(coin.symbol); setShowTickerSearch(false) }}
                 >
                   <span className="ticker-search-result-symbol">{base}</span>
                   <span className="ticker-search-result-meta">
