@@ -92,7 +92,7 @@ function App() {
 
       if (isLetter) {
         e.preventDefault()
-        useUIStore.setState({ showTickerSearch: true })
+        useUIStore.getState().setShowTickerSearch(true, e.key.toUpperCase())
         return
       }
 
