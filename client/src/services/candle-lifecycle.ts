@@ -1,12 +1,33 @@
 import type { UnifiedCandle, Exchange } from '../types'
 import { isFiniteOHLCV, normalizeCandle } from './candle-utils'
 
+export interface GapBackfill {
+  /** Inclusive earliest missing period (epoch seconds, bucket-aligned). */
+  fromTime: number
+  /** Inclusive latest missing period (epoch seconds, bucket-aligned). */
+  toTime: number
+}
+
 export interface CandlePatch {
   candleUpdates: UnifiedCandle[]
   volumeUpdates: UnifiedCandle[]
   livePrice?: number
   cacheWrites?: UnifiedCandle[]
+  /**
+   * Set when a new-period event (kline/trade) reveals one or more skipped
+   * periods between the previous tail candle and the new one. Consumers
+   * should fetch the missing candles via REST and apply them via
+   * applyOlderPage() before painting this patch's candleUpdates.
+   */
+  gapBackfill?: GapBackfill
 }
+
+/**
+ * Cap on how many missing periods a single detected gap may request via
+ * REST backfill. Larger gaps (e.g. long WS outages) are left to the
+ * reconnect/refresh path rather than firing a heavy request burst here.
+ */
+const MAX_BACKFILL_PERIODS = 10
 
 export interface TradePayload {
   symbol: string
@@ -47,6 +68,23 @@ function emptyPatch(): CandlePatch {
 let seq = 0
 function nextSeq(): number { return ++seq }
 
+/**
+ * Compute a backfill range when `newTime` skips one or more periods after
+ * `prevTime`. Returns null when the times are adjacent (no gap), when the
+ * gap exceeds MAX_BACKFILL_PERIODS (deferred to reconnect logic), or when
+ * either bound is non-finite / misordered.
+ */
+function detectGap(prevTime: number, newTime: number, tfSeconds: number): GapBackfill | null {
+  if (!isFinite(prevTime) || !isFinite(newTime) || newTime <= prevTime) return null
+  const periods = Math.round((newTime - prevTime) / tfSeconds)
+  if (periods <= 1) return null
+  if (periods - 1 > MAX_BACKFILL_PERIODS) return null
+  return {
+    fromTime: prevTime + tfSeconds,
+    toTime: newTime - tfSeconds,
+  }
+}
+
 export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycle {
   const { symbol, exchange, tf, tfSeconds } = opts
 
@@ -81,13 +119,14 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     }
   }
 
-  function patchFromCandles(candles: UnifiedCandle[], livePrice?: number, cacheWrites?: UnifiedCandle[]): CandlePatch {
+  function patchFromCandles(candles: UnifiedCandle[], livePrice?: number, cacheWrites?: UnifiedCandle[], gapBackfill?: GapBackfill): CandlePatch {
     const patch = emptyPatch()
     const normalized = candles.map(normalizeCandle)
     patch.candleUpdates = normalized
     patch.volumeUpdates = normalized
     if (livePrice != null) patch.livePrice = livePrice
     if (cacheWrites && cacheWrites.length > 0) patch.cacheWrites = normalized
+    if (gapBackfill) patch.gapBackfill = gapBackfill
     return patch
   }
 
@@ -144,6 +183,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
         volume: trade.qty,
         source: 'trade',
       }
+      // No prior tail candle → no reference point for a gap.
       pushTail({
         candle: newCandle,
         lastTradeAt: nextSeq(),
@@ -167,6 +207,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
       return EMPTY_PATCH
     } else {
       const open = trade.price
+      const gap = detectGap(current.candle.time, candleTime, tfSeconds)
       const newCandle: UnifiedCandle = {
         symbol, exchange, timeframe: tf,
         time: candleTime,
@@ -183,6 +224,11 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
         lastKlineAt: 0,
       })
       updatedCandles = [newCandle]
+      if (buffered) {
+        bufferedTrade = trade
+        return EMPTY_PATCH
+      }
+      return patchFromCandles(updatedCandles, trade.price, updatedCandles, gap)
     }
 
     if (buffered) {
@@ -199,12 +245,19 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
 
     const idx = getTailIndex(kline.time)
     if (idx < 0) {
-      if (tail.length > 0 && kline.time > tail[tail.length - 1].candle.time && !kline.isFinal) {
+      // Candle for this period is not yet in the tail. We must paint it when
+      // it is a NEW period ahead of the tail — regardless of isFinal. The old
+      // guard `&& !kline.isFinal` dropped a candle whose first WS message for
+      // the period already carried isFinal=true (common during Binance load
+      // spikes), leaving a horizontal hole on the chart.
+      const lastTailTime = tail.length > 0 ? tail[tail.length - 1].candle.time : null
+      if (lastTailTime != null && kline.time > lastTailTime) {
+        const gap = detectGap(lastTailTime, kline.time, tfSeconds)
         const prevClose = tail[tail.length - 1].candle.close
         const newCandle: UnifiedCandle = {
           ...kline,
           symbol, exchange, timeframe: tf,
-          open: kline.open || prevClose,
+          open: isFinite(kline.open) && kline.open > 0 ? kline.open : prevClose,
           source: 'kline',
         }
         pushTail({
@@ -216,8 +269,10 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
           bufferedKline = kline
           return EMPTY_PATCH
         }
-        return patchFromCandles([newCandle], kline.close, [newCandle])
+        return patchFromCandles([newCandle], kline.close, [newCandle], gap)
       }
+      // kline.time is older than the tail window (or before any tail entry):
+      // stale/out-of-window update — ignore, just like before.
       return EMPTY_PATCH
     }
 
@@ -309,6 +364,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
       if (!target.cacheWrites) target.cacheWrites = []
       target.cacheWrites.push(...source.cacheWrites)
     }
+    if (source.gapBackfill) target.gapBackfill = source.gapBackfill
   }
 
   function destroy() {

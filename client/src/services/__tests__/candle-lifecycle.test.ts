@@ -206,4 +206,101 @@ describe('candle-lifecycle', () => {
       expect(patch.candleUpdates).toHaveLength(1)
     })
   })
+
+  // ---------------------------------------------------------------------
+  // Regression: final kline for a new period must still create a candle.
+  // Previously applyKline guarded new-candle creation with `!kline.isFinal`,
+  // so a kline whose first WS message for the period already carried
+  // isFinal=true (common during Binance load spikes) was dropped, leaving a
+  // horizontal hole on the chart.
+  // ---------------------------------------------------------------------
+  describe('final kline for new period creates a candle', () => {
+    it('creates the candle even when isFinal=true on first message', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      const patch = lc.applyKline(makeCandle(360, 105, 108, 103, 107, 40, { isFinal: true }))
+      expect(patch.candleUpdates).toHaveLength(1)
+      const c = patch.candleUpdates[0]
+      expect(c.time).toBe(360)
+      expect(c.isFinal).toBe(true)
+      expect(c.open).toBe(105)
+      expect(c.close).toBe(107)
+      expect(c.high).toBe(108)
+      expect(c.low).toBe(103)
+    })
+
+    it('creates the candle when isFinal=false (forming)', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      const patch = lc.applyKline(makeCandle(360, 105, 108, 103, 107, 40, { isFinal: false }))
+      expect(patch.candleUpdates).toHaveLength(1)
+      expect(patch.candleUpdates[0].time).toBe(360)
+      expect(patch.candleUpdates[0].close).toBe(107)
+    })
+
+    it('open from kline is used, not prevClose, when kline.open is valid', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      // prevClose = 105; kline.open = 200 — open must be 200, not 105.
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      const patch = lc.applyKline(makeCandle(360, 200, 210, 195, 205, 10, { isFinal: true }))
+      expect(patch.candleUpdates[0].open).toBe(200)
+    })
+
+    it('falls back to prevClose for open only when kline.open is invalid', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      // open: 0 (falsy) → fallback to prevClose = 105. normalizeCandle clamps
+      // high/low afterwards, so the candle stays drawable.
+      const patch = lc.applyKline(makeCandle(360, 0, 0, 0, 0, 10, { isFinal: true }))
+      expect(patch.candleUpdates).toHaveLength(1)
+      expect(patch.candleUpdates[0].open).toBe(105)
+    })
+  })
+
+  // ---------------------------------------------------------------------
+  // Gap detection: when a new-period event skips one or more buckets
+  // (e.g. brief WS outage during sharp price action), the patch must carry
+  // gapBackfill so the chart can REST-fetch the missing candles.
+  // ---------------------------------------------------------------------
+  describe('gapBackfill', () => {
+    it('is reported when a kline skips periods', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      // 300 → 480 skips 360 and 420.
+      const patch = lc.applyKline(makeCandle(480, 120, 125, 118, 122, 20))
+      expect(patch.gapBackfill).toEqual({ fromTime: 360, toTime: 420 })
+    })
+
+    it('is reported when a trade skips periods', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      const patch = lc.applyTrade(makeTrade(480, 130, 5))
+      expect(patch.gapBackfill).toEqual({ fromTime: 360, toTime: 420 })
+    })
+
+    it('is undefined when periods are adjacent (no gap)', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      const patch = lc.applyKline(makeCandle(360, 105, 108, 103, 107, 40))
+      expect(patch.gapBackfill).toBeUndefined()
+    })
+
+    it('is undefined for very large gaps (deferred to reconnect logic)', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      // 300 → 300 + 20*60 = 1500 → 19 missing periods (> MAX_BACKFILL_PERIODS=10).
+      const patch = lc.applyKline(makeCandle(1500, 200, 210, 195, 205, 30))
+      expect(patch.gapBackfill).toBeUndefined()
+      // The candle itself is still created (we don't drop it, just skip backfill).
+      expect(patch.candleUpdates).toHaveLength(1)
+    })
+  })
 })

@@ -12,7 +12,7 @@ import * as candleCache from '../../services/candle-cache'
 import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT } from '../../services/candle-prefetch'
 import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
 import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
-import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload } from '../../services/candle-lifecycle'
+import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload, type GapBackfill } from '../../services/candle-lifecycle'
 import { isFiniteOHLCV, validateCandle, normalizeCandle } from '../../services/candle-utils'
 import { useDrawings, type DrawingTool } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
@@ -73,6 +73,76 @@ function applyChartPatch(
       priceLineColor: lastCandle.close >= lastCandle.open ? UP_COLOR() : DOWN_COLOR(),
     })
   }
+}
+
+/**
+ * Fetch and apply candles for a detected period gap (WS stream skipped one or
+ * more buckets, e.g. after a brief disconnect during sharp price action).
+ *
+ * Uses `getOrFetchOlder` with `before = toTime + tfSec` and then filters to
+ * the exact [fromTime, toTime] window. Deduplicated per (symbol,tf,gap) via an
+ * in-flight set so a burst of late klines/trades for the same gap fires only
+ * one REST request. The merge uses lifecycle.applyOlderPage + applyChartPatch
+ * so it reuses the same draw/cache path as everything else.
+ *
+ * Safe to call concurrently from useWsCandle and useWsTrade — the second call
+ * for the same gap no-ops once one is in flight, and overlapping fetches for
+ * adjacent gaps are merged by the dedup-by-time inside applyChartPatch.
+ */
+const backfillInflightKeys = new Set<string>()
+
+function backfillGap(
+  gap: GapBackfill,
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  lifecycleRef: React.RefObject<CandleLifecycle | null>,
+  destroyedRef: React.RefObject<boolean>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]> | undefined,
+) {
+  if (!exchange) return
+  if (destroyedRef.current) return
+  const key = `${exchange}:${symbol}:${tf}:${gap.fromTime}-${gap.toTime}`
+  if (backfillInflightKeys.has(key)) return
+  // Also collapse adjacent/nested gaps for the same series into one fetch
+  // window — a tight burst of WS messages often produces near-duplicate gaps.
+  const tfSec = getTfSeconds(tf)
+  for (const existing of backfillInflightKeys) {
+    const prefix = `${exchange}:${symbol}:${tf}:`
+    if (!existing.startsWith(prefix)) continue
+    const range = existing.slice(prefix.length).split('-')
+    const exFrom = Number(range[0])
+    const exTo = Number(range[1])
+    if (gap.fromTime >= exFrom - tfSec && gap.fromTime <= exTo + tfSec) {
+      // Overlaps or touches an in-flight gap — skip; that fetch will cover us.
+      return
+    }
+  }
+
+  backfillInflightKeys.add(key)
+  const before = gap.toTime + tfSec
+  const limit = Math.max(2, Math.round((gap.toTime - gap.fromTime) / tfSec) + 2)
+
+  getOrFetchOlder(symbol, tf, before, limit, exchange)
+    .then(candles => {
+      if (destroyedRef.current) return
+      const lc = lifecycleRef.current
+      if (!lc) return
+      const inWindow = candles.filter(c => c.time >= gap.fromTime && c.time <= gap.toTime)
+      if (inWindow.length === 0) return
+      // Apply through the lifecycle so tail state stays consistent, then paint.
+      const patch = lc.applyOlderPage(inWindow)
+      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
+    })
+    .catch(() => {
+      // Network/server error — the gap remains visible but we don't crash.
+      // A subsequent kline for a later period will trigger another attempt.
+    })
+    .finally(() => {
+      backfillInflightKeys.delete(key)
+    })
 }
 
 function ChartMessageOverlay({ label, tone = 'muted' }: { label: string; tone?: 'muted' | 'error' }) {
@@ -594,6 +664,9 @@ function useWsCandle(
       if (adjustingRef?.current) return
 
       applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
+      if (patch.gapBackfill) {
+        backfillGap(patch.gapBackfill, symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef)
+      }
     })
     wsSubscribe(channel)
     return () => {
@@ -655,6 +728,9 @@ function useWsTrade(
       if (adjustingRef?.current) return
 
       applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
+      if (patch.gapBackfill) {
+        backfillGap(patch.gapBackfill, symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef)
+      }
     })
     wsSubscribe(tradeType)
 
