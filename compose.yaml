@@ -40,6 +40,7 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
       RESET_JWT_SECRET: ${RESET_JWT_SECRET:?RESET_JWT_SECRET must be set}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       PORT: 3001
       ROLE: all

@@ -14,6 +14,9 @@ const RESET_JWT_SECRET = process.env.RESET_JWT_SECRET || (
 const COOKIE_NAME = 'token'
 const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000 // 7 days in ms
 const REFRESH_THRESHOLD = 24 * 60 * 60 * 1000 // refresh if < 1 day left
+const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true' || (
+  process.env.COOKIE_SECURE === undefined && process.env.NODE_ENV === 'production'
+)
 
 export interface JwtPayload {
   userId: string
@@ -49,7 +52,7 @@ export function verifyResetToken(token: string): string | null {
 export function setAuthCookie(res: Response, token: string) {
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: COOKIE_SECURE,
     sameSite: 'lax',
     maxAge: COOKIE_MAX_AGE,
     path: '/',
