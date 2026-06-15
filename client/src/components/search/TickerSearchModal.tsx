@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useCoinListStore, useUIStore } from '../../store'
 import { extractBaseAsset } from '../../utils/format'
+import { getEnglishLetterFromKeyCode } from '../../utils/keyboard'
 import { X } from 'lucide-react'
 import './TickerSearchModal.css'
 
@@ -14,12 +15,20 @@ export default function TickerSearchModal() {
   const initialQuery = useUIStore(s => s.tickerSearchQuery)
   const [query, setQuery] = useState(initialQuery)
   const [selectedIndex, setSelectedIndex] = useState(0)
+  const [cursor, setCursor] = useState<number | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const selectedRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     inputRef.current?.focus()
   }, [])
+
+  useEffect(() => {
+    if (cursor !== null && inputRef.current) {
+      inputRef.current.setSelectionRange(cursor, cursor)
+      setCursor(null)
+    }
+  }, [cursor, query])
 
   const filtered = useMemo(() => {
     const raw = query.trim().toLowerCase()
@@ -65,8 +74,18 @@ export default function TickerSearchModal() {
         return
       }
 
-      if (/[A-Za-z]/.test(e.key) && e.key.length === 1 && document.activeElement !== inputRef.current) {
-        inputRef.current?.focus()
+      if (e.isComposing) return
+
+      const letter = getEnglishLetterFromKeyCode(e.code)
+      if (letter !== null && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        const input = inputRef.current
+        const start = input?.selectionStart ?? query.length
+        const end = input?.selectionEnd ?? query.length
+        const newQuery = query.slice(0, start) + letter + query.slice(end)
+        setQuery(newQuery.toUpperCase())
+        setCursor(start + 1)
+        input?.focus()
+        e.preventDefault()
       }
     }
 

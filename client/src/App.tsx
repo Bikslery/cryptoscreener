@@ -9,6 +9,7 @@ import { ExchangeModalGate } from './components/exchange/ExchangeModal'
 import { TickerSearchModalGate } from './components/search/TickerSearchModal'
 import { useCoinListStore, useAuthStore, useUIStore } from './store'
 import { wsConnect, wsDisconnect, ensureHealthyConnection } from './services/ws'
+import { getEnglishLetterFromKeyCode } from './utils/keyboard'
 import type { Timeframe } from './types'
 
 const TIMEFRAME_HOTKEYS: Record<string, Timeframe> = {
@@ -70,7 +71,8 @@ function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       const hotkeyTimeframe = TIMEFRAME_HOTKEYS[e.key]
       const isSpace = e.code === 'Space'
-      const isLetter = e.key.length === 1 && /[A-Za-z]/.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey
+      const letter = getEnglishLetterFromKeyCode(e.code)
+      const isLetter = letter !== null && !e.ctrlKey && !e.altKey && !e.metaKey
       if ((!hotkeyTimeframe && !isSpace && !isLetter) || e.isComposing) return
 
       // Не перехватываем горячие клавиши, когда в фокусе поле ввода или интерактивный элемент —
@@ -92,7 +94,7 @@ function App() {
 
       if (isLetter) {
         e.preventDefault()
-        useUIStore.getState().setShowTickerSearch(true, e.key.toUpperCase())
+        useUIStore.getState().setShowTickerSearch(true, letter)
         return
       }
 
