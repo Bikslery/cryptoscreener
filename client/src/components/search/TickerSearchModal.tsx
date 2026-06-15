@@ -94,7 +94,7 @@ export default function TickerSearchModal() {
             ref={inputRef}
             type="text"
             value={query}
-            onChange={(e) => { setQuery(e.target.value); setSelectedIndex(0) }}
+            onChange={(e) => { setQuery(e.target.value.toUpperCase()); setSelectedIndex(0) }}
             placeholder="BTC, ETH, SOL..."
             className="ticker-search-input"
             spellCheck={false}
