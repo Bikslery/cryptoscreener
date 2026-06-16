@@ -320,6 +320,27 @@
   box-shadow: var(--glow-border);
 }
 
+.profile-hotkey-input {
+  width: 140px;
+  padding: 0.4rem 0.5rem;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.85rem;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  outline: none;
+  cursor: pointer;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.profile-hotkey-input.recording,
+.profile-hotkey-input:focus {
+  border-color: rgba(255, 255, 255, 0.25);
+  box-shadow: var(--glow-border);
+}
+
 .profile-reset-timer {
   text-align: center;
   color: var(--text-muted);

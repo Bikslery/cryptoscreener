@@ -8,8 +8,11 @@ import { ProfileModalGate } from './components/auth/ProfileModal'
 import { ExchangeModalGate } from './components/exchange/ExchangeModal'
 import { TickerSearchModalGate } from './components/search/TickerSearchModal'
 import { useCoinListStore, useAuthStore, useUIStore } from './store'
+import { useDrawingHotkeysStore } from './store/drawingHotkeys'
 import { wsConnect, wsDisconnect, ensureHealthyConnection } from './services/ws'
 import { getEnglishLetterFromKeyCode } from './utils/keyboard'
+import { useDrawingHotkeys } from './hooks/useDrawingHotkeys'
+import { ToastContainer } from './components/ui/Toast'
 import type { Timeframe } from './types'
 
 const TIMEFRAME_HOTKEYS: Record<string, Timeframe> = {
@@ -27,10 +30,19 @@ function App() {
   const checkSession = useAuthStore(s => s.checkSession)
   const isChecking = useAuthStore(s => s.isChecking)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
+  const settings = useAuthStore(s => s.settings)
+  const initHotkeys = useDrawingHotkeysStore(s => s.initFromSettings)
+
+  useDrawingHotkeys()
 
   useEffect(() => {
     checkSession()
   }, [checkSession])
+
+  useEffect(() => {
+    if (isChecking) return
+    initHotkeys(settings ?? undefined)
+  }, [isChecking, settings, initHotkeys])
 
   useEffect(() => {
     if (isChecking || !isLoggedIn) return
@@ -93,6 +105,7 @@ function App() {
       const s = useCoinListStore.getState()
 
       if (isLetter) {
+        if (e.defaultPrevented) return
         e.preventDefault()
         useUIStore.getState().setShowTickerSearch(true, letter)
         return
@@ -145,6 +158,7 @@ function App() {
       <ProfileModalGate />
       <ExchangeModalGate />
       <TickerSearchModalGate />
+      <ToastContainer />
     </div>
   )
 }

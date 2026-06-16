@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useAuthStore, useUIStore } from '../../store'
+import { useDrawingHotkeysStore, eventToCombo, formatCombo, DRAWING_TOOL_LABELS, DEFAULT_DRAWING_HOTKEYS } from '../../store/drawingHotkeys'
+import type { DrawingTool } from '../../types'
 import api from '../../services/api'
-import { X, User, LogOut, Shield, KeyRound } from 'lucide-react'
+import { X, User, LogOut, Shield, KeyRound, Keyboard } from 'lucide-react'
 import './ProfileModal.css'
 
 type ResetStep = 'idle' | 'code' | 'password' | 'done'
@@ -21,6 +23,12 @@ export default function ProfileModal() {
   const [resetLoading, setResetLoading] = useState(false)
   const [codeTimer, setCodeTimer] = useState(0)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const bindings = useDrawingHotkeysStore(s => s.bindings)
+  const setBinding = useDrawingHotkeysStore(s => s.setBinding)
+  const resetDefaults = useDrawingHotkeysStore(s => s.resetDefaults)
+  const [recording, setRecording] = useState<DrawingTool | null>(null)
+  const [hotkeyError, setHotkeyError] = useState('')
 
   const stopTimer = () => {
     if (timerRef.current) {
@@ -126,6 +134,38 @@ export default function ProfileModal() {
     setNewPassword2('')
     setResetError('')
     setCodeTimer(0)
+  }
+
+  const handleHotkeyDown = (tool: DrawingTool, e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.preventDefault()
+    setHotkeyError('')
+    if (e.key === 'Escape') {
+      setBinding(tool, '').catch(() => setHotkeyError('Не удалось сохранить'))
+      setRecording(null)
+      return
+    }
+    const combo = eventToCombo(e.nativeEvent)
+    if (!combo) return
+
+    const otherTool = (Object.keys(bindings) as DrawingTool[]).find(
+      t => t !== tool && bindings[t] === combo,
+    )
+    if (otherTool) {
+      setHotkeyError(`Комбинация уже используется для ${DRAWING_TOOL_LABELS[otherTool]}`)
+      return
+    }
+
+    setBinding(tool, combo).catch(() => setHotkeyError('Не удалось сохранить'))
+    setRecording(null)
+  }
+
+  const handleResetHotkeys = async () => {
+    setHotkeyError('')
+    try {
+      await resetDefaults()
+    } catch {
+      setHotkeyError('Не удалось сбросить')
+    }
   }
 
   const formatTimer = (s: number) => {
@@ -304,6 +344,39 @@ export default function ProfileModal() {
           <button className="profile-logout-btn" onClick={handleLogout}>
             <LogOut size={15} />
             выйти
+          </button>
+        </div>
+
+        {/* Hotkeys section */}
+        <div className="profile-section">
+          <div className="section-header">
+            <div className="section-icon">
+              <Keyboard size={14} />
+            </div>
+            <h2>Горячие клавиши рисования</h2>
+          </div>
+
+          {hotkeyError && <div className="profile-reset-error">{hotkeyError}</div>}
+
+          {(Object.keys(DEFAULT_DRAWING_HOTKEYS) as DrawingTool[]).map((tool) => (
+            <div key={tool} className="profile-field">
+              <label>{DRAWING_TOOL_LABELS[tool]}</label>
+              <input
+                type="text"
+                readOnly
+                value={bindings[tool] ? formatCombo(bindings[tool]) : ''}
+                placeholder={recording === tool ? 'Нажмите клавиши...' : 'Нет'}
+                className={`profile-hotkey-input ${recording === tool ? 'recording' : ''}`}
+                onFocus={() => setRecording(tool)}
+                onBlur={() => setRecording(null)}
+                onKeyDown={(e) => handleHotkeyDown(tool, e)}
+              />
+            </div>
+          ))}
+
+          <button className="profile-action-btn" onClick={handleResetHotkeys}>
+            <Keyboard size={15} />
+            сбросить по умолчанию
           </button>
         </div>
       </div>

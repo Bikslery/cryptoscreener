@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { useSyncExternalStore } from 'react'
-import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, Alert as AlertType } from '../types.js'
+import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, Alert as AlertType, UserSettings } from '../types.js'
 import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
 import api from '../services/api.js'
 import { VOLUME_HIGH_THRESHOLD, VOLUME_FILTER_DEFAULT } from '../constants/volume.js'
@@ -413,17 +413,20 @@ interface AuthStore {
   telegramVerified: boolean
   isLoggedIn: boolean
   isChecking: boolean
+  settings: UserSettings | null
   checkSession: () => Promise<void>
-  setUser: (user: { id: string; username: string; telegramVerified: boolean }) => void
+  setUser: (user: { id: string; username: string; telegramVerified: boolean; settings?: UserSettings }) => void
+  updateSettings: (settings: UserSettings) => Promise<void>
   logout: () => Promise<void>
 }
 
-export const useAuthStore = create<AuthStore>((set) => ({
+export const useAuthStore = create<AuthStore>((set, get) => ({
   userId: null,
   username: null,
   telegramVerified: false,
   isLoggedIn: false,
   isChecking: true,
+  settings: null,
 
   checkSession: async () => {
     try {
@@ -435,9 +438,10 @@ export const useAuthStore = create<AuthStore>((set) => ({
         telegramVerified: user.telegramVerified,
         isLoggedIn: true,
         isChecking: false,
+        settings: user.settings ?? null,
       })
     } catch {
-      set({ userId: null, username: null, telegramVerified: false, isLoggedIn: false, isChecking: false })
+      set({ userId: null, username: null, telegramVerified: false, isLoggedIn: false, isChecking: false, settings: null })
     }
   },
 
@@ -446,11 +450,20 @@ export const useAuthStore = create<AuthStore>((set) => ({
     username: user.username,
     telegramVerified: user.telegramVerified,
     isLoggedIn: true,
+    settings: user.settings ?? null,
   }),
+
+  updateSettings: async (settings) => {
+    const { isLoggedIn, settings: current } = get()
+    if (!isLoggedIn) return
+    const merged = { ...current, ...settings } as UserSettings
+    await api.put('/auth/settings', { settings: merged })
+    set({ settings: merged })
+  },
 
   logout: async () => {
     try { await api.post('/auth/logout') } catch { /* ignore */ }
-    set({ userId: null, username: null, telegramVerified: false, isLoggedIn: false })
+    set({ userId: null, username: null, telegramVerified: false, isLoggedIn: false, settings: null })
   },
 }))
 

@@ -5,7 +5,7 @@ import { useCoinListStore, useLivePrice, setLivePrice } from '../../store'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
-import type { Timeframe, UnifiedCandle, Exchange } from '../../types'
+import type { Timeframe, UnifiedCandle, Exchange, DrawingTool } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
@@ -14,7 +14,7 @@ import { expandCompactCandles, type CompactCandle } from '../../services/candle-
 import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
 import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload, type GapBackfill } from '../../services/candle-lifecycle'
 import { isFiniteOHLCV, validateCandle, normalizeCandle } from '../../services/candle-utils'
-import { useDrawings, type DrawingTool } from './useDrawings'
+import { useDrawings } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
 
 
@@ -807,6 +807,7 @@ const MiniChart = memo(function MiniChart({
   const exchange: Exchange | undefined = chartExchange
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const lastUpdateRef = useRef<number>(Date.now())
+  const [chartVersion, setChartVersion] = useState(0)
 
   const lifecycleRef = useRef<CandleLifecycle | null>(null)
 
@@ -862,6 +863,7 @@ const MiniChart = memo(function MiniChart({
     candleRef.current = candleSeries
     volumeRef.current = volumeSeries
 
+    setChartVersion(v => v + 1)
 
     let prevW = containerRef.current.clientWidth
     let prevH = containerRef.current.clientHeight
@@ -914,6 +916,83 @@ const MiniChart = memo(function MiniChart({
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, lifecycleRef)
 
+  const {
+    activeTool,
+    setActiveTool,
+    clearAllDrawings,
+    hasDrawings,
+    handleClick: drawingClickHandler,
+    handleMouseMove: drawingMouseMoveHandler,
+    deactivateTool,
+    pendingPoint,
+    CLICK_THRESHOLD,
+  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    let mouseDownX = 0
+    let mouseDownY = 0
+    let restoreOpts: { handleScroll?: boolean; handleScale?: boolean } | null = null
+
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0 || activeTool === null) return
+      const chart = chartRef.current
+      if (!chart) return
+      mouseDownX = e.clientX - container.getBoundingClientRect().left
+      mouseDownY = e.clientY - container.getBoundingClientRect().top
+      restoreOpts = { handleScroll: true, handleScale: true }
+      chart.applyOptions({ handleScroll: false, handleScale: false })
+    }
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (activeTool === null) return
+      drawingMouseMoveHandler(e)
+    }
+
+    const restoreDrawingScroll = () => {
+      const chart = chartRef.current
+      if (chart && restoreOpts) {
+        chart.applyOptions(restoreOpts)
+        restoreOpts = null
+      }
+    }
+
+    const onMouseUp = (e: MouseEvent) => {
+      if (e.button !== 0 || activeTool === null) return
+      restoreDrawingScroll()
+      const rect = container.getBoundingClientRect()
+      const upX = e.clientX - rect.left
+      const upY = e.clientY - rect.top
+      const dx = Math.abs(upX - mouseDownX)
+      const dy = Math.abs(upY - mouseDownY)
+      if (dx < CLICK_THRESHOLD && dy < CLICK_THRESHOLD) {
+        drawingClickHandler(e)
+      }
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        restoreDrawingScroll()
+        deactivateTool()
+      }
+    }
+
+    container.addEventListener('mousedown', onMouseDown, true)
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    window.addEventListener('keydown', onKeyDown)
+
+    return () => {
+      container.removeEventListener('mousedown', onMouseDown, true)
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      window.removeEventListener('keydown', onKeyDown)
+      restoreDrawingScroll()
+    }
+  }, [activeTool, drawingClickHandler, drawingMouseMoveHandler, deactivateTool, CLICK_THRESHOLD])
+
   return (
   <div className="relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px]">
     <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
@@ -938,6 +1017,13 @@ const MiniChart = memo(function MiniChart({
     )}
     {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
     {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
+    <DrawingToolsPanel
+      activeTool={activeTool}
+      setActiveTool={setActiveTool}
+      clearAllDrawings={clearAllDrawings}
+      hasDrawings={hasDrawings}
+      pendingPoint={pendingPoint}
+    />
   </div>
 )
 })

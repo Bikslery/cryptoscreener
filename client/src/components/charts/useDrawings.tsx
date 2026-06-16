@@ -1,11 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
-import type { Drawing, HRayDrawing, TRayDrawing, SegmentDrawing, UnifiedCandle } from '../../types'
+import type { Drawing, DrawingTool, HRayDrawing, TRayDrawing, SegmentDrawing, UnifiedCandle } from '../../types'
 import api from '../../services/api'
 import { useAuthStore, useCoinListStore } from '../../store'
+import { useDrawingHotkeysStore } from '../../store/drawingHotkeys'
 import { DrawingsPrimitive, timeToPixel } from './drawings/primitive'
-
-export type DrawingTool = 'h-ray' | 't-ray' | 'segment'
 
 interface PendingPoint {
   price: number
@@ -107,7 +106,8 @@ export function useDrawings(
   isInitialLoading: boolean,
 ) {
   const [drawings, setDrawings] = useState<Drawing[]>([])
-  const [activeTool, setActiveTool] = useState<DrawingTool | null>(null)
+  const activeTool = useDrawingHotkeysStore(s => s.activeTool)
+  const setActiveTool = useDrawingHotkeysStore(s => s.activateTool)
   const [pendingPoint, setPendingPoint] = useState<PendingPoint | null>(null)
   const [previewLine, setPreviewLine] = useState<PreviewLine | null>(null)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
@@ -118,6 +118,8 @@ export function useDrawings(
 
   const activeToolRef = useRef<DrawingTool | null>(activeTool)
   activeToolRef.current = activeTool
+
+  const deactivateGlobal = useDrawingHotkeysStore(s => s.deactivate)
 
   const pendingPointRef = useRef(pendingPoint)
   pendingPointRef.current = pendingPoint
@@ -266,9 +268,9 @@ export function useDrawings(
   }, [])
 
   const deactivateTool = useCallback(() => {
-    setActiveTool(null)
+    deactivateGlobal()
     clearPending()
-  }, [clearPending])
+  }, [clearPending, deactivateGlobal])
 
   const placeDrawing = useCallback((price: number, time: number, logical?: number) => {
     const tool = activeToolRef.current
@@ -329,9 +331,9 @@ export function useDrawings(
   }, [saveDrawing, clearPending])
 
   useEffect(() => {
-    setActiveTool(null)
+    deactivateGlobal()
     clearPending()
-  }, [symbol, clearPending])
+  }, [symbol, clearPending, deactivateGlobal])
 
   // Click handler for placing drawings
   const handleClick = useCallback((e: MouseEvent) => {

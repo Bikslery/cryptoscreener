@@ -1,6 +1,7 @@
 import { memo } from 'react'
 import { Minus, TrendingUp, Slash, Trash2 } from 'lucide-react'
-import type { DrawingTool } from './useDrawings'
+import type { DrawingTool } from '../../types'
+import { useDrawingHotkeysStore, formatCombo } from '../../store/drawingHotkeys'
 
 interface DrawingToolsPanelProps {
   activeTool: DrawingTool | null
@@ -23,11 +24,14 @@ const DrawingToolsPanel = memo(function DrawingToolsPanel({
   hasDrawings,
   pendingPoint,
 }: DrawingToolsPanelProps) {
+  const bindings = useDrawingHotkeysStore(s => s.bindings)
   return (
     <div className="absolute left-2 top-1/2 -translate-y-1/2 z-40 flex flex-col gap-[6px] pointer-events-auto">
       <div className="bg-[#222] border border-[#383838] rounded-[6px] p-[5px] flex flex-col gap-[3px]">
         {TOOLS.map(({ id, icon: Icon, label }) => {
           const isActive = activeTool === id
+          const combo = bindings[id]
+          const title = combo ? `${label} (${formatCombo(combo)})` : label
           return (
             <button
               key={id}
@@ -35,7 +39,7 @@ const DrawingToolsPanel = memo(function DrawingToolsPanel({
                 isActive ? 'clinic-btn-active' : 'clinic-btn-ghost'
               }`}
               onClick={() => setActiveTool(id)}
-              title={label}
+              title={title}
             >
               <Icon size={14} color={isActive ? '#ddd' : '#555'} strokeWidth={isActive ? 2 : 1.5} />
             </button>

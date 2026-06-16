@@ -69,6 +69,8 @@ export interface Alert {
 
 export type DrawingType = 'level' | 'measure' | 'h-ray' | 't-ray' | 'segment'
 
+export type DrawingTool = 'h-ray' | 't-ray' | 'segment'
+
 export interface LevelDrawing {
   price: number
   color: string
@@ -122,14 +124,15 @@ export interface Watchlist {
 }
 
 export interface UserSettings {
-  theme: 'dark' | 'light'
-  layout: {
+  theme?: 'dark' | 'light'
+  layout?: {
     coinListWidth: number
     alertsWidth: number
     mapHeight: number
   }
-  defaultTimeframe: string
-  chartBlocks: string[]
+  defaultTimeframe?: string
+  chartBlocks?: string[]
+  drawingHotkeys?: Record<DrawingTool, string>
 }
 
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'

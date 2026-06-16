@@ -100,6 +100,28 @@ router.get('/me', authMiddleware, async (req, res) => {
   }
 })
 
+router.put('/settings', authMiddleware, async (req, res) => {
+  const { userId } = (req as any).user
+  const { settings } = req.body
+  if (settings === undefined || settings === null) {
+    res.status(400).json({ error: 'Settings body required' })
+    return
+  }
+  let settingsString: string
+  try {
+    settingsString = JSON.stringify(settings)
+  } catch {
+    res.status(400).json({ error: 'Invalid settings JSON' })
+    return
+  }
+  const user = await prisma.user.update({
+    where: { id: userId },
+    data: { settings: settingsString },
+    select: { id: true, username: true, telegramChatId: true, telegramVerified: true, settings: true },
+  })
+  res.json({ ...user, settings: settings })
+})
+
 router.get('/telegram-status', authMiddleware, async (req, res) => {
   const { userId } = (req as any).user
   const user = await prisma.user.findUnique({
