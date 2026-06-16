@@ -84,7 +84,9 @@ function App() {
       const hotkeyTimeframe = TIMEFRAME_HOTKEYS[e.key]
       const isSpace = e.code === 'Space'
       const letter = getEnglishLetterFromKeyCode(e.code)
-      const isLetter = letter !== null && !e.ctrlKey && !e.altKey && !e.metaKey
+      // Shift+<letter> зарезервировано под горячие клавиши рисования (shift+d/s/a),
+      // поэтому при зажатом Shift не открываем поиск тикера.
+      const isLetter = letter !== null && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey
       if ((!hotkeyTimeframe && !isSpace && !isLetter) || e.isComposing) return
 
       // Не перехватываем горячие клавиши, когда в фокусе поле ввода или интерактивный элемент —
