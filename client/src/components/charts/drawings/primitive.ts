@@ -148,6 +148,35 @@ export function timeToPixel(
   return chart.timeScale().logicalToCoordinate(barIndex as Logical)
 }
 
+// Resolve the exact X pixel for a drawing point using its float `logical`
+// coordinate when available. LWC's `timeToCoordinate` always snaps to the
+// left edge of the bar, so a click in the middle of a bar (logical=5.3)
+// would render at the bar's left edge (logical=5) — a visible "teleport"
+// of up to one barSpacing. By using the stored float logical we recover
+// the exact sub-bar pixel position.
+//
+// If `logical` is stale (e.g. after a timeframe switch where bar indices
+// no longer correspond), it will disagree with `barX` by more than one
+// barSpacing. In that case we fall back to `timeToPixel` which re-resolves
+// via binary search in the current candle data.
+export function resolveExactX(
+  chart: IChartApi,
+  candleData: ReadonlyArray<UnifiedCandle> | null | undefined,
+  time: Time,
+  logical?: number,
+): number | null {
+  const barX = timeToPixel(chart, candleData, time)
+  if (logical != null && Number.isFinite(logical)) {
+    const exactX = chart.timeScale().logicalToCoordinate(logical as Logical)
+    if (exactX !== null) {
+      if (barX === null) return exactX
+      const barSpacing = (chart.timeScale().options() as Record<string, unknown>).barSpacing as number || 6
+      if (Math.abs(exactX - barX) <= barSpacing) return exactX
+    }
+  }
+  return barX
+}
+
 class DrawingsRenderer implements IPrimitivePaneRenderer {
   private _items: DrawItem[] = []
   private _cw = 0
@@ -382,7 +411,7 @@ export class DrawingsPrimitive implements IPanePrimitive {
       if (d.type === 'h-ray') {
         const data = d.data as HRayDrawing
         const py = series.priceToCoordinate(data.price)
-        const px = timeToPixel(chart, candleData, data.time as Time)
+        const px = resolveExactX(chart, candleData, data.time as Time, data.logical)
         if (py === null || px === null) continue
         items.push({ type: 'h-ray', id: d.id, x: px, y: py, price: data.price })
       }
@@ -390,9 +419,9 @@ export class DrawingsPrimitive implements IPanePrimitive {
       if (d.type === 't-ray') {
         const data = d.data as TRayDrawing
         const y1 = series.priceToCoordinate(data.fromPrice)
-        const x1 = timeToPixel(chart, candleData, data.fromTime as Time)
+        const x1 = resolveExactX(chart, candleData, data.fromTime as Time, data.fromLogical)
         const y2 = series.priceToCoordinate(data.toPrice)
-        const x2 = timeToPixel(chart, candleData, data.toTime as Time)
+        const x2 = resolveExactX(chart, candleData, data.toTime as Time, data.toLogical)
         if (y1 === null || x1 === null || y2 === null || x2 === null) continue
 
         const dx = x2 - x1
@@ -424,9 +453,9 @@ export class DrawingsPrimitive implements IPanePrimitive {
       if (d.type === 'segment') {
         const data = d.data as SegmentDrawing
         const y1 = series.priceToCoordinate(data.fromPrice)
-        const x1 = timeToPixel(chart, candleData, data.fromTime as Time)
+        const x1 = resolveExactX(chart, candleData, data.fromTime as Time, data.fromLogical)
         const y2 = series.priceToCoordinate(data.toPrice)
-        const x2 = timeToPixel(chart, candleData, data.toTime as Time)
+        const x2 = resolveExactX(chart, candleData, data.toTime as Time, data.toLogical)
         if (y1 === null || x1 === null || y2 === null || x2 === null) continue
         items.push({ type: 'segment', id: d.id, x1, y1, x2, y2 })
       }

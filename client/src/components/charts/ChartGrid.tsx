@@ -919,6 +919,7 @@ const MiniChart = memo(function MiniChart({
   const {
     activeTool,
     setActiveTool,
+    removeDrawing,
     clearAllDrawings,
     hasDrawings,
     handleClick: drawingClickHandler,
@@ -927,6 +928,7 @@ const MiniChart = memo(function MiniChart({
     pendingPoint,
     pendingPointPixel,
     previewLine,
+    primitiveRef,
     CLICK_THRESHOLD,
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
 
@@ -994,6 +996,25 @@ const MiniChart = memo(function MiniChart({
       restoreDrawingScroll()
     }
   }, [activeTool, drawingClickHandler, drawingMouseMoveHandler, deactivateTool, CLICK_THRESHOLD])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const onCtx = (e: MouseEvent) => {
+      e.preventDefault()
+      const primitive = primitiveRef.current
+      if (!primitive) return
+      const rect = container.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
+      const hit = primitive.hitTest?.(x, y)
+      if (hit) {
+        removeDrawing(hit.externalId)
+      }
+    }
+    container.addEventListener('contextmenu', onCtx)
+    return () => container.removeEventListener('contextmenu', onCtx)
+  }, [primitiveRef, removeDrawing])
 
   return (
   <div className="relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px]">

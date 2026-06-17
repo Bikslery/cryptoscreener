@@ -4,7 +4,7 @@ import type { Drawing, DrawingTool, HRayDrawing, TRayDrawing, SegmentDrawing, Un
 import api from '../../services/api'
 import { useAuthStore, useCoinListStore } from '../../store'
 import { useDrawingHotkeysStore } from '../../store/drawingHotkeys'
-import { DrawingsPrimitive, timeToPixel } from './drawings/primitive'
+import { DrawingsPrimitive, resolveExactX } from './drawings/primitive'
 
 interface PendingPoint {
   price: number
@@ -392,7 +392,7 @@ export function useDrawings(
     const container = containerRef.current
     if (!chart || !series || !container) return
 
-    const px1 = timeToPixel(chart, candlesDataRef.current, pp.time as Time)
+    const px1 = resolveExactX(chart, candlesDataRef.current, pp.time as Time, pp.logical)
     const py1 = series.priceToCoordinate(pp.price)
     if (px1 === null || py1 === null) return
 
@@ -416,7 +416,7 @@ export function useDrawings(
     const series = candleRef.current
     if (!chart || !series) return
 
-    const px = timeToPixel(chart, candlesDataRef.current, pp.time as Time)
+    const px = resolveExactX(chart, candlesDataRef.current, pp.time as Time, pp.logical)
     const py = series.priceToCoordinate(pp.price)
     if (px !== null && py !== null) {
       pendingPointPixel.current = { x: px, y: py }
