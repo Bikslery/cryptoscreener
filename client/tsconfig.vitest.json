@@ -17,5 +17,5 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/__tests__", "src/**/*.test.ts", "src/**/*.test.tsx"]
+  "include": ["src/env.d.ts", "src/**/__tests__", "src/**/*.test.ts", "src/**/*.test.tsx"]
 }
