@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { DrawingTool } from '../types.js'
 import { useAuthStore } from './index.js'
+import { getEnglishLetterFromKeyCode } from '../utils/keyboard.js'
 
 export const DEFAULT_DRAWING_HOTKEYS: Record<DrawingTool, string> = {
   'h-ray': 'shift+d',
@@ -52,11 +53,23 @@ export function eventToCombo(e: KeyboardEvent): string {
   if (e.altKey) parts.push('alt')
   if (e.shiftKey) parts.push('shift')
   if (e.metaKey) parts.push('meta')
-  const key = e.key.toLowerCase()
-  if (key && !['control', 'alt', 'shift', 'meta'].includes(key)) {
-    parts.push(key)
+
+  // Use e.code (physical key position, layout-independent) for letters so
+  // hotkeys work on any keyboard layout. On Russian layout, pressing the
+  // physical D key gives e.key='д' but e.code='KeyD' — without this, the
+  // combo would never match the English-letter binding stored in settings.
+  const letter = getEnglishLetterFromKeyCode(e.code)
+  if (letter) {
+    parts.push(letter.toLowerCase())
+  } else {
+    // Non-letter keys (digits, F-keys, punctuation): use e.key as-is.
+    const key = e.key.toLowerCase()
+    if (key && !['control', 'alt', 'shift', 'meta'].includes(key)) {
+      parts.push(key)
+    }
   }
-  return parts.join('+')
+
+  return normalizeCombo(parts.join('+'))
 }
 
 export function isInputFocused(): boolean {

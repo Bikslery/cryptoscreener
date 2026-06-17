@@ -925,6 +925,8 @@ const MiniChart = memo(function MiniChart({
     handleMouseMove: drawingMouseMoveHandler,
     deactivateTool,
     pendingPoint,
+    pendingPointPixel,
+    previewLine,
     CLICK_THRESHOLD,
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
 
@@ -1017,6 +1019,35 @@ const MiniChart = memo(function MiniChart({
     )}
     {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
     {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
+    {(pendingPointPixel || previewLine) && (
+      <svg
+        className="pointer-events-none absolute inset-0 z-20"
+        style={{ overflow: 'visible' }}
+      >
+        {pendingPointPixel && previewLine && (
+          <line
+            x1={previewLine.x1}
+            y1={previewLine.y1}
+            x2={previewLine.x2}
+            y2={previewLine.y2}
+            stroke="#fff"
+            strokeWidth={1}
+            strokeDasharray="4 3"
+            strokeOpacity={0.5}
+          />
+        )}
+        {pendingPointPixel && (
+          <circle
+            cx={pendingPointPixel.x}
+            cy={pendingPointPixel.y}
+            r={3}
+            fill="#fff"
+            stroke="#0e0e0e"
+            strokeWidth={1}
+          />
+        )}
+      </svg>
+    )}
     <DrawingToolsPanel
       activeTool={activeTool}
       setActiveTool={setActiveTool}
