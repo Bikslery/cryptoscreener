@@ -4,7 +4,7 @@ import type { Drawing, DrawingTool, HRayDrawing, TRayDrawing, SegmentDrawing, Un
 import api from '../../services/api'
 import { useAuthStore, useCoinListStore } from '../../store'
 import { useDrawingHotkeysStore } from '../../store/drawingHotkeys'
-import { DrawingsPrimitive, resolveExactX } from './drawings/primitive'
+import { DrawingsPrimitive, resolveExactX, logicalToTime } from './drawings/primitive'
 
 interface PendingPoint {
   price: number
@@ -72,22 +72,6 @@ function sanitizeDrawings(drawings: Drawing[]): Drawing[] {
   return drawings.filter(isValidDrawingData)
 }
 
-function toUnixTime(t: unknown): number | null {
-  if (t == null) return null
-  if (typeof t === 'number') return Number.isFinite(t) ? t : null
-  if (typeof t === 'string') {
-    const parsed = Date.parse(t)
-    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null
-  }
-  if (typeof t === 'object') {
-    const o = t as { year?: unknown; month?: unknown; day?: unknown }
-    if (typeof o.year === 'number' && typeof o.month === 'number' && typeof o.day === 'number') {
-      return Math.floor(Date.UTC(o.year, o.month - 1, o.day) / 1000)
-    }
-  }
-  return null
-}
-
 function computeUpdatedDrawingData(
   drawing: Drawing,
   pointIndex: number | null,
@@ -132,10 +116,8 @@ function computeUpdatedDrawingData(
       const newFromLogical = (orig.fromLogical ?? 0) + deltaLogical
       const newToLogical = (orig.toLogical ?? 0) + deltaLogical
 
-      const fromIdx = Math.max(0, Math.min((candleData?.length ?? 1) - 1, Math.floor(newFromLogical)))
-      const toIdx = Math.max(0, Math.min((candleData?.length ?? 1) - 1, Math.floor(newToLogical)))
-      const newFromTime = candleData?.[fromIdx]?.time ?? orig.fromTime
-      const newToTime = candleData?.[toIdx]?.time ?? orig.toTime
+      const newFromTime = logicalToTime(candleData, newFromLogical) ?? orig.fromTime
+      const newToTime = logicalToTime(candleData, newToLogical) ?? orig.toTime
 
       return {
         fromPrice: newFromPrice,
@@ -410,27 +392,13 @@ export function useDrawings(
     const series = candleRef.current
     if (!chart || !series) return null
 
+    const logical = chart.timeScale().coordinateToLogical(x) as number | null
     const price = series.coordinateToPrice(y) as number | null
-    let time = chart.timeScale().coordinateToTime(x) as number | null
-    let logical: number | undefined
+    if (logical === null || price === null || !isFinite(logical) || !isFinite(price)) return null
 
-    if (time === null) {
-      const logicalFromCoord = chart.timeScale().coordinateToLogical(x) as number | null
-      if (logicalFromCoord !== null) {
-        logical = logicalFromCoord
-        const candleData = candlesDataRef.current
-        if (candleData && candleData.length > 0) {
-          const idx = Math.max(0, Math.min(candleData.length - 1, Math.floor(logicalFromCoord)))
-          time = candleData[idx]?.time ?? null
-        }
-      }
-    } else {
-      time = toUnixTime(time)
-      const logicalFromTime = chart.timeScale().coordinateToLogical(x) as number | null
-      if (logicalFromTime !== null) logical = logicalFromTime
-    }
+    const time = logicalToTime(candlesDataRef.current, logical)
+    if (time === null) return null
 
-    if (price === null || time === null || !isFinite(price) || !isFinite(time)) return null
     return { price, time, logical }
   }, [candlesDataRef])
 

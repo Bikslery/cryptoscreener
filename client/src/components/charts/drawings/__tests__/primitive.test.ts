@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { IChartApi, ISeriesApi, ITimeScaleApi, Time, UTCTimestamp } from 'lightweight-charts'
 import type { UnifiedCandle, Drawing } from '../../../../types'
-import { timeToPixel, findBarByTime, resolveExactX, DrawingsPrimitive } from '../primitive'
+import { timeToPixel, findBarByTime, resolveExactX, logicalToTime, DrawingsPrimitive } from '../primitive'
 
 const t = (n: number): UTCTimestamp => n as UTCTimestamp
 
@@ -220,31 +220,58 @@ describe('drawings/findBarByTime', () => {
   })
 })
 
+describe('drawings/logicalToTime', () => {
+  it('returns candleData time when logical is within data range', () => {
+    const candles = makeHourlyCandles(24)
+    expect(logicalToTime(candles, 5)).toBe(HOUR_0 + 5 * 3600)
+    expect(logicalToTime(candles, 0)).toBe(HOUR_0)
+    expect(logicalToTime(candles, 23)).toBe(HOUR_0 + 23 * 3600)
+  })
+
+  it('extrapolates time beyond last bar using secondsPerBar', () => {
+    const candles = makeHourlyCandles(24)
+    expect(logicalToTime(candles, 25)).toBe(HOUR_0 + 25 * 3600)
+    expect(logicalToTime(candles, 30)).toBe(HOUR_0 + 30 * 3600)
+  })
+
+  it('extrapolates time before first bar using secondsPerBar', () => {
+    const candles = makeHourlyCandles(24)
+    expect(logicalToTime(candles, -1)).toBe(HOUR_0 - 3600)
+    expect(logicalToTime(candles, -5)).toBe(HOUR_0 - 5 * 3600)
+  })
+
+  it('returns null for empty candle data or non-finite logical', () => {
+    expect(logicalToTime(null, 5)).toBeNull()
+    expect(logicalToTime([], 5)).toBeNull()
+    expect(logicalToTime(makeHourlyCandles(10), NaN)).toBeNull()
+    expect(logicalToTime(makeHourlyCandles(10), Infinity)).toBeNull()
+  })
+})
+
 describe('drawings/resolveExactX', () => {
-  it('returns exact pixel from float logical when within barSpacing of barX', () => {
-    // Bar at x=100, logical=5.0. Click was at logical=5.3 → x≈118 (within barSpacing=20).
+  it('always prefers logicalToCoordinate over timeToPixel when logical is present', () => {
+    // logical=5.3 → logicalToCoordinate returns 318. timeToCoordinate returns 100.
+    // Old code had a barSpacing threshold that could switch to barX; new code always uses logical.
     const chart = makeChart({
       timeToCoord: () => 100,
-      logicalToCoord: (l) => 100 + (l - 5) * 60, // 60px per bar unit
-      barSpacing: 20,
+      logicalToCoord: (l) => 100 + (l - 5) * 60,
+      barSpacing: 6,
     })
     const candles = makeHourlyCandles(10)
-    // timeToCoordinate returns 100 (bar left edge), logicalToCoordinate(5.3) returns ~118.
-    // |118 - 100| = 18 <= 20 → use exact.
     const result = resolveExactX(chart, candles, t(HOUR_0 + 5 * 3600), 5.3)
     expect(result).toBeCloseTo(118, 10)
   })
 
-  it('falls back to timeToPixel when logical is stale (diff > barSpacing)', () => {
-    // After a TF switch, logical=5.3 from the old TF might map to x=500
-    // while the bar (time) maps to x=100. |500-100|=400 >> barSpacing=6.
+  it('uses logicalToCoordinate even when diff from barX exceeds barSpacing', () => {
+    // This was the root cause of bug #2: zoom out → barSpacing shrinks →
+    // threshold flips → point jumps from exact position to bar left edge.
     const chart = makeChart({
       timeToCoord: () => 100,
       logicalToCoord: () => 500,
       barSpacing: 6,
     })
     const candles = makeHourlyCandles(10)
-    expect(resolveExactX(chart, candles, t(HOUR_0 + 5 * 3600), 5.3)).toBe(100)
+    expect(resolveExactX(chart, candles, t(HOUR_0 + 5 * 3600), 5.3)).toBe(500)
   })
 
   it('falls back to timeToPixel when logical is undefined', () => {
@@ -259,9 +286,7 @@ describe('drawings/resolveExactX', () => {
     expect(resolveExactX(chart, candles, t(HOUR_0 + 5 * 3600), NaN)).toBe(77)
   })
 
-  it('returns exactX when barX is null but logical resolves', () => {
-    // timeToCoordinate returns null (time not in visible range), but
-    // logicalToCoordinate still gives a pixel — use it.
+  it('returns logicalToCoordinate when timeToCoordinate is null', () => {
     const chart = makeChart({
       timeToCoord: () => null,
       logicalToCoord: () => 250,
@@ -271,23 +296,13 @@ describe('drawings/resolveExactX', () => {
     expect(resolveExactX(chart, candles, t(HOUR_0 + 5 * 3600), 5.3)).toBe(250)
   })
 
-  it('returns null when both barX and exactX are null', () => {
+  it('returns null when both logicalToCoordinate and timeToPixel return null', () => {
     const chart = makeChart({
       timeToCoord: () => null,
       logicalToCoord: () => null,
     })
     const candles = makeHourlyCandles(10)
     expect(resolveExactX(chart, candles, t(HOUR_0 + 5 * 3600), 5.3)).toBeNull()
-  })
-
-  it('uses exactX when logical is exactly on bar boundary (diff=0)', () => {
-    const chart = makeChart({
-      timeToCoord: () => 100,
-      logicalToCoord: () => 100,
-      barSpacing: 6,
-    })
-    const candles = makeHourlyCandles(10)
-    expect(resolveExactX(chart, candles, t(HOUR_0 + 5 * 3600), 5.0)).toBe(100)
   })
 })
 

@@ -134,22 +134,33 @@ export function timeToPixel(
   return chart.timeScale().logicalToCoordinate(barIndex as Logical)
 }
 
+export function logicalToTime(
+  candleData: ReadonlyArray<UnifiedCandle> | null | undefined,
+  logical: number,
+): number | null {
+  if (!Number.isFinite(logical)) return null
+  if (!candleData || candleData.length === 0) return null
+  const idx = Math.floor(logical)
+  if (idx >= 0 && idx < candleData.length) return candleData[idx].time
+  const first = candleData[0]
+  const last = candleData[candleData.length - 1]
+  const secondsPerBar = candleData.length > 1
+    ? (last.time - first.time) / (candleData.length - 1)
+    : 0
+  return Math.round(first.time + logical * secondsPerBar)
+}
+
 export function resolveExactX(
   chart: IChartApi,
   candleData: ReadonlyArray<UnifiedCandle> | null | undefined,
   time: Time,
   logical?: number,
 ): number | null {
-  const barX = timeToPixel(chart, candleData, time)
   if (logical != null && Number.isFinite(logical)) {
-    const exactX = chart.timeScale().logicalToCoordinate(logical as Logical)
-    if (exactX !== null) {
-      if (barX === null) return exactX
-      const barSpacing = (chart.timeScale().options() as Record<string, unknown>).barSpacing as number || 6
-      if (Math.abs(exactX - barX) <= barSpacing) return exactX
-    }
+    const x = chart.timeScale().logicalToCoordinate(logical as Logical)
+    if (x !== null) return x
   }
-  return barX
+  return timeToPixel(chart, candleData, time)
 }
 
 class HRayPriceAxisView implements ISeriesPrimitiveAxisView {

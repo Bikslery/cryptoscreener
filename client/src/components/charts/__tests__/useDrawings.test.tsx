@@ -5,6 +5,7 @@ import type { IChartApi, ISeriesApi, ITimeScaleApi, Time } from 'lightweight-cha
 import type { UnifiedCandle } from '../../../types'
 import { useDrawings } from '../useDrawings'
 import { DrawingsPrimitive } from '../drawings/primitive'
+import { useDrawingHotkeysStore } from '../../../store/drawingHotkeys'
 
 vi.mock('../../services/api', () => ({
   default: {
@@ -37,9 +38,9 @@ function makeMockRefs(): MockRefs {
     timeToCoordinate: vi.fn(() => null),
     getVisibleLogicalRange: vi.fn(() => null),
     getVisibleRange: vi.fn(() => null),
-    logicalToCoordinate: vi.fn(() => null),
+    logicalToCoordinate: vi.fn((l: number) => l * 6),
     coordinateToTime: vi.fn(() => null),
-    coordinateToLogical: vi.fn(() => null),
+    coordinateToLogical: vi.fn((x: number) => x / 6),
     options: vi.fn(() => ({ barSpacing: 6 }) as any),
     subscribeVisibleLogicalRangeChange: vi.fn(),
     unsubscribeVisibleLogicalRangeChange: vi.fn(),
@@ -56,7 +57,11 @@ function makeMockRefs(): MockRefs {
     remove: vi.fn(),
     applyOptions: vi.fn(),
   } as unknown as IChartApi
-  const container = { clientWidth: 800, clientHeight: 400 } as HTMLDivElement
+  const container = {
+    clientWidth: 800,
+    clientHeight: 400,
+    getBoundingClientRect: vi.fn(() => ({ left: 0, top: 0, width: 800, height: 400, right: 800, bottom: 400, x: 0, y: 0, toJSON: () => '' })),
+  } as unknown as HTMLDivElement
   return { chart, series, container, attachPrimitive, detachPrimitive }
 }
 
@@ -231,5 +236,52 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
     })
     expect(typeof result.current.handleMouseDown).toBe('function')
     expect(typeof result.current.handleMouseUp).toBe('function')
+  })
+})
+
+describe('useDrawings — pixelToPriceTime via handleClick', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useDrawingHotkeysStore.getState().deactivate()
+  })
+
+  it('places a drawing at the extrapolated logical when clicking outside the pane', () => {
+    // Bug #1: clicking on the price axis (x > pane width) used to produce
+    // a clamped time + extrapolated logical mismatch. Now logical is primary
+    // and time is derived — the drawing lands where the user clicked.
+    const candles: UnifiedCandle[] = Array.from({ length: 10 }, (_, i) => ({
+      symbol: 'BTCUSDT', exchange: 'binance-spot', timeframe: '5m',
+      time: 1700000000 + i * 300, open: 100, high: 100, low: 100, close: 100, volume: 0,
+    }))
+
+    useDrawingHotkeysStore.getState().activateTool('h-ray')
+    const refs = makeMockRefs()
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 0, isInitialLoading: false, refs, candlesData: candles,
+      },
+    })
+
+    // The hook's useEffect deactivates the tool on mount — re-activate after render.
+    act(() => {
+      useDrawingHotkeysStore.getState().activateTool('h-ray')
+    })
+
+    // Click at x=900 (past pane width=800, in the price axis area).
+    // coordinateToLogical(900) = 900/6 = 150 (extrapolated, past 10 bars).
+    // coordinateToPrice(y) = 100 (mock).
+    // logicalToTime(150, candles) = 1700000000 + 150*300 = 1700000000 + 45000.
+    const fakeEvent = { clientX: 900, clientY: 250 } as MouseEvent
+    act(() => {
+      result.current.handleClick(fakeEvent)
+    })
+
+    expect(result.current.drawings.length).toBe(1)
+    const d = result.current.drawings[0]
+    expect(d.type).toBe('h-ray')
+    const data = d.data as { price: number; time: number; logical?: number }
+    expect(data.price).toBe(100)
+    expect(data.logical).toBeCloseTo(150, 10)
+    expect(data.time).toBe(1700000000 + 150 * 300)
   })
 })
