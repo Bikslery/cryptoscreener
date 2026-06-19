@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { IChartApi, ITimeScaleApi, Time, UTCTimestamp } from 'lightweight-charts'
-import type { UnifiedCandle } from '../../../../types'
-import { timeToPixel, findBarByTime, resolveExactX } from '../primitive'
+import type { IChartApi, ISeriesApi, ITimeScaleApi, Time, UTCTimestamp } from 'lightweight-charts'
+import type { UnifiedCandle, Drawing } from '../../../../types'
+import { timeToPixel, findBarByTime, resolveExactX, DrawingsPrimitive } from '../primitive'
 
 const t = (n: number): UTCTimestamp => n as UTCTimestamp
 
@@ -288,5 +288,194 @@ describe('drawings/resolveExactX', () => {
     })
     const candles = makeHourlyCandles(10)
     expect(resolveExactX(chart, candles, t(HOUR_0 + 5 * 3600), 5.0)).toBe(100)
+  })
+})
+
+function makeSeries(priceToCoord: (p: number) => number | null = () => 200): ISeriesApi<'Candlestick'> {
+  return {
+    priceToCoordinate: vi.fn(priceToCoord),
+    coordinateToPrice: vi.fn(() => 100),
+  } as unknown as ISeriesApi<'Candlestick'>
+}
+
+function makeFullChart(opts: {
+  timeToCoord?: (t: unknown) => number | null
+  logicalToCoord?: (l: number) => number | null
+  barSpacing?: number
+}): IChartApi {
+  const ts = {
+    timeToCoordinate: vi.fn((time: Time) => (opts.timeToCoord ? opts.timeToCoord(time) : null)),
+    logicalToCoordinate: vi.fn((l: number) => (opts.logicalToCoord ? opts.logicalToCoord(l) : null)),
+    options: vi.fn(() => ({ barSpacing: opts.barSpacing ?? 6 })),
+  }
+  return { timeScale: () => ts as unknown as ITimeScaleApi<Time> } as unknown as IChartApi
+}
+
+describe('DrawingsPrimitive — priceAxisViews', () => {
+  it('returns one axis view per visible h-ray drawing', () => {
+    const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })
+    const series = makeSeries()
+    const primitive = new DrawingsPrimitive()
+
+    const drawings: Drawing[] = [
+      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 42000, time: HOUR_0, logical: 0 } },
+      { id: 'd2', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 43000, time: HOUR_0, logical: 0 } },
+    ]
+
+    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
+
+    const views = primitive.priceAxisViews?.() ?? []
+    expect(views.length).toBe(2)
+    expect(views[0].text()).toBe('42000.00')
+    expect(views[1].text()).toBe('43000.00')
+  })
+
+  it('returns empty array when no h-ray drawings are visible', () => {
+    const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })
+    const series = makeSeries()
+    const primitive = new DrawingsPrimitive()
+
+    const drawings: Drawing[] = [
+      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'segment', data: { fromPrice: 100, fromTime: HOUR_0, fromLogical: 0, toPrice: 110, toTime: HOUR_0 + 3600, toLogical: 1 } },
+    ]
+
+    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
+
+    const views = primitive.priceAxisViews?.() ?? []
+    expect(views.length).toBe(0)
+  })
+
+  it('returns the y-coordinate from priceToCoordinate as the label coordinate', () => {
+    const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })
+    const series = makeSeries((p) => p === 42000 ? 150 : 250)
+    const primitive = new DrawingsPrimitive()
+
+    const drawings: Drawing[] = [
+      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 42000, time: HOUR_0, logical: 0 } },
+    ]
+
+    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
+
+    const views = primitive.priceAxisViews?.() ?? []
+    expect(views.length).toBe(1)
+    expect(views[0].coordinate()).toBe(150)
+  })
+})
+
+describe('DrawingsPrimitive — autoscaleInfo', () => {
+  it('returns price range spanning all h-ray prices', () => {
+    const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })
+    const series = makeSeries()
+    const primitive = new DrawingsPrimitive()
+
+    const drawings: Drawing[] = [
+      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 41000, time: HOUR_0, logical: 0 } },
+      { id: 'd2', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 45000, time: HOUR_0, logical: 0 } },
+    ]
+
+    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
+
+    const info = primitive.autoscaleInfo?.(0 as never, 10 as never)
+    expect(info).not.toBeNull()
+    expect(info!.priceRange!.minValue).toBe(41000)
+    expect(info!.priceRange!.maxValue).toBe(45000)
+  })
+
+  it('includes t-ray and segment prices in the range', () => {
+    const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })
+    const series = makeSeries()
+    const primitive = new DrawingsPrimitive()
+
+    const drawings: Drawing[] = [
+      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 40000, time: HOUR_0, logical: 0 } },
+      { id: 'd2', userId: '', symbol: 'BTCUSDT', type: 't-ray', data: { fromPrice: 38000, fromTime: HOUR_0, fromLogical: 0, toPrice: 46000, toTime: HOUR_0 + 3600, toLogical: 1 } },
+      { id: 'd3', userId: '', symbol: 'BTCUSDT', type: 'segment', data: { fromPrice: 39000, fromTime: HOUR_0, fromLogical: 0, toPrice: 47000, toTime: HOUR_0 + 7200, toLogical: 2 } },
+    ]
+
+    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
+
+    const info = primitive.autoscaleInfo?.(0 as never, 10 as never)
+    expect(info).not.toBeNull()
+    expect(info!.priceRange!.minValue).toBe(38000)
+    expect(info!.priceRange!.maxValue).toBe(47000)
+  })
+
+  it('returns null when no drawings exist', () => {
+    const chart = makeFullChart({})
+    const series = makeSeries()
+    const primitive = new DrawingsPrimitive()
+
+    primitive.setDrawings([], chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
+
+    const info = primitive.autoscaleInfo?.(0 as never, 10 as never)
+    expect(info).toBeNull()
+  })
+})
+
+describe('DrawingsPrimitive — hitTestDetailed', () => {
+  it('hits an h-ray endpoint with pointIndex=0', () => {
+    const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })
+    const series = makeSeries(() => 200)
+    const primitive = new DrawingsPrimitive()
+
+    const drawings: Drawing[] = [
+      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 100, time: HOUR_0, logical: 0 } },
+    ]
+
+    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
+
+    const hit = primitive.hitTestDetailed(100, 200)
+    expect(hit).not.toBeNull()
+    expect(hit!.id).toBe('d1')
+    expect(hit!.pointIndex).toBe(0)
+  })
+
+  it('hits an h-ray body with pointIndex=null', () => {
+    const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })
+    const series = makeSeries(() => 200)
+    const primitive = new DrawingsPrimitive()
+
+    const drawings: Drawing[] = [
+      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 100, time: HOUR_0, logical: 0 } },
+    ]
+
+    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
+
+    const hit = primitive.hitTestDetailed(500, 200)
+    expect(hit).not.toBeNull()
+    expect(hit!.id).toBe('d1')
+    expect(hit!.pointIndex).toBeNull()
+  })
+
+  it('hits a segment endpoint with pointIndex=1', () => {
+    const chart = makeFullChart({ timeToCoord: () => null, logicalToCoord: (l) => 100 + l * 50 })
+    const series = makeSeries((p) => p === 100 ? 200 : 250)
+    const primitive = new DrawingsPrimitive()
+
+    const drawings: Drawing[] = [
+      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'segment', data: { fromPrice: 100, fromTime: HOUR_0, fromLogical: 0, toPrice: 110, toTime: HOUR_0 + 3600, toLogical: 1 } },
+    ]
+
+    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
+
+    const hit = primitive.hitTestDetailed(150, 250)
+    expect(hit).not.toBeNull()
+    expect(hit!.id).toBe('d1')
+    expect(hit!.pointIndex).toBe(1)
+  })
+
+  it('returns null when no drawing is hit', () => {
+    const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })
+    const series = makeSeries(() => 200)
+    const primitive = new DrawingsPrimitive()
+
+    const drawings: Drawing[] = [
+      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 100, time: HOUR_0, logical: 0 } },
+    ]
+
+    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
+
+    const hit = primitive.hitTestDetailed(100, 500)
+    expect(hit).toBeNull()
   })
 })

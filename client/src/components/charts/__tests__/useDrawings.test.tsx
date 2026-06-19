@@ -10,6 +10,7 @@ vi.mock('../../services/api', () => ({
   default: {
     get: vi.fn(() => Promise.resolve({ data: [] })),
     post: vi.fn(() => Promise.resolve({ data: {} })),
+    put: vi.fn(() => Promise.resolve({ data: {} })),
     delete: vi.fn(() => Promise.resolve({ data: {} })),
   },
 }))
@@ -25,34 +26,38 @@ interface MockRefs {
   chart: IChartApi
   series: ISeriesApi<'Candlestick'>
   container: HTMLDivElement
-  pane: { attachPrimitive: ReturnType<typeof vi.fn>; detachPrimitive: ReturnType<typeof vi.fn> }
+  attachPrimitive: ReturnType<typeof vi.fn>
+  detachPrimitive: ReturnType<typeof vi.fn>
 }
 
 function makeMockRefs(): MockRefs {
-  const pane = {
-    attachPrimitive: vi.fn(),
-    detachPrimitive: vi.fn(),
-  }
+  const attachPrimitive = vi.fn()
+  const detachPrimitive = vi.fn()
   const timeScale: Partial<ITimeScaleApi<Time>> = {
     timeToCoordinate: vi.fn(() => null),
     getVisibleLogicalRange: vi.fn(() => null),
     getVisibleRange: vi.fn(() => null),
     logicalToCoordinate: vi.fn(() => null),
+    coordinateToTime: vi.fn(() => null),
+    coordinateToLogical: vi.fn(() => null),
+    options: vi.fn(() => ({ barSpacing: 6 }) as any),
     subscribeVisibleLogicalRangeChange: vi.fn(),
     unsubscribeVisibleLogicalRangeChange: vi.fn(),
   }
   const series = {
     priceToCoordinate: vi.fn(() => 200),
     coordinateToPrice: vi.fn(() => 100),
+    attachPrimitive,
+    detachPrimitive,
   } as unknown as ISeriesApi<'Candlestick'>
   const chart = {
-    panes: vi.fn(() => [pane]),
+    panes: vi.fn(() => []),
     timeScale: vi.fn(() => timeScale as ITimeScaleApi<Time>),
     remove: vi.fn(),
     applyOptions: vi.fn(),
   } as unknown as IChartApi
   const container = { clientWidth: 800, clientHeight: 400 } as HTMLDivElement
-  return { chart, series, container, pane }
+  return { chart, series, container, attachPrimitive, detachPrimitive }
 }
 
 interface HookProps {
@@ -69,13 +74,9 @@ function useDrawingsHarness(props: HookProps) {
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null) as RefObject<ISeriesApi<'Candlestick'> | null>
   const containerRef = useRef<HTMLDivElement | null>(null) as RefObject<HTMLDivElement | null>
   const candlesDataRef = useRef<UnifiedCandle[]>(props.candlesData ?? []) as RefObject<UnifiedCandle[]>
-  // Keep the ref in sync with the latest prop between renders.
   useLayoutEffect(() => {
     candlesDataRef.current = props.candlesData ?? []
   })
-  // Sync refs to latest mock between renders. useLayoutEffect runs after
-  // render but before the SUT's useEffects, so the mocked chart/series
-  // are in place by the time useDrawings' attach + sync effects fire.
   useLayoutEffect(() => {
     chartRef.current = props.refs.chart
     candleRef.current = props.refs.series
@@ -111,11 +112,11 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
         refs,
       },
     })
-    expect(refs.pane.attachPrimitive).not.toHaveBeenCalled()
+    expect(refs.attachPrimitive).not.toHaveBeenCalled()
     expect(result.current.primitiveRef.current).toBeNull()
   })
 
-  it('attaches a primitive once data has loaded', () => {
+  it('attaches a primitive to the series once data has loaded', () => {
     const { result, rerender } = renderHook((p: HookProps) => useDrawingsHarness(p), {
       initialProps: {
         symbol: 'BTCUSDT',
@@ -134,18 +135,11 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
         refs,
       })
     })
-    expect(refs.pane.attachPrimitive).toHaveBeenCalledTimes(1)
+    expect(refs.attachPrimitive).toHaveBeenCalledTimes(1)
     expect(result.current.primitiveRef.current).not.toBeNull()
   })
 
-  // Regression: when tf changes, the chart is recreated, isInitialLoading
-  // flips true→false as the new data loads, and a NEW primitive is attached
-  // to the new chart. The bug was that the sync useEffect didn't re-run on
-  // the false transition (its dep list omitted isInitialLoading), so the
-  // newly-attached primitive had its internal _drawings set to the empty
-  // initial state — drawings effectively "disappeared" on every TF change.
   it('re-syncs drawings to the new primitive after a TF change', () => {
-    // Seed localStorage with a saved drawing so the hook loads it on mount.
     const drawing = {
       id: 'local-1',
       userId: '',
@@ -155,8 +149,6 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
     }
     localStorage.setItem('drawings:BTCUSDT', JSON.stringify([drawing]))
 
-    // Spy on the prototype BEFORE any new primitive is constructed, so the
-    // spy is in place when the TF-change effect fires.
     const setDrawingsSpy = vi.spyOn(DrawingsPrimitive.prototype, 'setDrawings')
 
     const { result, rerender } = renderHook((p: HookProps) => useDrawingsHarness(p), {
@@ -168,7 +160,6 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
         refs,
       },
     })
-    // First load: data arrives, primitive attaches, drawings are synced.
     act(() => {
       rerender({
         symbol: 'BTCUSDT',
@@ -182,8 +173,6 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
     expect(firstPrimitive).not.toBeNull()
     const callsAfterFirstLoad = setDrawingsSpy.mock.calls.length
 
-    // TF change: chart re-created, isInitialLoading flips true→false.
-    // The new primitive must receive the drawings.
     const refs2 = makeMockRefs()
     act(() => {
       rerender({
@@ -194,8 +183,7 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
         refs: refs2,
       })
     })
-    // While loading the new TF, no primitive is attached to the new chart.
-    expect(refs2.pane.attachPrimitive).not.toHaveBeenCalled()
+    expect(refs2.attachPrimitive).not.toHaveBeenCalled()
 
     act(() => {
       rerender({
@@ -206,17 +194,42 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
         refs: refs2,
       })
     })
-    expect(refs2.pane.attachPrimitive).toHaveBeenCalledTimes(1)
+    expect(refs2.attachPrimitive).toHaveBeenCalledTimes(1)
     const newPrimitive = result.current.primitiveRef.current
     expect(newPrimitive).not.toBeNull()
     expect(newPrimitive).not.toBe(firstPrimitive)
 
-    // The sync effect must have re-run on the false transition and pushed
-    // the existing drawings into the NEW primitive. The prototype spy catches
-    // the call because it was wired up before the new instance was built.
     expect(setDrawingsSpy.mock.calls.length).toBeGreaterThan(callsAfterFirstLoad)
     const lastCall = setDrawingsSpy.mock.calls[setDrawingsSpy.mock.calls.length - 1]
     const drawingsArg = lastCall[0] as Array<{ id: string }>
     expect(drawingsArg.map(d => d.id)).toContain('local-1')
+  })
+
+  it('exposes isDraggingRef for scroll control', () => {
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT',
+        tf: '5m',
+        chartVersion: 0,
+        isInitialLoading: false,
+        refs,
+      },
+    })
+    expect(result.current.isDraggingRef).toBeDefined()
+    expect(result.current.isDraggingRef.current).toBe(false)
+  })
+
+  it('exposes handleMouseDown and handleMouseUp for drag', () => {
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT',
+        tf: '5m',
+        chartVersion: 0,
+        isInitialLoading: false,
+        refs,
+      },
+    })
+    expect(typeof result.current.handleMouseDown).toBe('function')
+    expect(typeof result.current.handleMouseUp).toBe('function')
   })
 })

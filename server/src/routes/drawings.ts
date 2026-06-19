@@ -24,6 +24,17 @@ router.post('/', async (req, res) => {
   res.json({ ...drawing, data: JSON.parse(drawing.data) })
 })
 
+router.put('/:id', async (req, res) => {
+  const { userId } = (req as any).user
+  const { id } = req.params
+  const { data, timeframe } = req.body
+  const drawing = await prisma.drawing.update({
+    where: { id, userId },
+    data: { data: JSON.stringify(data), timeframe: timeframe || undefined },
+  })
+  res.json({ ...drawing, data: JSON.parse(drawing.data) })
+})
+
 router.delete('/:id', async (req, res) => {
   const { userId } = (req as any).user
   const { id } = req.params

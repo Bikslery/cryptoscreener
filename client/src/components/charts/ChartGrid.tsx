@@ -923,12 +923,13 @@ const MiniChart = memo(function MiniChart({
     clearAllDrawings,
     hasDrawings,
     handleClick: drawingClickHandler,
+    handleMouseDown: drawingMouseDownHandler,
     handleMouseMove: drawingMouseMoveHandler,
+    handleMouseUp: drawingMouseUpHandler,
     deactivateTool,
     pendingPoint,
-    pendingPointPixel,
-    previewLine,
     primitiveRef,
+    isDraggingRef,
     CLICK_THRESHOLD,
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
 
@@ -940,19 +941,11 @@ const MiniChart = memo(function MiniChart({
     let mouseDownY = 0
     let restoreOpts: { handleScroll?: boolean; handleScale?: boolean } | null = null
 
-    const onMouseDown = (e: MouseEvent) => {
-      if (e.button !== 0 || activeTool === null) return
+    const disableScroll = () => {
       const chart = chartRef.current
       if (!chart) return
-      mouseDownX = e.clientX - container.getBoundingClientRect().left
-      mouseDownY = e.clientY - container.getBoundingClientRect().top
       restoreOpts = { handleScroll: true, handleScale: true }
       chart.applyOptions({ handleScroll: false, handleScale: false })
-    }
-
-    const onMouseMove = (e: MouseEvent) => {
-      if (activeTool === null) return
-      drawingMouseMoveHandler(e)
     }
 
     const restoreDrawingScroll = () => {
@@ -963,16 +956,46 @@ const MiniChart = memo(function MiniChart({
       }
     }
 
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return
+
+      if (activeTool !== null) {
+        mouseDownX = e.clientX - container.getBoundingClientRect().left
+        mouseDownY = e.clientY - container.getBoundingClientRect().top
+        disableScroll()
+      } else {
+        drawingMouseDownHandler(e)
+        if (isDraggingRef.current) {
+          disableScroll()
+        }
+      }
+    }
+
+    const onMouseMove = (e: MouseEvent) => {
+      drawingMouseMoveHandler(e)
+    }
+
     const onMouseUp = (e: MouseEvent) => {
-      if (e.button !== 0 || activeTool === null) return
-      restoreDrawingScroll()
-      const rect = container.getBoundingClientRect()
-      const upX = e.clientX - rect.left
-      const upY = e.clientY - rect.top
-      const dx = Math.abs(upX - mouseDownX)
-      const dy = Math.abs(upY - mouseDownY)
-      if (dx < CLICK_THRESHOLD && dy < CLICK_THRESHOLD) {
-        drawingClickHandler(e)
+      if (e.button !== 0) return
+
+      const wasDragging = isDraggingRef.current
+      const toolActive = activeTool !== null
+
+      if (wasDragging) {
+        drawingMouseUpHandler(e)
+        restoreDrawingScroll()
+      }
+
+      if (toolActive && !wasDragging) {
+        restoreDrawingScroll()
+        const rect = container.getBoundingClientRect()
+        const upX = e.clientX - rect.left
+        const upY = e.clientY - rect.top
+        const dx = Math.abs(upX - mouseDownX)
+        const dy = Math.abs(upY - mouseDownY)
+        if (dx < CLICK_THRESHOLD && dy < CLICK_THRESHOLD) {
+          drawingClickHandler(e)
+        }
       }
     }
 
@@ -995,7 +1018,7 @@ const MiniChart = memo(function MiniChart({
       window.removeEventListener('keydown', onKeyDown)
       restoreDrawingScroll()
     }
-  }, [activeTool, drawingClickHandler, drawingMouseMoveHandler, deactivateTool, CLICK_THRESHOLD])
+  }, [activeTool, drawingClickHandler, drawingMouseDownHandler, drawingMouseMoveHandler, drawingMouseUpHandler, deactivateTool, isDraggingRef, CLICK_THRESHOLD])
 
   useEffect(() => {
     const container = containerRef.current
@@ -1040,35 +1063,6 @@ const MiniChart = memo(function MiniChart({
     )}
     {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
     {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
-    {(pendingPointPixel || previewLine) && (
-      <svg
-        className="pointer-events-none absolute inset-0 z-20"
-        style={{ overflow: 'visible' }}
-      >
-        {pendingPointPixel && previewLine && (
-          <line
-            x1={previewLine.x1}
-            y1={previewLine.y1}
-            x2={previewLine.x2}
-            y2={previewLine.y2}
-            stroke="#fff"
-            strokeWidth={1}
-            strokeDasharray="4 3"
-            strokeOpacity={0.5}
-          />
-        )}
-        {pendingPointPixel && (
-          <circle
-            cx={pendingPointPixel.x}
-            cy={pendingPointPixel.y}
-            r={3}
-            fill="#fff"
-            stroke="#0e0e0e"
-            strokeWidth={1}
-          />
-        )}
-      </svg>
-    )}
     <DrawingToolsPanel
       activeTool={activeTool}
       setActiveTool={setActiveTool}
@@ -1300,11 +1294,12 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     hasDrawings,
     deactivateTool,
     handleClick: drawingClickHandler,
+    handleMouseDown: drawingMouseDownHandler,
     handleMouseMove: drawingMouseMoveHandler,
+    handleMouseUp: drawingMouseUpHandler,
     pendingPoint,
-    pendingPointPixel,
-    previewLine,
     primitiveRef,
+    isDraggingRef,
     CLICK_THRESHOLD,
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
 
@@ -1411,6 +1406,15 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
           restoreDrawingOpts = { handleScroll: true, handleScale: true }
           chart.applyOptions({ handleScroll: false, handleScale: false })
         }
+      } else if (e.button === 0 && !e.shiftKey) {
+        drawingMouseDownHandler(e)
+        if (isDraggingRef.current) {
+          const chart = chartRef.current
+          if (chart) {
+            restoreDrawingOpts = { handleScroll: true, handleScale: true }
+            chart.applyOptions({ handleScroll: false, handleScale: false })
+          }
+        }
       }
     }
 
@@ -1456,7 +1460,14 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
         return
       }
 
-      if (e.button === 0 && activeTool !== null) {
+      const wasDragging = isDraggingRef.current
+
+      if (wasDragging) {
+        drawingMouseUpHandler(e)
+        restoreDrawingScroll()
+      }
+
+      if (e.button === 0 && activeTool !== null && !wasDragging) {
         restoreDrawingScroll()
         const rect = container.getBoundingClientRect()
         const upX = e.clientX - rect.left
@@ -1501,7 +1512,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
       dragging = false
       if (mmRaf != null) cancelAnimationFrame(mmRaf)
     }
-  }, [symbol, tf, activeTool, drawingClickHandler, drawingMouseMoveHandler, deactivateTool])
+  }, [symbol, tf, activeTool, drawingClickHandler, drawingMouseDownHandler, drawingMouseMoveHandler, drawingMouseUpHandler, deactivateTool, isDraggingRef])
 
   const precision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
 
@@ -1541,35 +1552,6 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
         {isStale && <StaleDataOverlay visible={true} />}
         {status === 'empty' && <ChartMessageOverlay label="Нет данных для этого таймфрейма" />}
         {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных. Попробуйте другой таймфрейм." tone="error" />}
-        {(pendingPointPixel || previewLine) && (
-          <svg
-            className="pointer-events-none absolute inset-0 z-20"
-            style={{ overflow: 'visible' }}
-          >
-            {pendingPointPixel && previewLine && (
-              <line
-                x1={previewLine.x1}
-                y1={previewLine.y1}
-                x2={previewLine.x2}
-                y2={previewLine.y2}
-                stroke="#fff"
-                strokeWidth={1}
-                strokeDasharray="4 3"
-                strokeOpacity={0.5}
-              />
-            )}
-            {pendingPointPixel && (
-              <circle
-                cx={pendingPointPixel.x}
-                cy={pendingPointPixel.y}
-                r={3}
-                fill="#fff"
-                stroke="#0e0e0e"
-                strokeWidth={1}
-              />
-            )}
-          </svg>
-        )}
 
         <DrawingToolsPanel
           activeTool={activeTool}

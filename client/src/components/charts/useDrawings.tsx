@@ -12,11 +12,12 @@ interface PendingPoint {
   logical?: number
 }
 
-interface PreviewLine {
-  x1: number
-  y1: number
-  x2: number
-  y2: number
+interface DragState {
+  drawingId: string
+  pointIndex: number | null
+  startMouseX: number
+  startMouseY: number
+  originalData: HRayDrawing | TRayDrawing | SegmentDrawing
 }
 
 const LOCAL_ID_PREFIX = 'local-'
@@ -46,10 +47,6 @@ function saveToStorage(symbol: string, drawings: Drawing[]) {
   } catch {}
 }
 
-// DIAG-fd0c: validate drawing data shape before rendering. Legacy localStorage
-// entries (pre-drawings-rewrite) may have `time: null`, `time: NaN`, or
-// `logical` coords stored as the only time source. Passing those to LWC's
-// timeToCoordinate throws an uncaught error that crashes the whole ChartGrid.
 function isFiniteNum(n: unknown): n is number {
   return typeof n === 'number' && isFinite(n)
 }
@@ -75,10 +72,6 @@ function sanitizeDrawings(drawings: Drawing[]): Drawing[] {
   return drawings.filter(isValidDrawingData)
 }
 
-// DIAG-tf-anchor: normalise LWC's `Time` to UNIX-seconds. On 1d/1w/1M
-// timeframes LWC returns a BusinessDay `{year, month, day}` object instead
-// of a number. The `as number` cast does NOT convert it at runtime, so
-// we go through Date.UTC (crypto charts are UTC-anchored).
 function toUnixTime(t: unknown): number | null {
   if (t == null) return null
   if (typeof t === 'number') return Number.isFinite(t) ? t : null
@@ -95,6 +88,69 @@ function toUnixTime(t: unknown): number | null {
   return null
 }
 
+function computeUpdatedDrawingData(
+  drawing: Drawing,
+  pointIndex: number | null,
+  price: number,
+  time: number,
+  logical: number | undefined,
+  dragState: DragState,
+  chart: IChartApi,
+  series: ISeriesApi<'Candlestick'>,
+  candleData: ReadonlyArray<UnifiedCandle> | null,
+): HRayDrawing | TRayDrawing | SegmentDrawing {
+  if (drawing.type === 'h-ray') {
+    return { price, time, logical }
+  }
+
+  if (drawing.type === 't-ray' || drawing.type === 'segment') {
+    const orig = dragState.originalData as TRayDrawing | SegmentDrawing
+
+    if (pointIndex === 0) {
+      return { ...orig, fromPrice: price, fromTime: time, fromLogical: logical }
+    }
+    if (pointIndex === 1) {
+      return { ...orig, toPrice: price, toTime: time, toLogical: logical }
+    }
+
+    if (pointIndex === null) {
+      const deltaY = dragState.startMouseY - (dragState.startMouseY + (series.coordinateToPrice(dragState.startMouseY)! - price))
+      void deltaY
+
+      const startPrice = series.coordinateToPrice(dragState.startMouseY) as number | null
+      const currentPrice = price
+      if (startPrice === null) return orig
+      const deltaPrice = currentPrice - startPrice
+
+      const startLogical = chart.timeScale().coordinateToLogical(dragState.startMouseX) as number | null
+      const currentLogical = logical ?? 0
+      if (startLogical === null) return orig
+      const deltaLogical = currentLogical - startLogical
+
+      const newFromPrice = (orig.fromPrice) + deltaPrice
+      const newToPrice = (orig.toPrice) + deltaPrice
+      const newFromLogical = (orig.fromLogical ?? 0) + deltaLogical
+      const newToLogical = (orig.toLogical ?? 0) + deltaLogical
+
+      const fromIdx = Math.max(0, Math.min((candleData?.length ?? 1) - 1, Math.floor(newFromLogical)))
+      const toIdx = Math.max(0, Math.min((candleData?.length ?? 1) - 1, Math.floor(newToLogical)))
+      const newFromTime = candleData?.[fromIdx]?.time ?? orig.fromTime
+      const newToTime = candleData?.[toIdx]?.time ?? orig.toTime
+
+      return {
+        fromPrice: newFromPrice,
+        fromTime: newFromTime,
+        fromLogical: newFromLogical,
+        toPrice: newToPrice,
+        toTime: newToTime,
+        toLogical: newToLogical,
+      }
+    }
+  }
+
+  return drawing.data as HRayDrawing | TRayDrawing | SegmentDrawing
+}
+
 export function useDrawings(
   symbol: string,
   tf: string,
@@ -109,7 +165,6 @@ export function useDrawings(
   const activeTool = useDrawingHotkeysStore(s => s.activeTool)
   const setActiveTool = useDrawingHotkeysStore(s => s.activateTool)
   const [pendingPoint, setPendingPoint] = useState<PendingPoint | null>(null)
-  const [previewLine, setPreviewLine] = useState<PreviewLine | null>(null)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
 
@@ -129,7 +184,10 @@ export function useDrawings(
   const symbolRef = useRef(symbol)
   symbolRef.current = symbol
 
-  // Load drawings: localStorage first (instant), then server (if auth)
+  const dragStateRef = useRef<DragState | null>(null)
+  const isDraggingRef = useRef(false)
+  const hoveredIdRef = useRef<string | null>(null)
+
   useEffect(() => {
     const reqSymbol = symbol
     const stored = sanitizeDrawings(loadFromStorage(reqSymbol)).filter(
@@ -151,45 +209,26 @@ export function useDrawings(
       .catch(() => {})
   }, [symbol, isLoggedIn])
 
-  // Create & attach primitive to chart
   useEffect(() => {
     const chart = chartRef.current
-    if (!chart) return
-    // Gate on data readiness: attaching a primitive to a chart with no
-    // series data produces stale-pixel render paths and creates a race
-    // between setData() and the first paint(). Wait for isInitialLoading
-    // to flip false so the chart has data and a valid visible range.
+    const series = candleRef.current
+    if (!chart || !series) return
     if (isInitialLoading) return
 
     const primitive = new DrawingsPrimitive()
     primitiveRef.current = primitive
 
-    // DIAG-fd0c: wrap panes() in try-catch — chart.panes() may throw or
-    // return an empty array during chart init/destroy. Without this guard,
-    // the whole ChartGrid unmounts and the user sees "Chart error".
-    let pane: ReturnType<typeof chart.panes>[number] | undefined
     try {
-      pane = chart.panes()[0]
+      series.attachPrimitive(primitive)
     } catch (err) {
-      console.debug('[useDrawings] Failed to read chart.panes()', err)
-      pane = undefined
-    }
-    if (pane) {
-      try {
-        pane.attachPrimitive(primitive)
-      } catch (err) {
-        console.debug('[useDrawings] Failed to attach primitive', err)
-      }
+      console.debug('[useDrawings] Failed to attach primitive to series', err)
     }
 
     return () => {
-      if (pane && primitive) {
-        try {
-          pane.detachPrimitive(primitive)
-        } catch (err) {
-          // Chart may already be disposed, ignore error
-          console.debug('[useDrawings] Failed to detach primitive (chart disposed)', err)
-        }
+      try {
+        series.detachPrimitive(primitive)
+      } catch (err) {
+        console.debug('[useDrawings] Failed to detach primitive (chart disposed)', err)
       }
       primitiveRef.current = null
     }
@@ -206,7 +245,19 @@ export function useDrawings(
     }
   }, [isLoggedIn])
 
-  // Sync drawings to primitive
+  const updateDrawingState = useCallback((id: string, data: unknown) => {
+    setDrawings(prev => {
+      const next = prev.map(d => d.id === id ? { ...d, data: data as Drawing['data'] } : d)
+      saveToStorage(symbolRef.current, next)
+      return next
+    })
+  }, [])
+
+  const commitDrawingToServer = useCallback((id: string, data: unknown) => {
+    if (!isLoggedIn || isLocalId(id)) return
+    api.put(`/drawings/${id}`, { data }).catch(() => {})
+  }, [isLoggedIn])
+
   useEffect(() => {
     const primitive = primitiveRef.current
     const chart = chartRef.current
@@ -223,9 +274,10 @@ export function useDrawings(
       pricePrecision,
       candlesDataRef.current,
       removeDrawing,
+      updateDrawingState,
     )
     primitive.requestUpdate()
-  }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, isInitialLoading, candlesDataRef])
+  }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, updateDrawingState, isInitialLoading, candlesDataRef])
 
   const saveDrawing = useCallback(async (drawing: Drawing) => {
     if (!isLoggedIn) return
@@ -264,7 +316,11 @@ export function useDrawings(
 
   const clearPending = useCallback(() => {
     setPendingPoint(null)
-    setPreviewLine(null)
+    const primitive = primitiveRef.current
+    if (primitive) {
+      primitive.setPreview(null)
+      primitive.setPendingPoint(null)
+    }
   }, [])
 
   const deactivateTool = useCallback(() => {
@@ -302,6 +358,17 @@ export function useDrawings(
     if (tool === 't-ray' || tool === 'segment') {
       if (!pp) {
         setPendingPoint({ price, time, logical })
+        const primitive = primitiveRef.current
+        const series = candleRef.current
+        const chart = chartRef.current
+        const container = containerRef.current
+        if (primitive && series && chart && container) {
+          const px = resolveExactX(chart, candlesDataRef.current, time as Time, logical)
+          const py = series.priceToCoordinate(price)
+          if (px !== null && py !== null) {
+            primitive.setPendingPoint({ x: px, y: py })
+          }
+        }
         return
       }
       const data: TRayDrawing | SegmentDrawing = {
@@ -335,29 +402,19 @@ export function useDrawings(
     clearPending()
   }, [symbol, clearPending, deactivateGlobal])
 
-  // Click handler for placing drawings
-  const handleClick = useCallback((e: MouseEvent) => {
-    const tool = activeToolRef.current
-    if (!tool) return
-
+  const pixelToPriceTime = useCallback((
+    x: number,
+    y: number,
+  ): { price: number; time: number; logical?: number } | null => {
     const chart = chartRef.current
     const series = candleRef.current
-    const container = containerRef.current
-    if (!chart || !series || !container) return
-
-    const rect = container.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
+    if (!chart || !series) return null
 
     const price = series.coordinateToPrice(y) as number | null
     let time = chart.timeScale().coordinateToTime(x) as number | null
     let logical: number | undefined
 
     if (time === null) {
-      // Click landed outside the visible bar range. Use the loaded
-      // candle data to find the closest bar's time — this is the same
-      // authoritative lookup the renderer uses, so the stored time
-      // will always re-resolve to a real bar on future TF switches.
       const logicalFromCoord = chart.timeScale().coordinateToLogical(x) as number | null
       if (logicalFromCoord !== null) {
         logical = logicalFromCoord
@@ -368,48 +425,141 @@ export function useDrawings(
         }
       }
     } else {
-      // DIAG-c2a4: normalise LWC's Time (may be BusinessDay on 1d+ TFs)
-      // to UNIX-seconds so the drawing survives future TF switches.
       time = toUnixTime(time)
       const logicalFromTime = chart.timeScale().coordinateToLogical(x) as number | null
       if (logicalFromTime !== null) logical = logicalFromTime
     }
 
-    if (price === null || time === null || !isFinite(price) || !isFinite(time)) return
+    if (price === null || time === null || !isFinite(price) || !isFinite(time)) return null
+    return { price, time, logical }
+  }, [candlesDataRef])
 
-    placeDrawing(price, time, logical)
-  }, [placeDrawing, candlesDataRef])
+  const handleClick = useCallback((e: MouseEvent) => {
+    const tool = activeToolRef.current
+    if (!tool) return
 
-  // Mouse move for preview line
-  const handleMouseMove = useCallback((e: MouseEvent) => {
-    const pp = pendingPointRef.current
-    if (!pp) {
-      setPreviewLine(null)
-      return
-    }
+    const container = containerRef.current
+    if (!container) return
+
+    const rect = container.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+
+    const result = pixelToPriceTime(x, y)
+    if (!result) return
+
+    placeDrawing(result.price, result.time, result.logical)
+  }, [placeDrawing, pixelToPriceTime])
+
+  const handleMouseDown = useCallback((e: MouseEvent) => {
+    if (activeToolRef.current !== null) return
+
     const chart = chartRef.current
     const series = candleRef.current
     const container = containerRef.current
-    if (!chart || !series || !container) return
-
-    const px1 = resolveExactX(chart, candlesDataRef.current, pp.time as Time, pp.logical)
-    const py1 = series.priceToCoordinate(pp.price)
-    if (px1 === null || py1 === null) return
+    const primitive = primitiveRef.current
+    if (!chart || !series || !container || !primitive) return
 
     const rect = container.getBoundingClientRect()
-    const x2 = e.clientX - rect.left
-    const y2 = e.clientY - rect.top
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
 
-    setPreviewLine({ x1: px1, y1: py1, x2, y2 })
-  }, [candlesDataRef])
+    const hit = primitive.hitTestDetailed(x, y)
+    if (!hit) return
 
-  // Pending point pixel position
-  const pendingPointPixel = useRef<{ x: number; y: number } | null>(null)
+    const drawing = primitive.getDrawing(hit.id)
+    if (!drawing) return
+
+    dragStateRef.current = {
+      drawingId: hit.id,
+      pointIndex: hit.pointIndex,
+      startMouseX: x,
+      startMouseY: y,
+      originalData: drawing.data as HRayDrawing | TRayDrawing | SegmentDrawing,
+    }
+    isDraggingRef.current = true
+  }, [])
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    const container = containerRef.current
+    const chart = chartRef.current
+    const series = candleRef.current
+    const primitive = primitiveRef.current
+    if (!container || !chart || !series || !primitive) return
+
+    const rect = container.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+
+    if (isDraggingRef.current && dragStateRef.current) {
+      const result = pixelToPriceTime(x, y)
+      if (!result) return
+
+      const drawing = primitive.getDrawing(dragStateRef.current.drawingId)
+      if (!drawing) return
+
+      const newData = computeUpdatedDrawingData(
+        drawing,
+        dragStateRef.current.pointIndex,
+        result.price,
+        result.time,
+        result.logical,
+        dragStateRef.current,
+        chart,
+        series,
+        candlesDataRef.current,
+      )
+      primitive.updateDrawingData(dragStateRef.current.drawingId, newData)
+      return
+    }
+
+    if (activeToolRef.current !== null) {
+      const pp = pendingPointRef.current
+      if (pp) {
+        const px1 = resolveExactX(chart, candlesDataRef.current, pp.time as Time, pp.logical)
+        const py1 = series.priceToCoordinate(pp.price)
+        if (px1 === null || py1 === null) return
+        primitive.setPreview({ x1: px1, y1: py1, x2: x, y2: y })
+      }
+      return
+    }
+
+    const hit = primitive.hitTestDetailed(x, y)
+    const hoveredId = hit?.id ?? null
+    if (hoveredId !== hoveredIdRef.current) {
+      hoveredIdRef.current = hoveredId
+      primitive.setHoveredId(hoveredId)
+    }
+  }, [pixelToPriceTime, candlesDataRef])
+
+  const handleMouseUp = useCallback((e: MouseEvent) => {
+    void e
+    if (!isDraggingRef.current || !dragStateRef.current) return
+
+    const primitive = primitiveRef.current
+    if (primitive) {
+      const drawing = primitive.getDrawing(dragStateRef.current.drawingId)
+      if (drawing) {
+        const data = drawing.data as HRayDrawing | TRayDrawing | SegmentDrawing
+        updateDrawingState(dragStateRef.current.drawingId, data)
+        commitDrawingToServer(dragStateRef.current.drawingId, data)
+      }
+    }
+
+    dragStateRef.current = null
+    isDraggingRef.current = false
+    if (primitive) primitive.setHoveredId(null)
+    hoveredIdRef.current = null
+  }, [updateDrawingState, commitDrawingToServer])
 
   useEffect(() => {
+    const primitive = primitiveRef.current
+    if (!primitive) return
+
     const pp = pendingPoint
     if (!pp) {
-      pendingPointPixel.current = null
+      primitive.setPendingPoint(null)
+      primitive.setPreview(null)
       return
     }
     const chart = chartRef.current
@@ -419,16 +569,11 @@ export function useDrawings(
     const px = resolveExactX(chart, candlesDataRef.current, pp.time as Time, pp.logical)
     const py = series.priceToCoordinate(pp.price)
     if (px !== null && py !== null) {
-      pendingPointPixel.current = { x: px, y: py }
+      primitive.setPendingPoint({ x: px, y: py })
     } else {
-      pendingPointPixel.current = null
+      primitive.setPendingPoint(null)
     }
   }, [pendingPoint, drawings, symbol, tf, chartVersion, candlesDataRef])
-
-  // DIAG-tf-anchor: keep the binary-search helper reachable for callers
-  // that want to verify stored drawing times are still in-range. Exported
-  // via the hook return so tests and other modules can use it.
-  // (No-op here — the import is re-exported for test access if needed.)
 
   return {
     drawings,
@@ -439,11 +584,12 @@ export function useDrawings(
     hasDrawings: drawings.some(d => d.type === 'h-ray' || d.type === 't-ray' || d.type === 'segment'),
     deactivateTool,
     handleClick,
+    handleMouseDown,
     handleMouseMove,
+    handleMouseUp,
     pendingPoint,
-    pendingPointPixel: pendingPointPixel.current,
-    previewLine,
     primitiveRef,
+    isDraggingRef,
     CLICK_THRESHOLD: 5,
   }
 }
