@@ -347,6 +347,7 @@ function useLazyScroll(
   adjustingRef: React.RefObject<boolean>,
   setIsLoadingMore?: (loading: boolean) => void,
   lifecycleRef?: React.RefObject<CandleLifecycle | null>,
+  onLogicalShift?: (added: number) => void,
   ) {
   const inflightRef = useRef(false)
   const reachedStartRef = useRef(false)
@@ -504,6 +505,8 @@ function useLazyScroll(
             }))
             candleRef.current?.setData(candleData)
             volumeRef.current?.setData(volumeData)
+
+            onLogicalShift?.(added)
 
             lifecycleRef?.current?.applyHistory(merged)
             const flushPatch = lifecycleRef?.current?.setBuffered(false)
@@ -912,10 +915,6 @@ const MiniChart = memo(function MiniChart({
 
   const adjustingRef = useRef(false)
 
-  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, lifecycleRef)
-
   const {
     activeTool,
     setActiveTool,
@@ -930,8 +929,13 @@ const MiniChart = memo(function MiniChart({
     pendingPoint,
     primitiveRef,
     isDraggingRef,
+    shiftLogicalOffset,
     CLICK_THRESHOLD,
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
+
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, lifecycleRef, shiftLogicalOffset)
 
   useEffect(() => {
     const container = containerRef.current
@@ -1300,6 +1304,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     pendingPoint,
     primitiveRef,
     isDraggingRef,
+    shiftLogicalOffset,
     CLICK_THRESHOLD,
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
 
@@ -1308,7 +1313,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
 
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, lifecycleRef)
+  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, lifecycleRef, shiftLogicalOffset)
 
 
 

@@ -240,6 +240,32 @@ export function useDrawings(
     api.put(`/drawings/${id}`, { data }).catch(() => {})
   }, [isLoggedIn])
 
+  const shiftLogicalOffset = useCallback((added: number) => {
+    if (added === 0) return
+    setDrawings(prev => {
+      const next = prev.map(d => {
+        if (d.type === 'h-ray') {
+          const data = d.data as HRayDrawing
+          if (data.logical == null) return d
+          const newLogical = data.logical + added
+          const newTime = logicalToTime(candlesDataRef.current, newLogical) ?? data.time
+          return { ...d, data: { ...data, logical: newLogical, time: newTime } }
+        }
+        if (d.type === 't-ray' || d.type === 'segment') {
+          const data = d.data as TRayDrawing | SegmentDrawing
+          const newFromLogical = data.fromLogical != null ? data.fromLogical + added : data.fromLogical
+          const newToLogical = data.toLogical != null ? data.toLogical + added : data.toLogical
+          const newFromTime = newFromLogical != null ? (logicalToTime(candlesDataRef.current, newFromLogical) ?? data.fromTime) : data.fromTime
+          const newToTime = newToLogical != null ? (logicalToTime(candlesDataRef.current, newToLogical) ?? data.toTime) : data.toTime
+          return { ...d, data: { ...data, fromLogical: newFromLogical, toLogical: newToLogical, fromTime: newFromTime, toTime: newToTime } }
+        }
+        return d
+      })
+      saveToStorage(symbolRef.current, next)
+      return next
+    })
+  }, [candlesDataRef])
+
   useEffect(() => {
     const primitive = primitiveRef.current
     const chart = chartRef.current
@@ -558,6 +584,7 @@ export function useDrawings(
     pendingPoint,
     primitiveRef,
     isDraggingRef,
+    shiftLogicalOffset,
     CLICK_THRESHOLD: 5,
   }
 }
