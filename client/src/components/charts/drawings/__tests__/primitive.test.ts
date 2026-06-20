@@ -377,56 +377,6 @@ describe('DrawingsPrimitive — priceAxisViews', () => {
   })
 })
 
-describe('DrawingsPrimitive — autoscaleInfo', () => {
-  it('returns price range spanning all h-ray prices', () => {
-    const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })
-    const series = makeSeries()
-    const primitive = new DrawingsPrimitive()
-
-    const drawings: Drawing[] = [
-      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 41000, time: HOUR_0, logical: 0 } },
-      { id: 'd2', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 45000, time: HOUR_0, logical: 0 } },
-    ]
-
-    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
-
-    const info = primitive.autoscaleInfo?.(0 as never, 10 as never)
-    expect(info).not.toBeNull()
-    expect(info!.priceRange!.minValue).toBe(41000)
-    expect(info!.priceRange!.maxValue).toBe(45000)
-  })
-
-  it('includes t-ray and segment prices in the range', () => {
-    const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })
-    const series = makeSeries()
-    const primitive = new DrawingsPrimitive()
-
-    const drawings: Drawing[] = [
-      { id: 'd1', userId: '', symbol: 'BTCUSDT', type: 'h-ray', data: { price: 40000, time: HOUR_0, logical: 0 } },
-      { id: 'd2', userId: '', symbol: 'BTCUSDT', type: 't-ray', data: { fromPrice: 38000, fromTime: HOUR_0, fromLogical: 0, toPrice: 46000, toTime: HOUR_0 + 3600, toLogical: 1 } },
-      { id: 'd3', userId: '', symbol: 'BTCUSDT', type: 'segment', data: { fromPrice: 39000, fromTime: HOUR_0, fromLogical: 0, toPrice: 47000, toTime: HOUR_0 + 7200, toLogical: 2 } },
-    ]
-
-    primitive.setDrawings(drawings, chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
-
-    const info = primitive.autoscaleInfo?.(0 as never, 10 as never)
-    expect(info).not.toBeNull()
-    expect(info!.priceRange!.minValue).toBe(38000)
-    expect(info!.priceRange!.maxValue).toBe(47000)
-  })
-
-  it('returns null when no drawings exist', () => {
-    const chart = makeFullChart({})
-    const series = makeSeries()
-    const primitive = new DrawingsPrimitive()
-
-    primitive.setDrawings([], chart, series, 800, 400, 2, makeHourlyCandles(10), () => {})
-
-    const info = primitive.autoscaleInfo?.(0 as never, 10 as never)
-    expect(info).toBeNull()
-  })
-})
-
 describe('DrawingsPrimitive — hitTestDetailed', () => {
   it('hits an h-ray endpoint with pointIndex=0', () => {
     const chart = makeFullChart({ timeToCoord: () => 100, logicalToCoord: () => 100 })

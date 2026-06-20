@@ -8,8 +8,6 @@ import type {
   IPrimitivePaneRenderer,
   SeriesAttachedParameter,
   PrimitiveHoveredItem,
-  AutoscaleInfo,
-  PriceRange,
   DrawingUtils,
   Time,
   Logical,
@@ -425,32 +423,6 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
     return views
   }
 
-  autoscaleInfo?(startTimePoint: Logical, endTimePoint: Logical): AutoscaleInfo | null {
-    if (this._items.length === 0) return null
-    void startTimePoint
-    void endTimePoint
-
-    let minPrice = Infinity
-    let maxPrice = -Infinity
-
-    for (const d of this._drawings) {
-      if (d.type === 'h-ray') {
-        const data = d.data as HRayDrawing
-        minPrice = Math.min(minPrice, data.price)
-        maxPrice = Math.max(maxPrice, data.price)
-      }
-      if (d.type === 't-ray' || d.type === 'segment') {
-        const data = d.data as TRayDrawing
-        minPrice = Math.min(minPrice, data.fromPrice, data.toPrice)
-        maxPrice = Math.max(maxPrice, data.fromPrice, data.toPrice)
-      }
-    }
-
-    if (!isFinite(minPrice) || !isFinite(maxPrice)) return null
-
-    const priceRange: PriceRange = { minValue: minPrice, maxValue: maxPrice }
-    return { priceRange }
-  }
 
   attached?(param: SeriesAttachedParameter<Time, 'Candlestick'>) {
     this._chart = param.chart as IChartApi
