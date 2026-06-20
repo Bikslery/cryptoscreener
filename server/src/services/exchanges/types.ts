@@ -1,4 +1,5 @@
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
+import type { BinanceRateLimiter } from './rate-limiter.js'
 
 export interface FetchCandlesOptions {
   dispatcher?: any
@@ -19,6 +20,7 @@ export interface ExchangeAdapter {
   unsubscribeDepth(symbol: string): void
   fetchCandles(symbol: string, tf: string, limit: number, startTime?: number, endTime?: number, options?: FetchCandlesOptions): Promise<UnifiedCandle[]>
   fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth>
+  getRateLimiter?(): BinanceRateLimiter | null
 }
 
 export type TickerCallback = (t: UnifiedTicker) => void

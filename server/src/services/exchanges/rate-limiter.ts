@@ -1,4 +1,6 @@
 import { getRedisData, REDIS_ENABLED } from '../../redis.js'
+import { fetchWithTimeout } from '../../utils/fetch.js'
+import type { ProxyAgent } from 'undici'
 import {
   rateLimitWeightGauge,
   rateLimitWeightMaxGauge,
@@ -15,6 +17,11 @@ const BAN_COOLDOWN_MS = 120_000
 const LIMITS: Record<string, number> = {
   spot: 6000,
   futures: 2400,
+}
+
+const PING_URLS: Record<string, string> = {
+  spot: 'https://api.binance.com/api/v3/ping',
+  futures: 'https://fapi.binance.com/fapi/v1/ping',
 }
 
 const WEIGHT_HEADERS = [
@@ -131,6 +138,19 @@ export class BinanceRateLimiter {
 
   getLimit(): number {
     return this.limit
+  }
+
+  async probeWeight(dispatcher?: ProxyAgent): Promise<boolean> {
+    const url = PING_URLS[this.market]
+    if (!url) return false
+    try {
+      const res = await fetchWithTimeout(url, 5000, dispatcher)
+      this.updateFromHeaders(res.headers)
+      console.log(`[RateLimit:${this.market}] Probed weight: ${this.currentWeight}/${this.limit}`)
+      return true
+    } catch {
+      return false
+    }
   }
 }
 

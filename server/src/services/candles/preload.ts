@@ -88,16 +88,19 @@ async function phase1(
 
   for (let i = 0; i < topSymbols.length; i += P1_CONCURRENCY) {
     const batch = topSymbols.slice(i, i + P1_CONCURRENCY)
+    const adapter = adapters[0]
+    const limiter = adapter.getRateLimiter?.()
+    if (limiter?.isOverThreshold()) {
+      console.warn(`[Preload] Weight at ${limiter.getWeight()}/${limiter.getLimit()}, pausing batch for 2s`)
+      await sleep(2000)
+    }
     const promises = batch.map(async (symbol) => {
       for (const tf of PRELOAD_TFS) {
         const cfg = PRELOAD_MATRIX[tf]
         if (i + batch.indexOf(symbol) >= cfg.symbols) continue
         try {
-          // Try the first adapter (typically spot)
-          const adapter = adapters[0]
           let candles = await adapter.fetchCandles(symbol, tf, cfg.candles)
 
-          // On empty, try alternate adapter
           if (candles.length === 0) {
             const alt = getAlternateAdapter(adapter, adapters)
             if (alt) {
@@ -106,8 +109,6 @@ async function phase1(
           }
 
           if (candles.length > 0) {
-            // Key by ticker exchange (the canonical key used by reads + WS
-            // updates) so preloaded history and live candles share one entry.
             const exchange = getTicker(symbol)?.exchange || candles[0]?.exchange || adapter.exchange
             setCachedCandlesFromRest(symbol, tf, candles, exchange)
             recordPreload(tf, candles.length)
@@ -157,10 +158,15 @@ function periodicRefresh(
     console.log(`[Preload] Periodic refresh: re-fetching ${REFRESH_TFS.join('/')} for top symbols`)
     for (let i = 0; i < topSymbols.length; i += P1_CONCURRENCY) {
       const batch = topSymbols.slice(i, i + P1_CONCURRENCY)
+      const adapter = adapters[0]
+      const limiter = adapter.getRateLimiter?.()
+      if (limiter?.isOverThreshold()) {
+        console.warn(`[Preload] Weight at ${limiter.getWeight()}/${limiter.getLimit()}, pausing refresh batch for 2s`)
+        await sleep(2000)
+      }
       const promises = batch.map(async (symbol) => {
         for (const tf of REFRESH_TFS) {
           try {
-            const adapter = adapters[0]
             const limit = PRELOAD_MATRIX[tf]?.candles || 1000
             let candles = await adapter.fetchCandles(symbol, tf, limit)
             if (candles.length === 0) {

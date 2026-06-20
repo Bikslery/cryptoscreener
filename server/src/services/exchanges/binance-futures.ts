@@ -119,10 +119,13 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
   onDepth(cb: DepthCallback) { this.depthCbs.push(cb) }
+  getRateLimiter() { return this.rateLimiter }
 
   connect() {
-    this.fetchExchangeInfo().then(() => {
-      this.connectTickerWs()
+    this.rateLimiter.probeWeight(this.fetchDispatcher).then(() => {
+      this.fetchExchangeInfo().then(() => {
+        this.connectTickerWs()
+      })
     })
     console.log(`[${this.name}] Connected (WebSocket !miniTicker@arr)`)
   }

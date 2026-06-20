@@ -259,6 +259,10 @@ async function computeMetrics() {
     const BATCH_SIZE = 10
 
     for (let i = 0; i < topCoins.length; i += BATCH_SIZE) {
+      if (anyLimiterOverThreshold()) {
+        console.warn('[Metrics] Rate limit threshold reached, skipping batch')
+        break
+      }
       const batch = topCoins.slice(i, i + BATCH_SIZE)
       await Promise.all(batch.map(async (coin) => {
         try {
@@ -309,8 +313,17 @@ async function computeMetrics() {
     console.log(`[Metrics] Updated range1m/natr5m for top ${topCoins.length} coins (cache hits preferred)`)
   }
 
+  await new Promise(r => setTimeout(r, 15_000))
   await compute()
   setInterval(compute, 30000)
+}
+
+function anyLimiterOverThreshold(): boolean {
+  for (const a of adapters) {
+    const limiter = a.getRateLimiter?.()
+    if (limiter?.isOverThreshold()) return true
+  }
+  return false
 }
 
 export function updateTickerPrice(symbol: string, exchange: Exchange, price: number) {
