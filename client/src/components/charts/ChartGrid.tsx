@@ -503,10 +503,10 @@ function useLazyScroll(
               time: c.time as Time, value: c.volume,
               color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
             }))
+            onLogicalShift?.(added)
+
             candleRef.current?.setData(candleData)
             volumeRef.current?.setData(volumeData)
-
-            onLogicalShift?.(added)
 
             lifecycleRef?.current?.applyHistory(merged)
             const flushPatch = lifecycleRef?.current?.setBuffered(false)

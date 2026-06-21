@@ -392,6 +392,30 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
     this.requestUpdate()
   }
 
+  shiftLogical(added: number, candleData: ReadonlyArray<UnifiedCandle> | null) {
+    if (added === 0) return
+    this._candleData = candleData
+    this._drawings = this._drawings.map(d => {
+      if (d.type === 'h-ray') {
+        const data = d.data as HRayDrawing
+        if (data.logical == null) return d
+        const newLogical = data.logical + added
+        const newTime = logicalToTime(candleData, newLogical) ?? data.time
+        return { ...d, data: { ...data, logical: newLogical, time: newTime } }
+      }
+      if (d.type === 't-ray' || d.type === 'segment') {
+        const data = d.data as TRayDrawing | SegmentDrawing
+        const newFromLogical = data.fromLogical != null ? data.fromLogical + added : data.fromLogical
+        const newToLogical = data.toLogical != null ? data.toLogical + added : data.toLogical
+        const newFromTime = newFromLogical != null ? (logicalToTime(candleData, newFromLogical) ?? data.fromTime) : data.fromTime
+        const newToTime = newToLogical != null ? (logicalToTime(candleData, newToLogical) ?? data.toTime) : data.toTime
+        return { ...d, data: { ...data, fromLogical: newFromLogical, toLogical: newToLogical, fromTime: newFromTime, toTime: newToTime } }
+      }
+      return d
+    })
+    this.rebuildItems()
+  }
+
   commitDrawingUpdate(id: string, data: unknown) {
     if (this._onUpdateDrawing) {
       this._onUpdateDrawing(id, data)

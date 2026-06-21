@@ -242,6 +242,10 @@ export function useDrawings(
 
   const shiftLogicalOffset = useCallback((added: number) => {
     if (added === 0) return
+    const primitive = primitiveRef.current
+    if (primitive) {
+      primitive.shiftLogical(added, candlesDataRef.current)
+    }
     setDrawings(prev => {
       const next = prev.map(d => {
         if (d.type === 'h-ray') {
