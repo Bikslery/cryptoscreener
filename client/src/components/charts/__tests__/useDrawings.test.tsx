@@ -281,7 +281,10 @@ describe('useDrawings — pixelToPriceTime via handleClick', () => {
     expect(d.type).toBe('h-ray')
     const data = d.data as { price: number; time: number; logical?: number }
     expect(data.price).toBe(100)
-    expect(data.logical).toBeCloseTo(150, 10)
+    // After click: logical=150 (extrapolated), time=1700000000+150*300.
+    // Sync effect recomputes logical from time via findBarByTime:
+    // 1700000045000 > last bar (170000002700) → findBarByTime returns 9.
+    expect(data.logical).toBe(9)
     expect(data.time).toBe(1700000000 + 150 * 300)
   })
 })

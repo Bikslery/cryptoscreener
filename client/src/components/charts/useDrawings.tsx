@@ -4,7 +4,7 @@ import type { Drawing, DrawingTool, HRayDrawing, TRayDrawing, SegmentDrawing, Un
 import api from '../../services/api'
 import { useAuthStore, useCoinListStore } from '../../store'
 import { useDrawingHotkeysStore } from '../../store/drawingHotkeys'
-import { DrawingsPrimitive, resolveExactX, logicalToTime } from './drawings/primitive'
+import { DrawingsPrimitive, resolveExactX, logicalToTime, findBarByTime } from './drawings/primitive'
 
 interface PendingPoint {
   price: number
@@ -277,18 +277,55 @@ export function useDrawings(
     const container = containerRef.current
     if (!primitive || !chart || !series || !container) return
 
+    const candleData = candlesDataRef.current
+    let logicalsChanged = false
+
+    const syncedDrawings = drawings.map(d => {
+      if (d.type === 'h-ray') {
+        const data = d.data as HRayDrawing
+        const barIdx = findBarByTime(candleData, data.time)
+        if (barIdx !== null && barIdx !== data.logical) {
+          logicalsChanged = true
+          return { ...d, data: { ...data, logical: barIdx } }
+        }
+        return d
+      }
+      if (d.type === 't-ray' || d.type === 'segment') {
+        const data = d.data as TRayDrawing | SegmentDrawing
+        const fromIdx = findBarByTime(candleData, data.fromTime)
+        const toIdx = findBarByTime(candleData, data.toTime)
+        let changed = false
+        let newFromLogical = data.fromLogical
+        let newToLogical = data.toLogical
+        if (fromIdx !== null && fromIdx !== data.fromLogical) { newFromLogical = fromIdx; changed = true }
+        if (toIdx !== null && toIdx !== data.toLogical) { newToLogical = toIdx; changed = true }
+        if (changed) {
+          logicalsChanged = true
+          return { ...d, data: { ...data, fromLogical: newFromLogical, toLogical: newToLogical } }
+        }
+        return d
+      }
+      return d
+    })
+
     primitive.setDrawings(
-      drawings,
+      syncedDrawings,
       chart,
       series,
       container.clientWidth,
       container.clientHeight,
       pricePrecision,
-      candlesDataRef.current,
+      candleData,
       removeDrawing,
       updateDrawingState,
     )
     primitive.requestUpdate()
+
+    if (logicalsChanged) {
+      const toPersist = syncedDrawings
+      setDrawings(toPersist)
+      saveToStorage(symbolRef.current, toPersist)
+    }
   }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, updateDrawingState, isInitialLoading, candlesDataRef])
 
   const saveDrawing = useCallback(async (drawing: Drawing) => {
