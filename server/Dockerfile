@@ -10,7 +10,7 @@ RUN npm run build
 
 FROM node:22-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
+RUN rm -rf /var/lib/apt/lists/* && apt-get clean && apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY prisma ./prisma/
