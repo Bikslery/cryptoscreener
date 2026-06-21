@@ -413,7 +413,6 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
       }
       return d
     })
-    this.rebuildItems()
   }
 
   commitDrawingUpdate(id: string, data: unknown) {
