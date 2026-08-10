@@ -4,6 +4,10 @@ import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../..
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
 import { fetchWithTimeout } from '../../utils/fetch.js'
 
+const TF_MAP: Record<string, string> = {
+  '1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1d': 'D', '1w': 'W',
+}
+
 export class BybitFuturesAdapter implements ExchangeAdapter {
   name = 'Bybit Futures'
   type: 'spot' | 'futures' = 'futures'
@@ -16,6 +20,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private subscribedSymbols = new Set<string>()
+  private candleSubs = new Map<string, CandleCallback>()
   private precisionMap = new Map<string, number>()
   private intentionalClose = false
 
@@ -31,6 +36,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
       this.pingTimer = setInterval(() => {
         this.ws?.send(JSON.stringify({ op: 'ping' }))
       }, 20000)
+      this.subscribeAll()
     })
     this.ws.on('message', (raw) => {
       try {
@@ -40,8 +46,12 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
             const ticker = this.parseTicker(msg.data)
             for (const cb of this.tickerCbs) cb(ticker)
           } else if (msg.topic.startsWith('kline.')) {
-            const candle = this.parseCandle(msg.data)
-            if (candle) for (const cb of this.candleCbs) cb(candle)
+            const candle = this.parseCandle(msg.data, msg.topic)
+            if (candle) {
+              for (const cb of this.candleCbs) cb(candle)
+              const subCb = this.candleSubs.get(msg.topic)
+              if (subCb) subCb(candle)
+            }
           } else if (msg.topic.startsWith('orderbook.')) {
             const depth = this.parseDepth(msg.data, msg.topic)
             if (depth) for (const cb of this.depthCbs) cb(depth)
@@ -66,6 +76,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
         }
       }
       console.log(`[${this.name}] Loaded precision for ${this.precisionMap.size} instruments`)
+      this.subscribeAll()
     } catch (e) {
       console.error(`[${this.name}] Failed to fetch instruments:`, e)
     }
@@ -93,19 +104,40 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     }
   }
 
-  private parseCandle(d: any): UnifiedCandle | null {
-    if (!d || !d.start) return null
+  private parseCandle(d: any, topic: string): UnifiedCandle | null {
+    if (!d) return null
     const c = Array.isArray(d) ? d[0] : d
+    const symbol = c.symbol || topic.split('.').pop() || ''
+    const interval = topic.split('.')[1] || ''
+    const timeframe = Object.entries(TF_MAP).find(([, v]) => v === interval)?.[0] || '5m'
+    if (!symbol || !isFinite(c.start)) return null
     return {
-      symbol: c.symbol || '',
+      symbol,
       exchange: this.exchange,
-      timeframe: '', // extracted from topic
+      timeframe,
       time: c.start / 1000,
       open: parseFloat(c.open),
       high: parseFloat(c.high),
       low: parseFloat(c.low),
       close: parseFloat(c.close),
       volume: parseFloat(c.volume),
+      isFinal: !!c.confirm,
+    }
+  }
+
+  // Bybit allows up to 10 topics per subscribe message (1000 per connection).
+  // Called on WS open (and after instruments load) so all tickers + any active
+  // kline subscriptions are re-established after reconnects.
+  private subscribeAll() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    const args: string[] = []
+    for (const symbol of this.precisionMap.keys()) args.push(`tickers.${symbol}`)
+    for (const topic of this.candleSubs.keys()) args.push(topic)
+    for (let i = 0; i < args.length; i += 10) {
+      this.ws.send(JSON.stringify({ op: 'subscribe', args: args.slice(i, i + 10) }))
+    }
+    if (args.length > 0) {
+      console.log(`[${this.name}] Subscribed ${args.length} topics (tickers + klines)`)
     }
   }
 
@@ -121,12 +153,22 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     }
   }
 
-  subscribeCandle(_symbol: string, _tf: string, _cb: CandleCallback) {
-    // TODO: implement Bybit kline subscription
+  subscribeCandle(symbol: string, tf: string, cb: CandleCallback) {
+    const interval = TF_MAP[tf] || '5'
+    const topic = `kline.${interval}.${symbol}`
+    this.candleSubs.set(topic, cb)
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ op: 'subscribe', args: [topic] }))
+    }
   }
 
-  unsubscribeCandle(_symbol: string, _tf: string) {
-    // TODO
+  unsubscribeCandle(symbol: string, tf: string) {
+    const interval = TF_MAP[tf] || '5'
+    const topic = `kline.${interval}.${symbol}`
+    this.candleSubs.delete(topic)
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ op: 'unsubscribe', args: [topic] }))
+    }
   }
 
   subscribeDepth(_symbol: string, _cb: DepthCallback) {

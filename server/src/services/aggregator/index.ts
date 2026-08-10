@@ -1,6 +1,7 @@
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
 import { BinanceSpotAdapter } from '../exchanges/binance-spot.js'
 import { BinanceFuturesAdapter } from '../exchanges/binance-futures.js'
+import { BybitFuturesAdapter } from '../exchanges/bybit-futures.js'
 import type { ExchangeAdapter } from '../exchanges/types.js'
 import { broadcast, broadcastToChannel } from '../../ws/hub.js'
 import { updateCachedCandle, getCachedCandles } from '../candles/candle-cache.js'
@@ -10,6 +11,7 @@ import { subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
 export const adapters: ExchangeAdapter[] = [
   new BinanceSpotAdapter(),
   new BinanceFuturesAdapter(),
+  new BybitFuturesAdapter(),
 ]
 
 const tickerMap = new Map<string, UnifiedTicker>()
@@ -153,6 +155,13 @@ export function startAggregator() {
       cachedBestMap = null
       cachedBest = null
       tickerCount++
+      // Binance Futures WS is geo-blocked from many datacenter IPs, so its
+      // prices come from a 1s REST poll. Bybit's ticker stream is live — feed
+      // the fresh price into the binance-futures entry (keeps the UI source
+      // label stable while making price changes real-time).
+      if (ticker.exchange === 'bybit-futures') {
+        updateTickerPrice(ticker.symbol, 'binance-futures', ticker.price)
+      }
       const now = Date.now()
       if (now - lastBroadcast > BROADCAST_INTERVAL) {
         lastBroadcast = now
