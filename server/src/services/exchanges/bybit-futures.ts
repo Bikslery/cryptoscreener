@@ -65,7 +65,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
 
   private async fetchInstruments() {
     try {
-      const res = await fetchWithTimeout('https://api.bybit.com/v5/market/instruments?category=linear')
+      const res = await fetchWithTimeout('https://api.bybit.com/v5/market/instruments-info?category=linear')
       const json = await res.json()
       if (json.retCode !== 0 || !json.result?.list) return
       for (const inst of json.result.list) {
