@@ -31,7 +31,7 @@ export function getRedisPub(): Redis {
 export function getRedisSub(): Redis {
   if (!_sub) {
     _sub = createClient()
-    _sub.subscribe('tickers', 'candles', 'depth', 'trades', 'alerts').catch(() => {})
+    _sub.subscribe('tickers', 'candles', 'depth', 'trades', 'alerts', 'sub-req').catch(() => {})
   }
   return _sub
 }

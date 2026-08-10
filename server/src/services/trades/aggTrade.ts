@@ -2,6 +2,7 @@ import WebSocket from 'ws'
 import { broadcastToChannel } from '../../ws/hub.js'
 import { getWsAgent } from '../exchanges/proxy.js'
 import { updateTickerPrice } from '../aggregator/index.js'
+import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 import type { Exchange } from '../../types.js'
 
 interface AggTradeStream {
@@ -105,14 +106,24 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
 
         updateTickerPrice(symbol, exchange, price)
 
-        broadcastToChannel(`trade:${exchange}:${symbol}`, {
+        const tradePayload = {
           symbol,
           exchange,
           price,
           volume,
           time: data.T / 1000,
           isBuyerMaker,
-        }, true)
+        }
+
+        broadcastToChannel(`trade:${exchange}:${symbol}`, tradePayload, true)
+
+        // Publish to Redis so broadcast nodes (which have no exchange
+        // connections) can fan the trade out to their clients.
+        if (REDIS_ENABLED) {
+          try {
+            getRedisPub().publish('trades', JSON.stringify(tradePayload)).catch(() => {})
+          } catch { /* redis down */ }
+        }
       }
     } catch (e) {
       console.error(`[AggTrade${label}] Parse error:`, e)

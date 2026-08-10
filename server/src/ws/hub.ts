@@ -1,8 +1,9 @@
+import { deflateRawSync } from 'zlib'
 import { WebSocket, WebSocketServer } from 'ws'
 import { verifyToken, type JwtPayload } from '../middleware/auth.js'
 import type { WsMessage } from '../types.js'
 import type { UnifiedTicker, UnifiedCandle } from '../types.js'
-import { getTopCachedSymbols, getCachedCandles } from '../services/candles/candle-cache.js'
+import { getTopCachedSymbols, getCachedCandles, updateCachedCandle } from '../services/candles/candle-cache.js'
 import { getAllTickers, getTickers, getTicker, setTickersFromRedis } from '../services/aggregator/index.js'
 import { INITIAL_CANDLES_TF } from '../services/candles/preload.js'
 import { compactCandles, type CompactCandle } from '../services/candles/compact.js'
@@ -49,6 +50,15 @@ export function setCandleManager(cm: typeof candleManager) {
 
 const wsBatchBuffer = new Map<string, unknown>()
 
+// Outbound WS frames are deflate-raw compressed binary (same approach as
+// scalpboard) instead of plain JSON text — the browser decompresses via
+// DecompressionStream('deflate-raw'). Ticker snapshots (full arrays pushed
+// every 100ms) shrink ~10x; perMessageDeflate is disabled on the server to
+// avoid double-compressing.
+function encodePayload(data: unknown): Buffer {
+  return deflateRawSync(JSON.stringify(data))
+}
+
 function handleBackpressure(client: Client): boolean {
   client.totalDropped++
   wsDroppedTotal.inc()
@@ -62,7 +72,7 @@ function handleBackpressure(client: Client): boolean {
   }
   if (Date.now() - client.lastBackpressureNotify > BACKPRESSURE_NOTIFY_INTERVAL) {
     if (client.ws.readyState === WebSocket.OPEN) {
-      client.ws.send(JSON.stringify({ type: 'backpressure', dropped: true }))
+      client.ws.send(encodePayload({ type: 'backpressure', dropped: true }))
     }
     client.lastBackpressureNotify = Date.now()
   }
@@ -75,14 +85,14 @@ function flushBatchBuffer() {
   try {
     for (const [channel, data] of wsBatchBuffer) {
       const msg: WsMessage = { type: channel as any, channel, data }
-      let raw: string | null = null
+      let raw: Buffer | null = null
       for (const client of clients.values()) {
         if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
           if (client.buffered >= MAX_BUFFERED) {
             handleBackpressure(client)
             continue
           }
-          if (raw === null) raw = JSON.stringify(msg)
+          if (raw === null) raw = encodePayload(msg)
           client.ws.send(raw, (err) => { if (err) client.buffered++ })
         }
       }
@@ -192,7 +202,7 @@ export function setupWsHub(wss: WebSocketServer) {
     try {
       const initialCandles = buildInitialCandlesData()
       if (Object.keys(initialCandles).length > 0) {
-        ws.send(JSON.stringify({ type: 'initial-candles', format: 'compact', data: initialCandles }))
+        ws.send(encodePayload({ type: 'initial-candles', format: 'compact', data: initialCandles }))
       }
     } catch (err) {
       console.warn('[Hub] Failed to send initial-candles', err)
@@ -201,7 +211,7 @@ export function setupWsHub(wss: WebSocketServer) {
     try {
       const tickers = getAllTickers()
       if (tickers.length > 0) {
-        ws.send(JSON.stringify({ type: 'ticker', data: tickers }))
+        ws.send(encodePayload({ type: 'ticker', data: tickers }))
         console.log(`[Hub] Sent initial tickers to new client: ${tickers.length} tickers`)
       }
     } catch (err) {
@@ -285,7 +295,6 @@ export function setupWsHub(wss: WebSocketServer) {
 export function broadcast(msg: WsMessage) {
   const endTimer = wsBroadcastLatency.startTimer()
   try {
-    const raw = JSON.stringify(msg)
     const channel = msg.channel || msg.type
     const isGlobal = msg.type === 'alert' || msg.type === 'listing'
 
@@ -298,8 +307,8 @@ export function broadcast(msg: WsMessage) {
       const sourceForAll = fullTickers || tickers
 
       // Serialization cache: group by ticker signature
-      const sigCache = new Map<string, string>()
-      let fullRaw: string | null = null
+      const sigCache = new Map<string, Buffer>()
+      let fullRaw: Buffer | null = null
       let sentCount = 0
 
       for (const client of clients.values()) {
@@ -312,7 +321,7 @@ export function broadcast(msg: WsMessage) {
         if (client.tickerSymbols.size === 0) {
           // Subscribed to all tickers — send full array for state merge
           if (fullRaw === null) {
-            fullRaw = JSON.stringify({ type: 'ticker', data: sourceForAll })
+            fullRaw = encodePayload({ type: 'ticker', data: sourceForAll })
           }
           client.ws.send(fullRaw, (err) => { if (err) client.buffered++ })
           sentCount++
@@ -322,10 +331,10 @@ export function broadcast(msg: WsMessage) {
           let cached = sigCache.get(sig)
           if (cached === undefined) {
             const filtered = (fullTickers || tickers).filter(t => client.tickerSymbols.has(t.symbol))
-            cached = filtered.length > 0
-              ? JSON.stringify({ type: 'ticker', data: filtered })
-              : ''
-            sigCache.set(sig, cached)
+            if (filtered.length > 0) {
+              cached = encodePayload({ type: 'ticker', data: filtered })
+              sigCache.set(sig, cached)
+            }
           }
           if (cached) {
             client.ws.send(cached, (err) => { if (err) client.buffered++ })
@@ -336,6 +345,7 @@ export function broadcast(msg: WsMessage) {
       return
     }
 
+    const raw = encodePayload(msg)
     for (const client of clients.values()) {
       if (client.ws.readyState !== WebSocket.OPEN) continue
       if (client.buffered >= MAX_BUFFERED) {
@@ -354,7 +364,7 @@ export function broadcast(msg: WsMessage) {
 export function broadcastToChannel(channel: string, data: unknown, immediate = false) {
   if (immediate) {
     const msg: WsMessage = { type: channel as any, channel, data }
-    const raw = JSON.stringify(msg)
+    const raw = encodePayload(msg)
     for (const client of clients.values()) {
       if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN && client.buffered < MAX_BUFFERED) {
         client.ws.send(raw, (err) => { if (err) client.buffered++ })
@@ -377,6 +387,9 @@ export function startRedisListener() {
           broadcast({ type: 'ticker', data: tickers })
         } else if (channel === 'candles') {
           const candle = JSON.parse(message) as UnifiedCandle
+          // Keep the local cache warm so initial-candles pushes and REST
+          // fallbacks work even though this node never touches the exchanges.
+          updateCachedCandle(candle)
           broadcastToChannel(`candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`, candle, true)
         } else if (channel === 'depth') {
           const depth = JSON.parse(message)
@@ -395,6 +408,36 @@ export function startRedisListener() {
     console.log('[Hub] Redis listener started')
   } catch (e) {
     console.warn('[Hub] Redis unavailable, running in single-process mode')
+  }
+}
+
+// On an ingestion-only node there are no WS clients, so client candle/depth
+// subscriptions arrive from broadcast nodes as Redis 'sub-req' messages.
+// Drive the local candle manager, which subscribes the exchange streams and
+// publishes the resulting data back to Redis for the broadcast nodes.
+export function startIngestionRedisListener() {
+  try {
+    const sub = getRedisSub()
+    sub.on('message', (channel, message) => {
+      if (channel !== 'sub-req') return
+      try {
+        const req = JSON.parse(message)
+        if (req?.type === 'subscribe' && candleManager) {
+          candleManager.subscribeCandle(req.exchange, req.symbol, req.tf)
+        } else if (req?.type === 'unsubscribe' && candleManager) {
+          candleManager.unsubscribeCandle(req.exchange, req.symbol, req.tf)
+        } else if (req?.type === 'depth-sub' && candleManager) {
+          candleManager.subscribeDepth(req.symbol)
+        } else if (req?.type === 'depth-unsub' && candleManager) {
+          candleManager.unsubscribeDepth(req.symbol)
+        }
+      } catch (e) {
+        console.warn('[Hub] sub-req parse error:', e instanceof Error ? e.message : e)
+      }
+    })
+    console.log('[Hub] Ingestion Redis listener started (sub-req)')
+  } catch (e) {
+    console.warn('[Hub] Redis unavailable, ingestion sub-req listener disabled')
   }
 }
 

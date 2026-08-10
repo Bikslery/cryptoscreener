@@ -3,6 +3,7 @@ import { broadcastToChannel } from '../../ws/hub.js'
 import { getTicker } from '../aggregator/index.js'
 import type { UnifiedCandle, Exchange } from '../../types.js'
 import { subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
+import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 
 // Track which exchange adapter is subscribed to which exchange+symbol+timeframe
 const activeCandleSubs = new Map<string, { adapter: ExchangeAdapter; count: number }>()
@@ -128,6 +129,59 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
         existing.adapter.unsubscribeDepth(symbol)
         activeDepthSubs.delete(key)
         console.log(`[CandleManager] Unsubscribed from depth ${key}`)
+      }
+    },
+  }
+}
+
+// Broadcast-node variant: this node never connects to the exchanges — realtime
+// candle/depth/trade data arrives via Redis from the ingestion node. Client
+// subscriptions are forwarded to the ingestion node as 'sub-req' messages, and
+// reference counting happens here so unsubscribes balance out.
+export function createRemoteCandleManager() {
+  const counts = new Map<string, number>()
+
+  const publish = (type: string, data: Record<string, unknown>) => {
+    if (!REDIS_ENABLED) return
+    try {
+      getRedisPub().publish('sub-req', JSON.stringify({ type, ...data })).catch(() => {})
+    } catch { /* redis down */ }
+  }
+
+  return {
+    subscribeCandle(exchange: string, symbol: string, tf: string) {
+      const key = getChannelKey(exchange, symbol, tf)
+      const n = counts.get(key) || 0
+      counts.set(key, n + 1)
+      if (n === 0) publish('subscribe', { exchange, symbol, tf })
+    },
+
+    unsubscribeCandle(exchange: string, symbol: string, tf: string) {
+      const key = getChannelKey(exchange, symbol, tf)
+      const n = counts.get(key) ?? 1
+      if (n <= 1) {
+        counts.delete(key)
+        publish('unsubscribe', { exchange, symbol, tf })
+      } else {
+        counts.set(key, n - 1)
+      }
+    },
+
+    subscribeDepth(symbol: string) {
+      const key = `d:${getDepthKey(symbol)}`
+      const n = counts.get(key) || 0
+      counts.set(key, n + 1)
+      if (n === 0) publish('depth-sub', { symbol })
+    },
+
+    unsubscribeDepth(symbol: string) {
+      const key = `d:${getDepthKey(symbol)}`
+      const n = counts.get(key) ?? 1
+      if (n <= 1) {
+        counts.delete(key)
+        publish('depth-unsub', { symbol })
+      } else {
+        counts.set(key, n - 1)
       }
     },
   }

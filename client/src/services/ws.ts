@@ -38,11 +38,21 @@ function dispatch(msg: WsMessage) {
   }
 }
 
+// Server frames are deflate-raw compressed binary (see server hub.ts
+// encodePayload). DecompressionStream is async, so frames are processed
+// through a promise chain to preserve WebSocket message order.
+async function decompressFrame(buf: ArrayBuffer): Promise<string> {
+  const ds = new DecompressionStream('deflate-raw')
+  const stream = new Blob([buf]).stream().pipeThrough(ds)
+  return await new Response(stream).text()
+}
+
 function connect() {
   intentionalDisconnect = false
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const url = `${protocol}//${window.location.host}/ws`
   ws = new WebSocket(url)
+  ws.binaryType = 'arraybuffer'
 
   ws.onopen = () => {
     reconnectAttempt = 0
@@ -53,12 +63,16 @@ function connect() {
     }
   }
 
+  let frameQueue: Promise<void> = Promise.resolve()
   ws.onmessage = (e) => {
     lastMessageAt = Date.now()
-    try {
-      const msg = JSON.parse(e.data) as WsMessage
-      dispatch(msg)
-    } catch {}
+    frameQueue = frameQueue.then(async () => {
+      try {
+        const text = typeof e.data === 'string' ? e.data : await decompressFrame(e.data)
+        const msg = JSON.parse(text) as WsMessage
+        dispatch(msg)
+      } catch { /* ignore malformed frame */ }
+    })
   }
 
   ws.onclose = () => {

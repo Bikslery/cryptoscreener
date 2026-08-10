@@ -5,11 +5,11 @@ import cookieParser from 'cookie-parser'
 import { WebSocketServer, WebSocket } from 'ws'
 import { createServer } from 'http'
 import type { Request, Response, NextFunction } from 'express'
-import { setupWsHub, setCandleManager, startRedisListener, stopWsHub, refreshMetrics } from './ws/hub.js'
+import { setupWsHub, setCandleManager, startRedisListener, startIngestionRedisListener, stopWsHub, refreshMetrics } from './ws/hub.js'
 import { startAggregator, adapters } from './services/aggregator/index.js'
 import { startAlertEngine, stopAlertEngine } from './services/alerts/index.js'
 import { startTelegramPolling } from './services/telegram/bot.js'
-import { createCandleManager } from './services/candles/manager.js'
+import { createCandleManager, createRemoteCandleManager } from './services/candles/manager.js'
 import { startPreload } from './services/candles/preload.js'
 import authRoutes from './routes/auth.js'
 import coinRoutes from './routes/coins.js'
@@ -92,22 +92,14 @@ async function main() {
 
   const server = createServer(app)
 
-  const wss = new WebSocketServer({
-    server,
-    path: '/ws',
-    perMessageDeflate: {
-      zlibDeflateOptions: { level: 3 },
-      zlibInflateOptions: { chunkSize: 16 * 1024 },
-      clientNoContextTakeover: true,
-      serverNoContextTakeover: true,
-      threshold: 1024,
-    },
-  })
+  // Frames are deflate-raw compressed explicitly (see hub.encodePayload), so
+  // perMessageDeflate is disabled to avoid double compression.
+  const wss = new WebSocketServer({ server, path: '/ws', perMessageDeflate: false })
 
   const isIngestion = ROLE === 'ingestion' || ROLE === 'all'
   const isBroadcast = ROLE === 'broadcast' || ROLE === 'all'
 
-  setupWsHub(wss)
+  if (isBroadcast) setupWsHub(wss)
 
   if (isIngestion) {
     startAggregator()
@@ -116,13 +108,16 @@ async function main() {
     startPreload(adapters, candleManager)
     startAlertEngine()
     startTelegramPolling()
-    console.log('[Role] Ingestion + Broadcast (all-in-one)')
+    // Broadcast nodes forward client candle/depth subscriptions here via Redis.
+    startIngestionRedisListener()
+    console.log(`[Role] Ingestion node${isBroadcast ? ' + Broadcast (all-in-one)' : ''}`)
   }
 
   if (isBroadcast && !isIngestion) {
     startRedisListener()
-    const candleManager = createCandleManager(adapters)
-    setCandleManager(candleManager)
+    // Broadcast node never connects to the exchanges — realtime data comes via
+    // Redis; client subscriptions are forwarded to the ingestion node.
+    setCandleManager(createRemoteCandleManager())
     console.log('[Role] Broadcast worker (reading from Redis)')
   }
 

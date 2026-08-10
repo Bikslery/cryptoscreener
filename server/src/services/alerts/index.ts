@@ -1,5 +1,6 @@
 import { getTickers } from '../aggregator/index.js'
 import { broadcast } from '../../ws/hub.js'
+import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 import { prisma } from '../../db/index.js'
 import { sendTelegramMessage } from '../telegram/bot.js'
 import type { PriceAlertCondition, ImpulseAlertCondition } from '../../types.js'
@@ -44,18 +45,17 @@ export function startAlertEngine() {
             // Send additional symbols as separate broadcast events (no extra prisma writes)
             for (let i = 1; i < Math.min(matchingTickers.length, 10); i++) {
               const t = matchingTickers[i]
-              broadcast({
-                type: 'alert',
-                data: {
-                  id: alert.id,
-                  type: alert.type,
-                  symbol: t.symbol,
-                  exchange: alert.exchange,
-                  price: t.price,
-                  condition: JSON.parse(alert.condition),
-                  triggeredAt: Date.now(),
-                },
-              })
+              const extra = {
+                id: alert.id,
+                type: alert.type,
+                symbol: t.symbol,
+                exchange: alert.exchange,
+                price: t.price,
+                condition: JSON.parse(alert.condition),
+                triggeredAt: Date.now(),
+              }
+              broadcast({ type: 'alert', data: extra })
+              publishAlert(extra)
             }
           }
         }
@@ -64,6 +64,13 @@ export function startAlertEngine() {
       console.error('[AlertEngine] Error checking alerts:', e instanceof Error ? e.message : e)
     }
   }, 5000)
+}
+
+function publishAlert(data: unknown) {
+  if (!REDIS_ENABLED) return
+  try {
+    getRedisPub().publish('alerts', JSON.stringify(data)).catch(() => {})
+  } catch { /* redis down */ }
 }
 
 export function stopAlertEngine() {
@@ -91,6 +98,7 @@ async function fireAlert(alert: any, price: number, overrideSymbol?: string, pri
   }
 
   broadcast({ type: 'alert', data: alertData })
+  publishAlert(alertData)
 
   const user = await prisma.user.findUnique({
     where: { id: alert.userId },
