@@ -5,10 +5,9 @@ import type { UnifiedCandle, Exchange } from '../../types.js'
 import { subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 
-// When set to 'bybit', futures charts route their candle subscriptions to the
-// Bybit adapter (Binance Futures WS is geo-blocked from many regions), with
-// candles relabeled as binance-futures so the client channel stays stable.
-const FUTURES_CANDLE_SOURCE = process.env.FUTURES_CANDLE_SOURCE || 'binance'
+// Exchanges are honest, independent sources: the client picks the source
+// explicitly (binance-spot / binance-futures / bybit-futures) and candles are
+// NEVER relabeled from one exchange to another.
 
 // Track which exchange adapter is subscribed to which exchange+symbol+timeframe
 const activeCandleSubs = new Map<string, { adapter: ExchangeAdapter; count: number }>()
@@ -81,24 +80,14 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
       }
 
       // Use the specified exchange, or fall back to best adapter
-      let adapter = getBestAdapter(symbol, adapters, exchange as Exchange)
-      let relabel = false
-      if (FUTURES_CANDLE_SOURCE === 'bybit' && exchange === 'binance-futures') {
-        const bybit = adapters.find(a => a.exchange === 'bybit-futures')
-        if (bybit) {
-          adapter = bybit
-          relabel = true
-        }
-      }
+      const adapter = getBestAdapter(symbol, adapters, exchange as Exchange)
       if (!adapter) {
         console.error(`[CandleManager] No adapter available for ${exchange}:${symbol}`)
         return
       }
-      console.log(`[CandleManager] subscribeCandle NEW key=${key} adapter=${adapter.name}${relabel ? ' (relabeled as binance-futures)' : ''}`)
+      console.log(`[CandleManager] subscribeCandle NEW key=${key} adapter=${adapter.name}`)
 
-      const cb: CandleCallback = relabel
-        ? (candle) => candleCallback({ ...candle, exchange: 'binance-futures' })
-        : candleCallback
+      const cb: CandleCallback = candleCallback
       adapter.subscribeCandle(symbol, tf, cb)
       activeCandleSubs.set(key, { adapter, count: 1 })
       if (adapter.exchange === 'binance-futures' || adapter.exchange === 'binance-spot') {

@@ -5,10 +5,10 @@ import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/w
 import api from '../services/api.js'
 import { VOLUME_HIGH_THRESHOLD, VOLUME_FILTER_DEFAULT } from '../constants/volume.js'
 
-export type ChartExchange = 'binance-spot' | 'binance-futures'
+export type ChartExchange = 'binance-spot' | 'binance-futures' | 'bybit-futures'
 
 const CHART_EXCHANGE_STORAGE_KEY = 'serotonin.chartExchange'
-const VALID_CHART_EXCHANGES: ChartExchange[] = ['binance-spot', 'binance-futures']
+const VALID_CHART_EXCHANGES: ChartExchange[] = ['binance-spot', 'binance-futures', 'bybit-futures']
 const DEFAULT_CHART_EXCHANGE: ChartExchange = 'binance-futures'
 
 function readStoredChartExchange(): ChartExchange {

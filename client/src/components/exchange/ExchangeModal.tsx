@@ -12,7 +12,8 @@ interface ExchangeOption {
 }
 
 const EXCHANGE_OPTIONS: ExchangeOption[] = [
-  { value: 'binance-futures', label: 'Binance Futures', hint: 'фьючерсы USDT-M' },
+  { value: 'binance-futures', label: 'Binance Futures', hint: 'фьючерсы USDT-M (REST 1с, если WS заблокирован)' },
+  { value: 'bybit-futures', label: 'Bybit Futures', hint: 'фьючерсы USDT-M · realtime WS' },
   { value: 'binance-spot', label: 'Binance Spot', hint: 'спотовый рынок' },
 ]
 

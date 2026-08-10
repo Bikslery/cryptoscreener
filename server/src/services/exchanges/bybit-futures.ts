@@ -44,7 +44,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
         if (msg.topic) {
           if (msg.topic.startsWith('tickers.')) {
             const ticker = this.parseTicker(msg.data)
-            for (const cb of this.tickerCbs) cb(ticker)
+            if (ticker) for (const cb of this.tickerCbs) cb(ticker)
           } else if (msg.topic.startsWith('kline.')) {
             const candle = this.parseCandle(msg.data, msg.topic)
             if (candle) {
@@ -82,8 +82,12 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     }
   }
 
-  private parseTicker(d: any): UnifiedTicker {
+  private parseTicker(d: any): UnifiedTicker | null {
     const price = parseFloat(d.lastPrice)
+    // Bybit ticker 'delta' messages can omit lastPrice (only changed fields) —
+    // skip them instead of emitting NaN (which JSON-serializes to null and
+    // made the price flicker to null in the UI).
+    if (!isFinite(price) || price <= 0) return null
     const open = parseFloat(d.prevPrice24h) || price
     const pricePrecision = this.precisionMap.get(d.symbol) ?? fallbackPrecision(price)
     return {

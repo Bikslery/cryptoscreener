@@ -155,13 +155,10 @@ export function startAggregator() {
       cachedBestMap = null
       cachedBest = null
       tickerCount++
-      // Binance Futures WS is geo-blocked from many datacenter IPs, so its
-      // prices come from a 1s REST poll. Bybit's ticker stream is live — feed
-      // the fresh price into the binance-futures entry (keeps the UI source
-      // label stable while making price changes real-time).
-      if (ticker.exchange === 'bybit-futures') {
-        updateTickerPrice(ticker.symbol, 'binance-futures', ticker.price)
-      }
+      // NOTE: exchanges are honest, independent sources — Bybit prices are
+      // never cross-fed into binance-futures entries (per-market prices can
+      // decohere during volatile moves, and the UI label must match the
+      // actual source).
       const now = Date.now()
       if (now - lastBroadcast > BROADCAST_INTERVAL) {
         lastBroadcast = now
@@ -249,6 +246,11 @@ function syncAggTradeSubscriptions() {
   const all = getAllTickers()
   const newSymbols = new Set<string>()
   for (const t of all) {
+    // Bybit symbols get realtime prices from Bybit's own ticker WS — do NOT
+    // subscribe them to Binance SPOT aggTrade streams: that mislabeled them
+    // (trade channels broadcast as trade:bybit-futures:*) and could poison
+    // whole chunk connections with streams that don't exist on Binance spot.
+    if (t.exchange === 'bybit-futures') continue
     newSymbols.add(`${t.symbol}:${t.exchange}`)
     if (!subscribedAggTradeSymbols.has(`${t.symbol}:${t.exchange}`)) {
       subscribeAggTrade(t.symbol, t.exchange)
@@ -346,6 +348,10 @@ function anyLimiterOverThreshold(): boolean {
 }
 
 export function updateTickerPrice(symbol: string, exchange: Exchange, price: number) {
+  // Never let NaN / non-positive prices into the ticker map — JSON.stringify
+  // turns NaN into null, which made futures prices flicker to null on every
+  // partial (delta) exchange message missing the last-price field.
+  if (!isFinite(price) || price <= 0) return
   const key = `${symbol}:${exchange}`
   const existing = tickerMap.get(key)
   if (!existing) return
