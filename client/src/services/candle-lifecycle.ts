@@ -59,6 +59,23 @@ interface TailEntry {
   lastKlineAt: number
 }
 
+/**
+ * Buffered realtime event (scalpboard/cryptoscreener-style reconciliation):
+ * while a history load is in flight, klines/trades are recorded in arrival
+ * order instead of being painted, then replayed on top of the freshly loaded
+ * history once it lands. This keeps the forming candle consistent and prevents
+ * the flicker where live updates get wiped by a full setData().
+ */
+interface BufferedEvent {
+  kind: 'kline' | 'trade'
+  candle?: UnifiedCandle
+  trade?: TradePayload
+}
+
+/** Cap so a hung fetch can't grow the buffer unboundedly; the latest events
+ *  (which define the forming-candle state) are always retained. */
+const MAX_BUFFERED_EVENTS = 1000
+
 const EMPTY_PATCH: CandlePatch = { candleUpdates: [], volumeUpdates: [] }
 
 function emptyPatch(): CandlePatch {
@@ -91,8 +108,14 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
   let tail: TailEntry[] = []
   let buffered = false
   let destroyed = false
-  let bufferedTrade: TradePayload | null = null
-  let bufferedKline: UnifiedCandle | null = null
+  let bufferedEvents: BufferedEvent[] = []
+
+  function pushBuffered(ev: BufferedEvent) {
+    if (bufferedEvents.length >= MAX_BUFFERED_EVENTS) {
+      bufferedEvents.shift()
+    }
+    bufferedEvents.push(ev)
+  }
 
   function getTailIndex(time: number): number {
     return tail.findIndex(t => t.candle.time === time)
@@ -165,6 +188,14 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     if (destroyed) return EMPTY_PATCH
     if (!isFinite(trade.price) || !isFinite(trade.qty) || !isFinite(trade.time)) return EMPTY_PATCH
 
+    // While reconciling with a history load, record the event and defer its
+    // effect until the flush. The tail must NOT advance early — otherwise the
+    // replay after applyHistory() would double-count trade volume.
+    if (buffered) {
+      pushBuffered({ kind: 'trade', trade })
+      return EMPTY_PATCH
+    }
+
     const tradeSec = trade.time
     const candleTime = Math.floor(tradeSec / tfSeconds) * tfSeconds
 
@@ -224,16 +255,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
         lastKlineAt: 0,
       })
       updatedCandles = [newCandle]
-      if (buffered) {
-        bufferedTrade = trade
-        return EMPTY_PATCH
-      }
       return patchFromCandles(updatedCandles, trade.price, updatedCandles, gap)
-    }
-
-    if (buffered) {
-      bufferedTrade = trade
-      return EMPTY_PATCH
     }
 
     return patchFromCandles(updatedCandles, trade.price, updatedCandles)
@@ -242,6 +264,13 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
   function applyKline(kline: UnifiedCandle): CandlePatch {
     if (destroyed) return EMPTY_PATCH
     if (!isFiniteOHLCV(kline) || kline.time <= 0) return EMPTY_PATCH
+
+    // While reconciling with a history load, record the event and defer its
+    // effect until the flush (same rationale as applyTrade).
+    if (buffered) {
+      pushBuffered({ kind: 'kline', candle: kline })
+      return EMPTY_PATCH
+    }
 
     const idx = getTailIndex(kline.time)
     if (idx < 0) {
@@ -265,10 +294,6 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
           lastTradeAt: 0,
           lastKlineAt: nextSeq(),
         })
-        if (buffered) {
-          bufferedKline = kline
-          return EMPTY_PATCH
-        }
         return patchFromCandles([newCandle], kline.close, [newCandle], gap)
       }
       // kline.time is older than the tail window (or before any tail entry):
@@ -318,40 +343,42 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
       }
     }
 
-    if (buffered) {
-      bufferedKline = kline
-      return EMPTY_PATCH
-    }
-
     const livePrice = !kline.isFinal ? kline.close : undefined
     return patchFromCandles(updatedCandles, livePrice, updatedCandles)
   }
 
+  /**
+   * Begin/end reconciliation with a history load (scalpboard/cryptoscreener
+   * pattern). setBuffered(true) is idempotent: a second call while already
+   * buffering keeps the accumulated events, so wrapping both the fetch AND
+   * the paint phase is safe. setBuffered(false) replays every buffered event
+   * in arrival order on top of the (already applied) history and returns the
+   * combined patch for the chart.
+   */
   function setBuffered(on: boolean): CandlePatch {
     if (destroyed) return EMPTY_PATCH
 
-    buffered = on
-    if (on) return EMPTY_PATCH
+    if (on) {
+      if (!buffered) {
+        buffered = true
+        bufferedEvents = []
+      }
+      return EMPTY_PATCH
+    }
 
+    buffered = false
     const patch = emptyPatch()
 
-    if (bufferedKline) {
-      const saved = buffered
-      buffered = false
-      const klinePatch = applyKline(bufferedKline)
-      buffered = saved
-      mergePatch(patch, klinePatch)
-      bufferedKline = null
+    for (const ev of bufferedEvents) {
+      if (ev.kind === 'kline' && ev.candle) {
+        const klinePatch = applyKline(ev.candle)
+        mergePatch(patch, klinePatch)
+      } else if (ev.kind === 'trade' && ev.trade) {
+        const tradePatch = applyTrade(ev.trade)
+        mergePatch(patch, tradePatch)
+      }
     }
-
-    if (bufferedTrade) {
-      const saved = buffered
-      buffered = false
-      const tradePatch = applyTrade(bufferedTrade)
-      buffered = saved
-      mergePatch(patch, tradePatch)
-      bufferedTrade = null
-    }
+    bufferedEvents = []
 
     return patch
   }
@@ -370,8 +397,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
   function destroy() {
     destroyed = true
     tail = []
-    bufferedTrade = null
-    bufferedKline = null
+    bufferedEvents = []
   }
 
   return {

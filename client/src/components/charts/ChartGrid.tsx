@@ -256,6 +256,12 @@ function useFullHistory(
   const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading')
   const [dataVersion, setDataVersion] = useState(0)
 
+  // Track the last painted (exchange,symbol,tf) key so a slow re-load of the
+  // SAME chart preserves the user's visible range instead of snapping back to
+  // the right edge (the "teleport" when the chart hadn't finished loading).
+  // New keys (symbol change / TF switch) still snap to the latest bars.
+  const lastPaintedKeyRef = useRef<string | null>(null)
+
   useEffect(() => {
     if (!exchange) return
     const cancelled = { value: false }
@@ -264,6 +270,7 @@ function useFullHistory(
 
     const renderCandles = (candles: UnifiedCandle[]) => {
       if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
+      const prevData = candlesDataRef.current
       candlesDataRef.current = candles
       // Filter out invalid candles before rendering
       const validCandles = candles.filter(validateCandle).map(normalizeCandle)
@@ -274,25 +281,49 @@ function useFullHistory(
         time: c.time as Time, value: c.volume,
         color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
       }))
+      const key = `${exchange}:${symbol}:${tf}`
+      const sameKey = lastPaintedKeyRef.current === key
       try {
+        const ts = chartRef.current?.timeScale()
+        // Capture BEFORE setData — setData resets the scale.
+        const prevRange = sameKey && prevData.length > 0 ? ts?.getVisibleRange() ?? null : null
         candleRef.current.setData(candleData)
         volumeRef.current.setData(volumeData)
-        const ts = chartRef.current?.timeScale()
         if (ts && candleData.length > 0) {
-          const lastBar = candleData.length - 1
-          const visibleBars = 150
-          ts.setVisibleLogicalRange({ from: lastBar - visibleBars, to: lastBar + 5 })
+          if (prevRange) {
+            // Re-load of the same chart: keep the user where they were.
+            ts.setVisibleRange(prevRange)
+          } else {
+            const lastBar = candleData.length - 1
+            const visibleBars = 150
+            ts.setVisibleLogicalRange({ from: lastBar - visibleBars, to: lastBar + 5 })
+          }
         }
       } catch {}
+      lastPaintedKeyRef.current = key
       // Bump dataVersion so the drawing primitive re-syncs (logical indexes
       // shift when the underlying candle set is replaced, e.g. TF switch).
       setDataVersion(v => v + 1)
-      if (lifecycleRef && validCandles.length > 0) {
-        lifecycleRef.current?.applyHistory(validCandles)
+      if (lifecycleRef) {
+        // Reconcile (scalpboard/cryptoscreener pattern): history is applied
+        // first, then buffered realtime events that arrived DURING the fetch
+        // are replayed on top — live updates are never lost or double-painted.
+        if (validCandles.length > 0) {
+          lifecycleRef.current?.applyHistory(validCandles)
+        }
+        const flushPatch = lifecycleRef.current?.setBuffered(false)
+        if (flushPatch && flushPatch.candleUpdates.length > 0) {
+          applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
+        }
       }
     }
 
     const run = async () => {
+      // Begin reconciliation: buffer realtime kline/trade events while the
+      // history loads so they aren't painted onto a partial array and then
+      // wiped by setData below (the flicker when loading history). renderCandles
+      // ends the buffering and replays the events on the loaded history.
+      lifecycleRef.current?.setBuffered(true)
       // Fast path: check client cache
       const cached = candleCache.getCandles(exchange, symbol, tf)
       if (cached && cached.length > 0) {
@@ -326,6 +357,9 @@ function useFullHistory(
           setStatus('empty')
         }
       } catch {
+        // Fetch failed — release reconciliation (the chart is empty/errored
+        // here; buffered events are discarded and the next load resyncs).
+        lifecycleRef.current?.setBuffered(false)
         setIsInitialLoading(false)
         setStatus('error')
       }
@@ -433,10 +467,18 @@ function useLazyScroll(
       inflightRef.current = true
       setIsLoadingMore?.(true)
 
+      // Reconcile: buffer realtime kline/trade events for the WHOLE fetch
+      // window (not just the paint). paint() ends the buffering and replays
+      // them on the merged history; the empty/catch paths below release it
+      // too, so live updates can never stay stuck in the buffer.
+      lifecycleRef?.current?.setBuffered(true)
+
       const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
       if (!cached || cached.length === 0) {
         inflightRef.current = false
         setIsLoadingMore?.(false)
+        // Nothing to paint — drop the buffer (next live event self-heals).
+        lifecycleRef?.current?.setBuffered(false)
         return
       }
 
@@ -518,6 +560,12 @@ function useLazyScroll(
             }
             inflightRef.current = false
             setIsLoadingMore?.(false)
+            // End reconciliation: replay any live events buffered during the
+            // fetch onto the current chart.
+            const flush = lifecycleRef?.current?.setBuffered(false)
+            if (flush && flush.candleUpdates.length > 0) {
+              applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef)
+            }
             return
           }
 
@@ -545,6 +593,11 @@ function useLazyScroll(
           }
           inflightRef.current = false
           setIsLoadingMore?.(false)
+          // End reconciliation: replay buffered live events onto the chart.
+          const flush = lifecycleRef?.current?.setBuffered(false)
+          if (flush && flush.candleUpdates.length > 0) {
+            applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef)
+          }
         })
     }
 

@@ -145,6 +145,59 @@ describe('candle-lifecycle', () => {
       const lastCandle = flushPatch.candleUpdates[flushPatch.candleUpdates.length - 1]
       expect(lastCandle.close).toBe(108)
     })
+
+    it('does not double-count trade volume across buffered trades', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      lc.setBuffered(true)
+      lc.applyTrade(makeTrade(310, 108, 2))
+      lc.applyTrade(makeTrade(320, 109, 3))
+      lc.applyTrade(makeTrade(340, 107, 5))
+
+      const flush = lc.setBuffered(false)
+      const last = flush.candleUpdates[flush.candleUpdates.length - 1]
+      expect(last.time).toBe(300)
+      expect(last.close).toBe(107)
+      expect(last.volume).toBe(60) // 50 + 2 + 3 + 5 — no double counting
+      expect(last.high).toBe(110)
+      expect(last.low).toBe(95)
+    })
+
+    it('replays buffered events on top of freshly loaded history (reconciliation)', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      lc.setBuffered(true)
+      lc.applyTrade(makeTrade(310, 106, 2)) // period 300 — superseded by finalized history
+      lc.applyTrade(makeTrade(370, 109, 4)) // period 360 — new forming period
+
+      // History lands during the fetch: 300 finalized, 360 forming.
+      lc.applyHistory([
+        makeCandle(300, 100, 110, 95, 105, 50, { isFinal: true }),
+        makeCandle(360, 107, 109, 106, 108, 40),
+      ])
+
+      const flush = lc.setBuffered(false)
+      const last = flush.candleUpdates[flush.candleUpdates.length - 1]
+      expect(last.time).toBe(360)
+      expect(last.close).toBe(109)
+      expect(last.volume).toBe(44)
+      expect(last.high).toBe(109)
+      expect(last.low).toBe(106)
+    })
+
+    it('setBuffered(true) twice keeps accumulated events (idempotent begin)', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      lc.setBuffered(true)
+      lc.applyTrade(makeTrade(320, 108, 2))
+      lc.setBuffered(true) // paint() re-enters — must NOT drop the buffered trade
+      const flush = lc.setBuffered(false)
+      expect(flush.candleUpdates.length).toBeGreaterThan(0)
+      expect(flush.candleUpdates[flush.candleUpdates.length - 1].close).toBe(108)
+    })
   })
 
   describe('exchange change via destroy + create', () => {
