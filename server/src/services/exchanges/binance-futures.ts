@@ -29,6 +29,9 @@ const STABLECOIN_BASES = new Set([
 
 const TICKER_WS_URL = 'wss://fstream.binance.com/ws/!miniTicker@arr'
 const TICKER_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/24hr'
+const TICKER_PRICE_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/price'
+const TICKER_PRICE_POLL_INTERVAL = 1_000
+const TICKER_STATS_POLL_INTERVAL = 60_000
 const TICKER_WS_PING_INTERVAL = 20_000
 const TICKER_WS_RECONNECT_BASE = 1000
 const TICKER_WS_RECONNECT_MAX = 60_000
@@ -45,8 +48,10 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private tickerWsIntentionalClose = false
   private tickerWsSilenceTimer: ReturnType<typeof setTimeout> | null = null
   private tickerWsReceivedData = false
-  private pollTimer: ReturnType<typeof setInterval> | null = null
+  private statsTimer: ReturnType<typeof setInterval> | null = null
+  private priceTimer: ReturnType<typeof setInterval> | null = null
   private usingRestFallback = false
+  private lastFullTickers = new Map<string, UnifiedTicker>()
   private candleSubs = new Map<string, CandleCallback>()
   private depthSubs = new Map<string, DepthCallback>()
   private tickerCbs: TickerCallback[] = []
@@ -183,7 +188,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       this.tickerWsReconnectDelay = TICKER_WS_RECONNECT_BASE
       if (this.usingRestFallback) {
         this.usingRestFallback = false
-        if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null }
+        if (this.statsTimer) { clearInterval(this.statsTimer); this.statsTimer = null }
+        if (this.priceTimer) { clearInterval(this.priceTimer); this.priceTimer = null }
         console.log(`[${this.name}] Switched from REST fallback back to WS`)
       }
       this.tickerWsPingTimer = setInterval(() => {
@@ -241,8 +247,10 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private startRestFallback() {
     if (this.usingRestFallback) return
     this.usingRestFallback = true
-    this.pollTickers()
-    this.pollTimer = setInterval(() => this.pollTickers(), 3000)
+    this.pollTickerStats()
+    this.pollTickerPrices()
+    this.statsTimer = setInterval(() => this.pollTickerStats(), TICKER_STATS_POLL_INTERVAL)
+    this.priceTimer = setInterval(() => this.pollTickerPrices(), TICKER_PRICE_POLL_INTERVAL)
   }
 
   private processTickerArray(arr: any[]) {
@@ -251,11 +259,14 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       if (!symbol?.endsWith('USDT')) continue
       if (this.exchangeInfoLoaded && !this.cryptoSymbols.has(symbol)) continue
       const ticker = this.parseTicker(t)
+      // Remember the last full ticker so the fast REST price poll can merge
+      // its fresh price into the last-known 24h stats without another heavy call.
+      this.lastFullTickers.set(ticker.symbol, ticker)
       for (const cb of this.tickerCbs) cb(ticker)
     }
   }
 
-  private async pollTickers() {
+  private async pollTickerStats() {
     if (this.rateLimiter.isThrottled()) return
     if (this.rateLimiter.isOverThreshold()) {
       console.warn(`[${this.name}] Skipping ticker poll — weight at ${this.rateLimiter.getWeight()}/${this.rateLimiter.getLimit()}`)
@@ -277,7 +288,60 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       this.processTickerArray(arr)
     } catch (e) {
       this.rateLimiter.recordError()
-      console.error(`[${this.name}] Ticker poll error:`, e instanceof Error ? e.message : e)
+      console.error(`[${this.name}] Ticker stats poll error:`, e instanceof Error ? e.message : e)
+    }
+  }
+
+  /**
+   * Fast fallback price source: /fapi/v1/ticker/price costs ~2 weight per
+   * request (vs 40 for ticker/24hr), so we can poll every second and merge the
+   * fresh price into the last-known full ticker. Keeps futures prices ~1s fresh
+   * even when the WebSocket (or the SOCKS5 proxy it needs) is down.
+   */
+  private async pollTickerPrices() {
+    if (this.rateLimiter.isThrottled()) return
+    if (this.rateLimiter.isOverThreshold()) return
+    try {
+      const res = await fetchWithTimeout(TICKER_PRICE_REST_URL, 10000, this.fetchDispatcher)
+      this.rateLimiter.updateFromHeaders(res.headers)
+      if (res.status === 429) { this.rateLimiter.handle429(res.headers); return }
+      if (res.status === 418) { this.rateLimiter.handle418(res.headers); return }
+      if (!res.ok) { this.rateLimiter.recordError(); return }
+      const arr = await res.json()
+      if (!Array.isArray(arr)) {
+        console.warn(`[${this.name}] Ticker price REST response not an array`)
+        this.rateLimiter.recordError()
+        return
+      }
+      this.rateLimiter.recordSuccess()
+      const now = Date.now()
+      let changed = 0
+      for (const p of arr) {
+        const symbol = p?.symbol
+        if (!symbol?.endsWith('USDT')) continue
+        if (this.exchangeInfoLoaded && !this.cryptoSymbols.has(symbol)) continue
+        const price = parseFloat(p.price)
+        if (!isFinite(price) || price <= 0) continue
+        const prev = this.lastFullTickers.get(symbol)
+        // No stored stats yet — the stats poll or the WS will populate them.
+        if (!prev) continue
+        if (prev.price === price) continue
+        const ticker: UnifiedTicker = {
+          ...prev,
+          price,
+          change24h: prev.openPrice24h > 0 ? ((price - prev.openPrice24h) / prev.openPrice24h) * 100 : prev.change24h,
+          timestamp: now,
+        }
+        this.lastFullTickers.set(symbol, ticker)
+        changed++
+        for (const cb of this.tickerCbs) cb(ticker)
+      }
+      if (changed > 0) {
+        console.log(`[${this.name}] Fast price poll: ${changed} symbols updated`)
+      }
+    } catch (e) {
+      this.rateLimiter.recordError()
+      console.error(`[${this.name}] Ticker price poll error:`, e instanceof Error ? e.message : e)
     }
   }
 
@@ -313,7 +377,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     if (this.tickerWsSilenceTimer) clearTimeout(this.tickerWsSilenceTimer)
     this.candlePool.close()
     this.depthPool.close()
-    if (this.pollTimer) clearInterval(this.pollTimer)
+    if (this.statsTimer) clearInterval(this.statsTimer)
+    if (this.priceTimer) clearInterval(this.priceTimer)
     this.stopCandleSilenceChecker()
     this.stopCandleFallback()
   }

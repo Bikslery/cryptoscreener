@@ -28,11 +28,31 @@ function createStream(): AggTradeStream {
   }
 }
 
-const spotStream = createStream()
-const futuresStream = createStream()
+// Binance combined-stream URLs are capped at 8192 chars (~500 streams) while
+// spot alone has ~700 USDT pairs, so split subscriptions across several WS
+// connections. Each chunk stays well under the per-connection limits.
+const CHUNK_SIZE = 250
 
-function getStream(exchange: Exchange): AggTradeStream {
-  return exchange === 'binance-futures' ? futuresStream : spotStream
+const spotChunks: AggTradeStream[] = []
+const futuresChunks: AggTradeStream[] = []
+const symbolToChunk = new Map<string, AggTradeStream>()
+
+function getChunks(exchange: Exchange): AggTradeStream[] {
+  return exchange === 'binance-futures' ? futuresChunks : spotChunks
+}
+
+function getChunkForSymbol(exchange: Exchange, symbol: string): AggTradeStream {
+  const key = `${exchange}:${symbol}`
+  const existing = symbolToChunk.get(key)
+  if (existing) return existing
+  const chunks = getChunks(exchange)
+  let chunk = chunks.find(c => c.activeSymbols.size < CHUNK_SIZE)
+  if (!chunk) {
+    chunk = createStream()
+    chunks.push(chunk)
+  }
+  symbolToChunk.set(key, chunk)
+  return chunk
 }
 
 function getWsBase(exchange: Exchange): string {
@@ -157,7 +177,7 @@ function scheduleReconnectDebounced(stream: AggTradeStream, exchange: Exchange) 
 }
 
 export function subscribeAggTrade(symbol: string, exchange: Exchange = 'binance-spot') {
-  const stream = getStream(exchange)
+  const stream = getChunkForSymbol(exchange, symbol)
   const isNew = !stream.activeSymbols.has(symbol)
   const wasEmpty = stream.activeSymbols.size === 0
   stream.activeSymbols.add(symbol)
@@ -169,7 +189,7 @@ export function subscribeAggTrade(symbol: string, exchange: Exchange = 'binance-
 }
 
 export function unsubscribeAggTrade(symbol: string, exchange: Exchange = 'binance-spot') {
-  const stream = getStream(exchange)
+  const stream = getChunkForSymbol(exchange, symbol)
   stream.activeSymbols.delete(symbol)
   if (stream.activeSymbols.size === 0) {
     if (stream.ws) {

@@ -96,7 +96,7 @@ function pickBestFromMap(): Map<string, UnifiedTicker> {
   return best
 }
 
-const BROADCAST_INTERVAL = 200
+const BROADCAST_INTERVAL = 100
 let lastBroadcast = 0
 let loggedFirst = false
 let tickerCount = 0
@@ -183,7 +183,13 @@ export function startAggregator() {
         if (!loggedFirst) {
           loggedFirst = true
           console.log(`[Aggregator] First broadcast: ${arr.length} exchange tickers / ${bestArr.length} best coins (received ${tickerCount} ticks), top: ${bestArr.slice(0, 3).map(t => t.symbol).join(', ')}`)
-          subscribeTopAggTrades(bestArr)
+        }
+        // Re-evaluate aggTrade coverage periodically — the very first broadcast
+        // can fire with an almost-empty ticker map, so wait until it has
+        // populated before subscribing (and keep refreshing as rankings shift).
+        if (bestArr.length >= AGGTRADE_MIN_SYMBOLS && now - lastAggTradeResubscribe > AGGTRADE_RESUBSCRIBE_INTERVAL) {
+          lastAggTradeResubscribe = now
+          syncAggTradeSubscriptions()
         }
       }
     })
@@ -220,16 +226,20 @@ export function startAggregator() {
   computeMetrics()
 }
 
-const AGGTRADE_TOP_COUNT = 50
+const AGGTRADE_MIN_SYMBOLS = 30
+const AGGTRADE_RESUBSCRIBE_INTERVAL = 60_000
 const subscribedAggTradeSymbols = new Set<string>()
+let lastAggTradeResubscribe = 0
 
-function subscribeTopAggTrades(tickers: UnifiedTicker[]) {
-  const top = tickers
-    .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
-    .slice(0, AGGTRADE_TOP_COUNT)
-
+// Subscribe EVERY symbol on EVERY exchange to its aggTrade stream, so all
+// prices (coin list, top bar, charts) update instantly per trade — not just
+// the top-N by volume. aggTrade.ts chunks the streams across multiple WS
+// connections to stay under Binance's URL limit. New listings are picked up
+// by the periodic re-sync below.
+function syncAggTradeSubscriptions() {
+  const all = getAllTickers()
   const newSymbols = new Set<string>()
-  for (const t of top) {
+  for (const t of all) {
     newSymbols.add(`${t.symbol}:${t.exchange}`)
     if (!subscribedAggTradeSymbols.has(`${t.symbol}:${t.exchange}`)) {
       subscribeAggTrade(t.symbol, t.exchange)
@@ -245,7 +255,7 @@ function subscribeTopAggTrades(tickers: UnifiedTicker[]) {
 
   subscribedAggTradeSymbols.clear()
   for (const s of newSymbols) subscribedAggTradeSymbols.add(s)
-  console.log(`[Aggregator] Subscribed aggTrade for top ${top.length} tickers`)
+  console.log(`[Aggregator] Subscribed aggTrade for ${newSymbols.size} symbols`)
 }
 
 async function computeMetrics() {
