@@ -269,7 +269,13 @@ function useFullHistory(
     setStatus('loading')
 
     const renderCandles = (candles: UnifiedCandle[]) => {
-      if (destroyedRef.current || !candleRef.current || !volumeRef.current) return
+      if (destroyedRef.current || !candleRef.current || !volumeRef.current) {
+        // Nothing was painted — release reconciliation so realtime events that
+        // arrived during the fetch don't stay stuck in the buffer forever
+        // (which would freeze the forming candle).
+        lifecycleRef?.current?.setBuffered(false)
+        return
+      }
       const prevData = candlesDataRef.current
       candlesDataRef.current = candles
       // Filter out invalid candles before rendering
@@ -342,7 +348,12 @@ function useFullHistory(
       // Fallback: individual fetch (server does seamless stitching)
       try {
         const fetched = await getOrFetchHistory(symbol, tf, limit, exchange)
-        if (cancelled.value || destroyedRef.current) return
+        if (cancelled.value || destroyedRef.current) {
+          // This run lost the race to a newer (symbol/exchange/tf) effect;
+          // release reconciliation so live events are never stranded.
+          lifecycleRef?.current?.setBuffered(false)
+          return
+        }
         if (fetched.length > 0) {
           renderCandles(fetched)
           setIsInitialLoading(false)
@@ -353,6 +364,10 @@ function useFullHistory(
             console.log('[useFullHistory] Initial load from server', { symbol, tf, candles: fetched.length })
           }
         } else {
+          // Empty history (server had nothing, or the fetch failed and
+          // getOrFetchHistory swallowed it): release the buffer so the forming
+          // candle can still be painted from live kline/trade events.
+          lifecycleRef?.current?.setBuffered(false)
           setIsInitialLoading(false)
           setStatus('empty')
         }

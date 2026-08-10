@@ -446,13 +446,34 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     if (this.candleFallbackTimer) { clearInterval(this.candleFallbackTimer); this.candleFallbackTimer = null }
   }
 
+  /**
+   * Max streams polled per fallback tick. The fallback covers every subscribed
+   * stream (preload warms ~100 symbols across several timeframes), and polling
+   * ALL of them in parallel every 1.5s would burn ~77 req/s ≈ 9k+ weight/min
+   * against the 2400/min limit — instant 429s and the throttle/deadlock cycle.
+   * A bounded round-robin keeps every stream fresh (just on a longer cycle)
+   * while staying well inside the weight budget.
+   */
+  private static readonly MAX_FALLBACK_PER_TICK = 20
+  private fallbackCursor = 0
+
   private async pollCandleFallback() {
     if (this.rateLimiter.isThrottled()) return
     if (this.rateLimiter.isOverThreshold()) return
     const entries = Array.from(this.candleSubInfo.entries())
     if (entries.length === 0) return
+
+    // Round-robin window: take the next MAX_FALLBACK_PER_TICK streams.
+    const window: [string, { symbol: string; tf: string }][] = []
+    const n = entries.length
+    for (let i = 0; i < BinanceFuturesAdapter.MAX_FALLBACK_PER_TICK && window.length < n; i++) {
+      const entry = entries[this.fallbackCursor % n]
+      window.push(entry)
+      this.fallbackCursor++
+    }
+
     const nowSec = Date.now() / 1000
-    const results = await Promise.allSettled(entries.map(async ([stream, { symbol, tf }]) => {
+    const results = await Promise.allSettled(window.map(async ([stream, { symbol, tf }]) => {
       const tfSec = TF_SECONDS[tf] || 60
       try {
         const candles = await this.fetchCandles(symbol, tf, 2)
@@ -469,7 +490,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     }))
     const failed = results.filter(r => r.status === 'rejected').length
     if (failed > 0) {
-      console.warn(`[${this.name}] Candle REST-poll: ${failed}/${entries.length} failed`)
+      console.warn(`[${this.name}] Candle REST-poll: ${failed}/${window.length} failed`)
     }
   }
 

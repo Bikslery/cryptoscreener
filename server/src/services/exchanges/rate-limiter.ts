@@ -46,6 +46,8 @@ export class BinanceRateLimiter {
   private lastWarning = 0
   private consecutiveErrors = 0
   private circuitBrokenUntil = 0
+  /** When the weight was last refreshed by an actual response header. */
+  private lastWeightUpdatedAt = Date.now()
 
   constructor(market: 'spot' | 'futures') {
     this.market = market
@@ -61,6 +63,7 @@ export class BinanceRateLimiter {
         const weight = parseInt(val, 10)
         if (!isNaN(weight)) {
           this.currentWeight = weight
+          this.lastWeightUpdatedAt = Date.now()
           break
         }
       }
@@ -84,6 +87,7 @@ export class BinanceRateLimiter {
     }
     this.throttledUntil = Date.now() + waitMs
     this.currentWeight = 0
+    this.lastWeightUpdatedAt = Date.now()
     rateLimit429Counter.inc({ market: this.market })
     console.error(`[RateLimit:${this.market}] 429 hit! Throttling for ${waitMs / 1000}s`)
   }
@@ -97,11 +101,22 @@ export class BinanceRateLimiter {
     }
     this.throttledUntil = Date.now() + waitMs
     this.currentWeight = 0
+    this.lastWeightUpdatedAt = Date.now()
     rateLimit418Counter.inc({ market: this.market })
     console.error(`[RateLimit:${this.market}] 418 IP ban! Throttling for ${waitMs / 1000}s`)
   }
 
   isOverThreshold(): boolean {
+    // Weight windows expire after 60s. When every poller skips because we're
+    // over the threshold, no request refreshes the weight and the limiter is
+    // stuck over-threshold forever (a self-sustaining deadlock after any burst
+    // — preload, metrics, candle fallback). If no response refreshed the
+    // weight within a full window, assume it decayed and let the pollers
+    // retry; a fresh response header will re-raise it if Binance still reports
+    // heavy usage.
+    if (Date.now() - this.lastWeightUpdatedAt > 60_000) {
+      this.currentWeight = 0
+    }
     return this.currentWeight >= this.limit * WEIGHT_THRESHOLD_RATIO
   }
 

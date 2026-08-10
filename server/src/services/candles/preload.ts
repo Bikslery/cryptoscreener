@@ -127,26 +127,13 @@ async function phase1(
   }
 }
 
-function setupWsSubscriptions(
-  topSymbols: string[],
-  candleManager: { subscribeCandle: (exchange: string, symbol: string, tf: string) => void }
-): void {
-  for (const symbol of topSymbols) {
-    // Use the same exchange the client will use (ticker's exchange) so the
-    // subscription key matches and the ref-count is shared, not duplicated.
-    const exchange = getTicker(symbol)?.exchange
-    if (!exchange) continue
-    for (const tf of WS_TFS) {
-      try {
-        candleManager.subscribeCandle(exchange, symbol, tf)
-        preloadStats.wsSubscriptions++
-      } catch (err) {
-        console.warn(`[Preload] WS subscribe failed for ${exchange}:${symbol}:${tf}`, err)
-      }
-    }
-  }
-  console.log(`[Preload] WS subscriptions set up for ${topSymbols.length} symbols on ${WS_TFS.join('/')}`)
-}
+// NOTE: preload deliberately does NOT subscribe candle WS streams. Each
+// subscription starts the exchange's REST candle fallback (the futures WS is
+// geo-blocked here), and with ~400 preloaded streams polling every 1.5s that
+// burns ~9k weight/min against the 2400/min budget — instant 429s and the
+// rate-limiter deadlock that froze realtime candles. The candle cache is kept
+// warm by phase1 + periodicRefresh (REST), and clients subscribe the streams
+// they actually view, so the fallback only covers on-screen demand.
 
 let periodicRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -194,7 +181,7 @@ function periodicRefresh(
 
 export async function startPreload(
   adapters: ExchangeAdapter[],
-  candleManager: { subscribeCandle: (exchange: string, symbol: string, tf: string) => void }
+  _candleManager?: { subscribeCandle: (exchange: string, symbol: string, tf: string) => void }
 ): Promise<void> {
   preloadStats.startTime = Date.now()
   console.log('[Preload] Starting...')
@@ -208,7 +195,6 @@ export async function startPreload(
   }
 
   await phase1(topSymbols, adapters)
-  setupWsSubscriptions(topSymbols, candleManager)
   periodicRefresh(topSymbols, adapters)
 
   preloaded = true
@@ -228,7 +214,10 @@ export function getPreloadStats() {
     preloaded,
     configured: {
       preload: PRELOAD_MATRIX,
-      ws: [...WS_TFS],
+      // Preload deliberately does not subscribe candle WS streams (see note
+      // above) — clients subscribe what they view, so the REST fallback stays
+      // demand-driven and within the Binance weight budget.
+      ws: [] as string[],
       refresh: [...REFRESH_TFS],
       topSymbols: TOP_SYMBOLS_COUNT,
       periodicRefreshIntervalMs: PERIODIC_REFRESH_INTERVAL,
