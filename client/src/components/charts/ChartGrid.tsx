@@ -323,7 +323,7 @@ function useFullHistory(
       // history loads so they aren't painted onto a partial array and then
       // wiped by setData below (the flicker when loading history). renderCandles
       // ends the buffering and replays the events on the loaded history.
-      lifecycleRef.current?.setBuffered(true)
+      lifecycleRef?.current?.setBuffered(true)
       // Fast path: check client cache
       const cached = candleCache.getCandles(exchange, symbol, tf)
       if (cached && cached.length > 0) {
@@ -359,7 +359,7 @@ function useFullHistory(
       } catch {
         // Fetch failed — release reconciliation (the chart is empty/errored
         // here; buffered events are discarded and the next load resyncs).
-        lifecycleRef.current?.setBuffered(false)
+        lifecycleRef?.current?.setBuffered(false)
         setIsInitialLoading(false)
         setStatus('error')
       }
