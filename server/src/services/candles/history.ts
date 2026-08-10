@@ -155,18 +155,20 @@ async function fetchChunkSeamless(
 
   const acquired = await acquireBudget(market, 5, ipIndex)
   if (!acquired) {
+    // Transient failure, NOT end-of-history. Throw so the API layer answers
+    // with an error (client retries) instead of 200 [] — an empty page is
+    // indistinguishable from "history ended" and permanently stops lazy load.
     console.warn(`[History] Rate budget exhausted for IP ${ipIndex}, skipping chunk`)
-    return []
+    throw new Error(`[History] Rate budget exhausted for IP ${ipIndex}`)
   }
 
   addWeightToIp(ipIndex, 5)
 
-  try {
-    const candles = await fetchCandlesSeamless(symbol, tf, CHUNK_SIZE, exchange, chunkStartMs, chunkEndMs, { dispatcher })
-    return candles
-  } catch {
-    return []
-  }
+  // fetchCandlesSeamless swallows adapter errors internally; anything that
+  // escapes it is a genuine transient failure and must propagate (not
+  // masquerade as end-of-history).
+  const candles = await fetchCandlesSeamless(symbol, tf, CHUNK_SIZE, exchange, chunkStartMs, chunkEndMs, { dispatcher })
+  return candles
 }
 
 function isCurrentChunk(chunkStartMs: number, tf: string): boolean {
@@ -221,8 +223,8 @@ function getOrFetchChunk(
       // Timeout wrapper: if fetch takes > 30s, resolve with empty
       const result = await Promise.race([
         fetchAndCacheChunk(chunkKey, symbol, tf, chunkStartMs, exchange),
-        new Promise<UnifiedCandle[]>((resolve) =>
-          setTimeout(() => { console.warn(`[History] Chunk fetch timeout: ${chunkKey}`); resolve([]) }, 30000)
+        new Promise<UnifiedCandle[]>((_resolve, reject) =>
+          setTimeout(() => { console.warn(`[History] Chunk fetch timeout: ${chunkKey}`); reject(new Error(`[History] Chunk fetch timeout: ${chunkKey}`)) }, 30000)
         ),
       ])
       return result
@@ -289,13 +291,21 @@ export async function getHistory(
   }
 
   if (misses.length > 0) {
-    // Fetch missing chunks in parallel with seamless stitching
+    // Fetch missing chunks in parallel with seamless stitching. A chunk that
+    // fails transiently (budget exhausted, fetch timeout, circuit breaker)
+    // must NOT look like end-of-history: throw so the client gets a 5xx and
+    // retries later. Successfully fetched chunks stay cached (Redis/mem), so
+    // the retry is cheap.
     const fetchPromises = misses.map(m =>
       getOrFetchChunk(m.key, symbol, tf, m.csMs, resolvedExchange),
     )
-    const results = await Promise.all(fetchPromises)
-    for (const candles of results) {
-      allCandles.push(...candles)
+    const results = await Promise.allSettled(fetchPromises)
+    const failed = results.filter(r => r.status === 'rejected').length
+    if (failed > 0) {
+      throw new Error(`[History] ${failed}/${results.length} chunks failed transiently (${resolvedExchange} ${symbol} ${tf})`)
+    }
+    for (const r of results) {
+      if (r.status === 'fulfilled') allCandles.push(...r.value)
     }
   }
 

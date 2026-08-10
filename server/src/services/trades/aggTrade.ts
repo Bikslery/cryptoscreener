@@ -49,7 +49,7 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
   const streams = Array.from(stream.activeSymbols).map(s => `${s.toLowerCase()}@aggTrade`).join('/')
   const url = `${getWsBase(exchange)}/stream?streams=${streams}`
   const agent = getWsAgent()
-  const opts = agent ? { agent } : undefined
+  const opts = agent && exchange === 'binance-futures' ? { agent } : undefined
 
   const label = exchange === 'binance-futures' ? 'Futures' : ''
   console.log(`[AggTrade${label}] Connecting to ${stream.activeSymbols.size} symbols...`)

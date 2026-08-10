@@ -42,6 +42,7 @@ services:
       RESET_JWT_SECRET: ${RESET_JWT_SECRET:?RESET_JWT_SECRET must be set}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      BINANCE_PROXY: ${BINANCE_PROXY:-}
       PORT: 3001
       ROLE: all
       NODE_ENV: production

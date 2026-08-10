@@ -96,7 +96,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
           console.error('[Binance Futures] Candle parse error:', e)
         }
       },
-      this.wsAgent,
+      undefined,
       true
     )
 
@@ -111,7 +111,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
           }
         } catch {}
       },
-      this.wsAgent,
+      undefined,
       true  // supportsIncrementalSub
     )
   }

@@ -4,6 +4,7 @@ import cors from 'cors'
 import cookieParser from 'cookie-parser'
 import { WebSocketServer, WebSocket } from 'ws'
 import { createServer } from 'http'
+import type { Request, Response, NextFunction } from 'express'
 import { setupWsHub, setCandleManager, startRedisListener, stopWsHub, refreshMetrics } from './ws/hub.js'
 import { startAggregator, adapters } from './services/aggregator/index.js'
 import { startAlertEngine, stopAlertEngine } from './services/alerts/index.js'
@@ -23,6 +24,30 @@ import { authMiddleware } from './middleware/auth.js'
 
 const PORT = parseInt(process.env.PORT || '3001')
 const ROLE = process.env.ROLE || 'all'
+
+// Undici (Node's bundled HTTP client) can throw an uncaught ERR_ASSERTION
+// from its H1 parser when a remote exchange (Binance etc.) drops the
+// connection mid-response. The crash is `AssertionError [ERR_ASSERTION]:
+// false == true` in undici/lib/dispatcher/client-h1.js — a known undici
+// fragility with aborted keep-alive connections. It is not a bug in our
+// code and never affects a second request (a fresh connection is used), but
+// it kills the whole process. Catch only that exact class and let the
+// request's own timeout/retry machinery handle the failure; everything else
+// still crashes loudly.
+process.on('uncaughtException', (err) => {
+  const msg = err instanceof Error ? err.message : String(err)
+  const stack = err instanceof Error ? (err.stack ?? '') : ''
+  const isUndiciParserAssertion =
+    (err as NodeJS.ErrnoException).code === 'ERR_ASSERTION' &&
+    msg.includes('false == true') &&
+    stack.includes('undici')
+  if (isUndiciParserAssertion) {
+    console.warn('[process] Swallowed undici parser assertion (remote dropped connection):', msg)
+    return
+  }
+  console.error('[process] Uncaught exception:', err)
+  process.exit(1)
+})
 
 async function main() {
   try {
@@ -48,7 +73,7 @@ async function main() {
   app.use('/api/drawings', drawingRoutes)
   app.use('/api/debug', authMiddleware, debugRoutes)
 
-  app.get('/api/health', (_req, res) => res.json({ ok: true, role: ROLE }))
+  app.use('/api/health', (_req, res) => res.json({ ok: true, role: ROLE }))
 
   app.get('/metrics', authMiddleware, async (_req, res) => {
     try {
@@ -58,6 +83,11 @@ async function main() {
     } catch (err) {
       res.status(500).end(err instanceof Error ? err.message : 'metrics error')
     }
+  })
+
+  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    console.error('[Error]', err)
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Internal server error' })
   })
 
   const server = createServer(app)

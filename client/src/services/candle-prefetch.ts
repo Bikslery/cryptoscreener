@@ -6,6 +6,13 @@ import type { UnifiedCandle, Exchange } from '../types'
 const PREFETCH_LIMIT = 1000
 
 /**
+ * How long a per-symbol history request will wait for the in-flight bulk
+ * request before firing its own individual fetch. Keeps first paint fast
+ * even when one symbol in the grid bulk is slow.
+ */
+const BULK_WAIT_MS = 350
+
+/**
  * Single source of truth for how many candles the chart grid loads.
  * Used by both the bulk prefetch and the per-chart fallback so the two
  * paths never disagree (previously bulk=300 vs individual=500).
@@ -185,11 +192,17 @@ export function getOrFetchHistory(
 
   const promise = (async (): Promise<UnifiedCandle[]> => {
     // A bulk request covering this symbol is already in flight — wait for it
-    // and read from cache instead of duplicating the request.
+    // (but no longer than BULK_WAIT_MS) and read from cache instead of
+    // duplicating the request. Waiting unboundedly meant a single slow symbol
+    // inside the 9-symbol grid bulk blocked every chart's initial paint
+    // (the bulk only resolves when ALL symbols are ready).
     const pendingBulk = symbolInflight.get(k)
     if (pendingBulk) {
-      await pendingBulk
-      if (exchange) {
+      const bulkDone = await Promise.race([
+        pendingBulk.then(() => true),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), BULK_WAIT_MS)),
+      ])
+      if (bulkDone && exchange) {
         const cached = candleCache.getCandles(exchange, symbol, tf)
         if (cached && cached.length > 0) return cached.slice(-limit)
       }

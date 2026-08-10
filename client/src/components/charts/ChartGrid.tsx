@@ -250,10 +250,11 @@ function useFullHistory(
   options?: { limit?: number },
   lastUpdateRef?: React.RefObject<number>,
   lifecycleRef?: React.RefObject<CandleLifecycle | null>,
-): { isInitialLoading: boolean; status: 'loading' | 'ready' | 'empty' | 'error' } {
+): { isInitialLoading: boolean; status: 'loading' | 'ready' | 'empty' | 'error'; dataVersion: number } {
   const limit = options?.limit ?? 1000
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading')
+  const [dataVersion, setDataVersion] = useState(0)
 
   useEffect(() => {
     if (!exchange) return
@@ -283,6 +284,9 @@ function useFullHistory(
           ts.setVisibleLogicalRange({ from: lastBar - visibleBars, to: lastBar + 5 })
         }
       } catch {}
+      // Bump dataVersion so the drawing primitive re-syncs (logical indexes
+      // shift when the underlying candle set is replaced, e.g. TF switch).
+      setDataVersion(v => v + 1)
       if (lifecycleRef && validCandles.length > 0) {
         lifecycleRef.current?.applyHistory(validCandles)
       }
@@ -331,7 +335,7 @@ function useFullHistory(
     return () => { cancelled.value = true }
   }, [symbol, exchange, tf])
 
-  return { isInitialLoading, status }
+  return { isInitialLoading, status, dataVersion }
 }
 
 function useLazyScroll(
@@ -385,7 +389,8 @@ function useLazyScroll(
       // --- PREFETCH LAYER ---
       // When user is approaching the edge (within 1.5× visible range),
       // start prefetching into the cache BEFORE they actually need it.
-      // This is fire-and-forget — no chart redraw, just warming the cache.
+      // Fire-and-forget — warms the cache; the LOAD layer then paints from
+      // the cache without a network round-trip in the critical path.
       const prefetchThreshold = Math.max(200, visibleBars * 1.5)
       if (range.from < prefetchThreshold && !prefetchInflightRef.current) {
         const curSymbol = symbolRef.current
@@ -395,7 +400,14 @@ function useLazyScroll(
             const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
             if (cached && cached.length > 0) {
               prefetchInflightRef.current = true
-              getOrFetchOlder(curSymbol, curTf, cached[0].time, 1000, curExchange)
+              const before = cached[0].time
+              getOrFetchOlder(curSymbol, curTf, before, 1000, curExchange)
+                .then(older => {
+                  const fresh = older.filter(c => c.time < before)
+                  if (fresh.length > 0) {
+                    candleCache.prependCandles(curExchange, curSymbol, curTf, fresh)
+                  }
+                })
                 .catch(() => {})
                 .finally(() => { prefetchInflightRef.current = false })
             }
@@ -421,15 +433,6 @@ function useLazyScroll(
       inflightRef.current = true
       setIsLoadingMore?.(true)
 
-      // Clamp visible range during inflight — prevents scrolling into empty space
-      {
-        const ts = chartRef.current?.timeScale()
-        const curRange = ts?.getVisibleLogicalRange()
-        if (ts && curRange && curRange.from < 0) {
-          ts.setVisibleLogicalRange({ from: 0, to: curRange.to })
-        }
-      }
-
       const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
       if (!cached || cached.length === 0) {
         inflightRef.current = false
@@ -437,7 +440,66 @@ function useLazyScroll(
         return
       }
 
+      // Apply merged data to the chart, preserving the visible range by TIME
+      // (times are stable across a prepend; logical indexes shift).
+      const paint = (merged: UnifiedCandle[]) => {
+        const chart = chartRef.current
+        const ts = chart?.timeScale()
+        if (!chart || !ts || destroyedRef.current) return
+
+        const prevRange = ts.getVisibleRange()
+        const prevLen = candlesDataRef.current.length
+        candlesDataRef.current = merged
+        const added = merged.length - prevLen
+
+        if (added <= 0) return
+
+        adjustingRef.current = true
+        lifecycleRef?.current?.setBuffered(true)
+
+        try {
+          const normalized = merged.map(normalizeCandle)
+          const candleData = normalized.map(c => ({
+            time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+          }))
+          const volumeData = normalized.map(c => ({
+            time: c.time as Time, value: c.volume,
+            color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
+          }))
+          onLogicalShift?.(added)
+
+          candleRef.current?.setData(candleData)
+          volumeRef.current?.setData(volumeData)
+
+          lifecycleRef?.current?.applyHistory(merged)
+          const flushPatch = lifecycleRef?.current?.setBuffered(false)
+          if (flushPatch && flushPatch.candleUpdates.length > 0) {
+            applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
+          }
+
+          // Restore by time — unlike the old logical-range restore this never
+          // jumps: prepending bars shifts logical indexes, not wall-clock times.
+          if (prevRange) {
+            ts.setVisibleRange(prevRange)
+          }
+        } catch (err) {
+          console.error('[ChartGrid] setData failed during lazy scroll', { symbol, tf, error: err })
+        } finally {
+          adjustingRef.current = false
+        }
+      }
+
       const before = cached[0].time
+
+      // Fast path: the prefetch layer already filled the cache past the current
+      // left edge — paint from cache with no network round-trip at all.
+      const paintedFirst = candlesDataRef.current[0]?.time
+      if (paintedFirst != null && cached[0].time < paintedFirst && cached.length > candlesDataRef.current.length) {
+        paint(cached)
+        inflightRef.current = false
+        setIsLoadingMore?.(false)
+        return
+      }
 
       getOrFetchOlder(curSymbol, curTf, before, 1000, curExchange)
         .then(older => {
@@ -470,65 +532,7 @@ function useLazyScroll(
             return
           }
 
-          const chart = chartRef.current
-          const ts = chart?.timeScale()
-          if (!chart || !ts) {
-            inflightRef.current = false
-            setIsLoadingMore?.(false)
-            return
-          }
-
-          const prevRange = ts.getVisibleLogicalRange()
-          const prevLen = candlesDataRef.current.length
-          candlesDataRef.current = merged
-          const added = merged.length - prevLen
-
-          if (added <= 0) {
-            inflightRef.current = false
-            setIsLoadingMore?.(false)
-            return
-          }
-
-          adjustingRef.current = true
-          lifecycleRef?.current?.setBuffered(true)
-
-          const barSpacing = (ts.options() as any).barSpacing
-
-          try {
-            const normalized = merged.map(normalizeCandle)
-            const candleData = normalized.map(c => ({
-              time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
-            }))
-            const volumeData = normalized.map(c => ({
-              time: c.time as Time, value: c.volume,
-              color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-            }))
-            onLogicalShift?.(added)
-
-            candleRef.current?.setData(candleData)
-            volumeRef.current?.setData(volumeData)
-
-            lifecycleRef?.current?.applyHistory(merged)
-            const flushPatch = lifecycleRef?.current?.setBuffered(false)
-            if (flushPatch && flushPatch.candleUpdates.length > 0) {
-              applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
-            }
-
-            if (barSpacing != null) {
-              ts.applyOptions({ barSpacing })
-            }
-
-            if (prevRange) {
-              ts.setVisibleLogicalRange({
-                from: prevRange.from + added,
-                to: prevRange.to + added,
-              })
-            }
-          } catch (err) {
-            console.error('[ChartGrid] setData failed during lazy scroll', { symbol, tf, error: err })
-          } finally {
-            adjustingRef.current = false
-          }
+          paint(merged)
           inflightRef.current = false
           setIsLoadingMore?.(false)
         })
@@ -911,7 +915,7 @@ const MiniChart = memo(function MiniChart({
     // chart destroy/recreate. This makes TF switching near-instant on warm cache.
   }, [symbol, pricePrecision])
 
-  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: GRID_CANDLE_LIMIT }, lastUpdateRef, lifecycleRef)
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: GRID_CANDLE_LIMIT }, lastUpdateRef, lifecycleRef)
 
   const adjustingRef = useRef(false)
 
@@ -931,7 +935,7 @@ const MiniChart = memo(function MiniChart({
     isDraggingRef,
     shiftLogicalOffset,
     CLICK_THRESHOLD,
-  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
+  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
 
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
@@ -1288,7 +1292,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef)
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef)
 
   const {
     activeTool,
@@ -1306,7 +1310,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     isDraggingRef,
     shiftLogicalOffset,
     CLICK_THRESHOLD,
-  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading)
+  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
 
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)

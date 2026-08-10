@@ -1,9 +1,11 @@
 import { useCoinListStore, useAuthStore, useUIStore } from '../../store'
 import type { Timeframe } from '../../types'
-import { LogIn, User, ChevronFirst, ChevronLeft, ChevronRight, RefreshCw, ArrowLeftRight } from 'lucide-react'
+import { LogIn, User, ChevronFirst, ChevronLeft, ChevronRight, RefreshCw, ArrowLeftRight, Layers } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { VolumeSlider } from './VolumeSlider'
 import './TopBar.css'
+
+const SCANNER_URL = (import.meta.env.VITE_SCANNER_URL as string | undefined) ?? 'http://localhost:5174'
 
 const TF_OPTIONS: { value: Timeframe; label: string }[] = [
   { value: '1m', label: '1М' },
@@ -108,8 +110,17 @@ export function TopBar() {
         <VolumeSlider />
       </div>
 
-      {/* Право: сменить биржу + авторизация */}
+      {/* Право: уровни-сканер + сменить биржу + авторизация */}
       <div className="flex items-center gap-[2px] shrink-0">
+        <button
+          className="clinic-btn clinic-btn-ghost clinic-btn-sm flex items-center gap-1.5 text-[11px]"
+          title="Открыть CryptoScanner: уровни, лои/хаи, близость к пробою"
+          onClick={() => window.open(SCANNER_URL, '_blank', 'noopener,noreferrer')}
+        >
+          <Layers size={13} />
+          <span>Уровни</span>
+        </button>
+
         <button
           className="clinic-btn clinic-btn-ghost clinic-btn-sm flex items-center gap-1.5 text-[11px]"
           onClick={() => setShowExchangeModal(true)}

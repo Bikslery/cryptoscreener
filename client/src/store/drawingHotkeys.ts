@@ -7,12 +7,18 @@ export const DEFAULT_DRAWING_HOTKEYS: Record<DrawingTool, string> = {
   'h-ray': 'shift+d',
   't-ray': 'shift+s',
   segment: 'shift+a',
+  rect: 'shift+r',
+  fib: 'shift+f',
+  circle: 'shift+c',
 }
 
 export const DRAWING_TOOL_LABELS: Record<DrawingTool, string> = {
   'h-ray': 'Горизонтальный луч',
   't-ray': 'Трендовый луч',
   segment: 'Отрезок',
+  rect: 'Прямоугольник',
+  fib: 'Фибоначчи',
+  circle: 'Окружность',
 }
 
 interface DrawingHotkeysState {

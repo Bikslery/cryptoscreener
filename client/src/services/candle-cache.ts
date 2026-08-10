@@ -1,7 +1,7 @@
 import type { UnifiedCandle, Exchange } from '../types'
 import { validateCandle, normalizeCandle } from './candle-utils'
 
-const MAX_CANDLES_PER_KEY = 5000
+const MAX_CANDLES_PER_KEY = 10000
 const MAX_TOTAL_CANDLES = 300_000
 
 const cache = new Map<string, UnifiedCandle[]>()

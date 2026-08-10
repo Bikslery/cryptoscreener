@@ -12,7 +12,7 @@ import type {
   Time,
   Logical,
 } from 'lightweight-charts'
-import type { Drawing, HRayDrawing, TRayDrawing, SegmentDrawing, UnifiedCandle } from '../../../types'
+import type { Drawing, HRayDrawing, TRayDrawing, SegmentDrawing, RectDrawing, FibDrawing, CircleDrawing, UnifiedCandle } from '../../../types'
 
 interface CanvasTarget {
   useMediaCoordinateSpace(cb: (scope: { context: CanvasRenderingContext2D }) => void): void
@@ -46,7 +46,38 @@ interface SegmentItem {
   y2: number
 }
 
+interface RectItem {
+  type: 'rect'
+  id: string
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
+interface FibItem {
+  type: 'fib'
+  id: string
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  price1: number
+  price2: number
+}
+
+interface CircleItem {
+  type: 'circle'
+  id: string
+  cx: number
+  cy: number
+  r: number
+  x2: number
+  y2: number
+}
+
 interface PreviewItem {
+  type: 'line' | 'rect' | 'fib' | 'circle'
   x1: number
   y1: number
   x2: number
@@ -58,7 +89,7 @@ interface PendingItem {
   y: number
 }
 
-type DrawItem = HRayItem | TRayItem | SegmentItem
+type DrawItem = HRayItem | TRayItem | SegmentItem | RectItem | FibItem | CircleItem
 
 export interface HitTestResult {
   id: string
@@ -69,6 +100,7 @@ export interface HitTestResult {
 const ENDPOINT_RADIUS = 5
 const HIT_DIST_LINE = 6
 const HIT_DIST_POINT = 8
+const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1]
 
 export function findBarByTime(
   candleData: ReadonlyArray<UnifiedCandle> | null | undefined,
@@ -262,6 +294,57 @@ class DrawingsRenderer implements IPrimitivePaneRenderer {
           this.drawEndpoint(context, item.x1, item.y1, strokeColor)
           this.drawEndpoint(context, item.x2, item.y2, strokeColor)
         }
+
+        if (item.type === 'rect') {
+          context.strokeStyle = strokeColor
+          context.lineWidth = lineWidth
+          context.strokeRect(
+            Math.min(item.x1, item.x2),
+            Math.min(item.y1, item.y2),
+            Math.abs(item.x2 - item.x1),
+            Math.abs(item.y2 - item.y1),
+          )
+
+          this.drawEndpoint(context, item.x1, item.y1, strokeColor)
+          this.drawEndpoint(context, item.x2, item.y2, strokeColor)
+        }
+
+        if (item.type === 'fib') {
+          context.strokeStyle = strokeColor
+          context.lineWidth = lineWidth
+
+          for (let i = 0; i < FIB_LEVELS.length; i++) {
+            const t = FIB_LEVELS[i]
+            const ly = item.y1 + (item.y2 - item.y1) * t
+            const price = item.price1 + (item.price2 - item.price1) * t
+            context.globalAlpha = i === 0 || i === FIB_LEVELS.length - 1 ? 1 : 0.55
+            context.beginPath()
+            context.moveTo(Math.min(item.x1, item.x2), ly)
+            context.lineTo(this._cw, ly)
+            context.stroke()
+
+            context.globalAlpha = 1
+            context.fillStyle = strokeColor
+            context.font = "9px 'JetBrains Mono', monospace"
+            context.textAlign = 'right'
+            context.fillText(price.toFixed(this._pricePrecision), this._cw - 6, ly - 3)
+            context.textAlign = 'start'
+          }
+
+          this.drawEndpoint(context, item.x1, item.y1, strokeColor)
+          this.drawEndpoint(context, item.x2, item.y2, strokeColor)
+        }
+
+        if (item.type === 'circle') {
+          context.strokeStyle = strokeColor
+          context.lineWidth = lineWidth
+          context.beginPath()
+          context.arc(item.cx, item.cy, item.r, 0, Math.PI * 2)
+          context.stroke()
+
+          this.drawEndpoint(context, item.cx, item.cy, strokeColor)
+          this.drawEndpoint(context, item.x2, item.y2, strokeColor)
+        }
       }
 
       context.strokeStyle = '#ffffff'
@@ -275,10 +358,31 @@ class DrawingsRenderer implements IPrimitivePaneRenderer {
           context.setLineDash([4, 3])
         }
         context.strokeStyle = 'rgba(255,255,255,0.5)'
-        context.beginPath()
-        context.moveTo(this._preview.x1, this._preview.y1)
-        context.lineTo(this._preview.x2, this._preview.y2)
-        context.stroke()
+        if (this._preview.type === 'line') {
+          context.beginPath()
+          context.moveTo(this._preview.x1, this._preview.y1)
+          context.lineTo(this._preview.x2, this._preview.y2)
+          context.stroke()
+        }
+        if (this._preview.type === 'rect') {
+          context.strokeRect(
+            Math.min(this._preview.x1, this._preview.x2),
+            Math.min(this._preview.y1, this._preview.y2),
+            Math.abs(this._preview.x2 - this._preview.x1),
+            Math.abs(this._preview.y2 - this._preview.y1),
+          )
+        }
+        if (this._preview.type === 'circle') {
+          context.beginPath()
+          context.arc(
+            this._preview.x1,
+            this._preview.y1,
+            Math.hypot(this._preview.x2 - this._preview.x1, this._preview.y2 - this._preview.y1),
+            0,
+            Math.PI * 2,
+          )
+          context.stroke()
+        }
         if (utils?.setLineStyle) {
           utils.setLineStyle(context, LineStyle.Solid)
         } else {
@@ -356,7 +460,7 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
     onUpdateDrawing?: (id: string, data: unknown) => void,
   ) {
     this._drawings = drawings.filter(
-      d => d.type === 'h-ray' || d.type === 't-ray' || d.type === 'segment'
+      d => d.type === 'h-ray' || d.type === 't-ray' || d.type === 'segment' || d.type === 'rect' || d.type === 'fib' || d.type === 'circle'
     )
     this._chart = chart
     this._series = series
@@ -403,8 +507,8 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
         const newTime = logicalToTime(candleData, newLogical) ?? data.time
         return { ...d, data: { ...data, logical: newLogical, time: newTime } }
       }
-      if (d.type === 't-ray' || d.type === 'segment') {
-        const data = d.data as TRayDrawing | SegmentDrawing
+      if (d.type === 't-ray' || d.type === 'segment' || d.type === 'rect' || d.type === 'fib' || d.type === 'circle') {
+        const data = d.data as TRayDrawing | SegmentDrawing | RectDrawing | FibDrawing | CircleDrawing
         const newFromLogical = data.fromLogical != null ? data.fromLogical + added : data.fromLogical
         const newToLogical = data.toLogical != null ? data.toLogical + added : data.toLogical
         const newFromTime = newFromLogical != null ? (logicalToTime(candleData, newFromLogical) ?? data.fromTime) : data.fromTime
@@ -422,6 +526,15 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
   }
 
   updateAllViews?() {
+    // Sync container dims from the chart on EVERY view update — the cached
+    // _cw/_ch from setDrawings go stale on window resize / panel collapse,
+    // making h-rays stop at the old right edge and t-rays clip at the old
+    // bottom. chart.options().width/height are always current in v5.
+    if (this._chart) {
+      const opts = this._chart.options()
+      if (typeof opts.width === 'number' && opts.width > 0) this._cw = opts.width
+      if (typeof opts.height === 'number' && opts.height > 0) this._ch = opts.height
+    }
     this.rebuildItems()
   }
 
@@ -574,6 +687,37 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
         if (y1 === null || x1 === null || y2 === null || x2 === null) continue
         items.push({ type: 'segment', id: d.id, x1, y1, x2, y2 })
       }
+
+      if (d.type === 'rect') {
+        const data = d.data as RectDrawing
+        const y1 = series.priceToCoordinate(data.fromPrice)
+        const x1 = resolveExactX(chart, candleData, data.fromTime as Time, data.fromLogical)
+        const y2 = series.priceToCoordinate(data.toPrice)
+        const x2 = resolveExactX(chart, candleData, data.toTime as Time, data.toLogical)
+        if (y1 === null || x1 === null || y2 === null || x2 === null) continue
+        items.push({ type: 'rect', id: d.id, x1, y1, x2, y2 })
+      }
+
+      if (d.type === 'fib') {
+        const data = d.data as FibDrawing
+        const y1 = series.priceToCoordinate(data.fromPrice)
+        const x1 = resolveExactX(chart, candleData, data.fromTime as Time, data.fromLogical)
+        const y2 = series.priceToCoordinate(data.toPrice)
+        const x2 = resolveExactX(chart, candleData, data.toTime as Time, data.toLogical)
+        if (y1 === null || x1 === null || y2 === null || x2 === null) continue
+        items.push({ type: 'fib', id: d.id, x1, y1, x2, y2, price1: data.fromPrice, price2: data.toPrice })
+      }
+
+      if (d.type === 'circle') {
+        const data = d.data as CircleDrawing
+        const cy = series.priceToCoordinate(data.fromPrice)
+        const cx = resolveExactX(chart, candleData, data.fromTime as Time, data.fromLogical)
+        const y2 = series.priceToCoordinate(data.toPrice)
+        const x2 = resolveExactX(chart, candleData, data.toTime as Time, data.toLogical)
+        if (cy === null || cx === null || y2 === null || x2 === null) continue
+        const r = Math.hypot(x2 - cx, y2 - cy)
+        items.push({ type: 'circle', id: d.id, cx, cy, r, x2, y2 })
+      }
     }
 
     this._items = items
@@ -609,7 +753,7 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
       return null
     }
 
-    if (item.type === 'segment') {
+    if (item.type === 'segment' || item.type === 'rect' || item.type === 'fib') {
       const ep1Dist = this.pointDist(mx, my, item.x1, item.y1)
       const ep2Dist = this.pointDist(mx, my, item.x2, item.y2)
       if (ep1Dist <= HIT_DIST_POINT && ep1Dist <= ep2Dist) {
@@ -618,7 +762,36 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
       if (ep2Dist <= HIT_DIST_POINT) {
         return { id: item.id, pointIndex: 1, distance: ep2Dist }
       }
-      const ld = this.lineDist(mx, my, item.x1, item.y1, item.x2, item.y2)
+      if (item.type === 'segment' || item.type === 'fib') {
+        const ld = this.lineDist(mx, my, item.x1, item.y1, item.x2, item.y2)
+        if (ld <= HIT_DIST_LINE) {
+          return { id: item.id, pointIndex: null, distance: ld }
+        }
+      }
+      if (item.type === 'rect') {
+        const ld = Math.min(
+          this.lineDist(mx, my, item.x1, item.y1, item.x2, item.y1),
+          this.lineDist(mx, my, item.x2, item.y1, item.x2, item.y2),
+          this.lineDist(mx, my, item.x2, item.y2, item.x1, item.y2),
+          this.lineDist(mx, my, item.x1, item.y2, item.x1, item.y1),
+        )
+        if (ld <= HIT_DIST_LINE) {
+          return { id: item.id, pointIndex: null, distance: ld }
+        }
+      }
+      return null
+    }
+
+    if (item.type === 'circle') {
+      const ep1Dist = this.pointDist(mx, my, item.cx, item.cy)
+      const ep2Dist = this.pointDist(mx, my, item.x2, item.y2)
+      if (ep1Dist <= HIT_DIST_POINT && ep1Dist <= ep2Dist) {
+        return { id: item.id, pointIndex: 0, distance: ep1Dist }
+      }
+      if (ep2Dist <= HIT_DIST_POINT) {
+        return { id: item.id, pointIndex: 1, distance: ep2Dist }
+      }
+      const ld = Math.abs(this.pointDist(mx, my, item.cx, item.cy) - item.r)
       if (ld <= HIT_DIST_LINE) {
         return { id: item.id, pointIndex: null, distance: ld }
       }

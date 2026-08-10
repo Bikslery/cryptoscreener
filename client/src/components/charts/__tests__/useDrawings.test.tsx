@@ -107,7 +107,23 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
     localStorage.clear()
   })
 
-  it('does not attach a primitive while data is loading', () => {
+  it('attaches the primitive as soon as the chart exists, even while data is still loading', () => {
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT',
+        tf: '5m',
+        chartVersion: 1,
+        isInitialLoading: true,
+        refs,
+      },
+    })
+    // Attach must NOT depend on isInitialLoading — otherwise drawings vanish
+    // (and only reappear after a re-attach) during a TF switch reload.
+    expect(refs.attachPrimitive).toHaveBeenCalledTimes(1)
+    expect(result.current.primitiveRef.current).not.toBeNull()
+  })
+
+  it('does not attach when the chart has not been created yet', () => {
     const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
       initialProps: {
         symbol: 'BTCUSDT',
@@ -117,34 +133,38 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
         refs,
       },
     })
-    expect(refs.attachPrimitive).not.toHaveBeenCalled()
     expect(result.current.primitiveRef.current).toBeNull()
   })
 
-  it('attaches a primitive to the series once data has loaded', () => {
+  it('re-attaches when the chart itself is recreated (chartVersion bump)', () => {
     const { result, rerender } = renderHook((p: HookProps) => useDrawingsHarness(p), {
       initialProps: {
         symbol: 'BTCUSDT',
         tf: '5m',
-        chartVersion: 0,
+        chartVersion: 1,
         isInitialLoading: true,
         refs,
       },
     })
+    const firstPrimitive = result.current.primitiveRef.current
+    expect(firstPrimitive).not.toBeNull()
+
+    const refs2 = makeMockRefs()
     act(() => {
       rerender({
         symbol: 'BTCUSDT',
         tf: '5m',
-        chartVersion: 0,
-        isInitialLoading: false,
-        refs,
+        chartVersion: 2,
+        isInitialLoading: true,
+        refs: refs2,
       })
     })
-    expect(refs.attachPrimitive).toHaveBeenCalledTimes(1)
-    expect(result.current.primitiveRef.current).not.toBeNull()
+    const newPrimitive = result.current.primitiveRef.current
+    expect(newPrimitive).not.toBeNull()
+    expect(newPrimitive).not.toBe(firstPrimitive)
   })
 
-  it('re-syncs drawings to the new primitive after a TF change', () => {
+  it('keeps the same primitive across a TF switch and re-syncs drawings to it', () => {
     const drawing = {
       id: 'local-1',
       userId: '',
@@ -160,35 +180,28 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
       initialProps: {
         symbol: 'BTCUSDT',
         tf: '5m',
-        chartVersion: 0,
-        isInitialLoading: true,
-        refs,
-      },
-    })
-    act(() => {
-      rerender({
-        symbol: 'BTCUSDT',
-        tf: '5m',
-        chartVersion: 0,
+        chartVersion: 1,
         isInitialLoading: false,
         refs,
-      })
+      },
     })
     const firstPrimitive = result.current.primitiveRef.current
     expect(firstPrimitive).not.toBeNull()
     const callsAfterFirstLoad = setDrawingsSpy.mock.calls.length
 
-    const refs2 = makeMockRefs()
     act(() => {
       rerender({
         symbol: 'BTCUSDT',
         tf: '15m',
         chartVersion: 1,
         isInitialLoading: true,
-        refs: refs2,
+        refs,
       })
     })
-    expect(refs2.attachPrimitive).not.toHaveBeenCalled()
+    // TF switch must NOT detach/re-attach the primitive — that's the bug where
+    // drawings disappear while the new timeframe's candles load.
+    expect(refs.attachPrimitive).toHaveBeenCalledTimes(1)
+    expect(result.current.primitiveRef.current).toBe(firstPrimitive)
 
     act(() => {
       rerender({
@@ -196,14 +209,12 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
         tf: '15m',
         chartVersion: 1,
         isInitialLoading: false,
-        refs: refs2,
+        refs,
       })
     })
-    expect(refs2.attachPrimitive).toHaveBeenCalledTimes(1)
-    const newPrimitive = result.current.primitiveRef.current
-    expect(newPrimitive).not.toBeNull()
-    expect(newPrimitive).not.toBe(firstPrimitive)
+    expect(result.current.primitiveRef.current).toBe(firstPrimitive)
 
+    // Drawings are still re-synced to the primitive after the switch.
     expect(setDrawingsSpy.mock.calls.length).toBeGreaterThan(callsAfterFirstLoad)
     const lastCall = setDrawingsSpy.mock.calls[setDrawingsSpy.mock.calls.length - 1]
     const drawingsArg = lastCall[0] as Array<{ id: string }>
@@ -215,7 +226,7 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
       initialProps: {
         symbol: 'BTCUSDT',
         tf: '5m',
-        chartVersion: 0,
+        chartVersion: 1,
         isInitialLoading: false,
         refs,
       },
@@ -229,7 +240,7 @@ describe('useDrawings — primitive lifecycle on TF change', () => {
       initialProps: {
         symbol: 'BTCUSDT',
         tf: '5m',
-        chartVersion: 0,
+        chartVersion: 1,
         isInitialLoading: false,
         refs,
       },
@@ -258,7 +269,7 @@ describe('useDrawings — pixelToPriceTime via handleClick', () => {
     const refs = makeMockRefs()
     const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
       initialProps: {
-        symbol: 'BTCUSDT', tf: '5m', chartVersion: 0, isInitialLoading: false, refs, candlesData: candles,
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
       },
     })
 
@@ -286,5 +297,167 @@ describe('useDrawings — pixelToPriceTime via handleClick', () => {
     // 1700000045000 > last bar (170000002700) → findBarByTime returns 9.
     expect(data.logical).toBe(9)
     expect(data.time).toBe(1700000000 + 150 * 300)
+  })
+})
+
+describe('useDrawings — undo/redo history', () => {
+  let refs: MockRefs
+  const candles: UnifiedCandle[] = Array.from({ length: 10 }, (_, i) => ({
+    symbol: 'BTCUSDT', exchange: 'binance-spot', timeframe: '5m',
+    time: 1700000000 + i * 300, open: 100, high: 100, low: 100, close: 100, volume: 0,
+  }))
+
+  beforeEach(() => {
+    refs = makeMockRefs()
+    localStorage.clear()
+    useDrawingHotkeysStore.getState().deactivate()
+  })
+
+  function renderPlaced(activate: (s: typeof useDrawingHotkeysStore) => void) {
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
+      },
+    })
+    act(() => {
+      activate(useDrawingHotkeysStore)
+    })
+    return result
+  }
+
+  it('undo restores drawings removed by removeDrawing, redo re-applies', () => {
+    const result = renderPlaced(s => s.getState().activateTool('h-ray'))
+    const click = () => {
+      act(() => { useDrawingHotkeysStore.getState().activateTool('h-ray') })
+      act(() => { result.current.handleClick({ clientX: 60, clientY: 120 } as MouseEvent) })
+    }
+    click()
+    click()
+    expect(result.current.drawings.length).toBe(2)
+
+    act(() => {
+      result.current.removeDrawing(result.current.drawings[0].id)
+    })
+    expect(result.current.drawings.length).toBe(1)
+
+    act(() => {
+      result.current.undo()
+    })
+    expect(result.current.drawings.length).toBe(2)
+
+    act(() => {
+      result.current.redo()
+    })
+    expect(result.current.drawings.length).toBe(1)
+  })
+
+  it('undo of clearAllDrawings restores all drawings', () => {
+    const result = renderPlaced(s => s.getState().activateTool('h-ray'))
+    const click = () => {
+      act(() => { useDrawingHotkeysStore.getState().activateTool('h-ray') })
+      act(() => { result.current.handleClick({ clientX: 60, clientY: 120 } as MouseEvent) })
+    }
+    click()
+    click()
+    expect(result.current.drawings.length).toBe(2)
+
+    act(() => {
+      result.current.clearAllDrawings()
+    })
+    expect(result.current.drawings.length).toBe(0)
+
+    act(() => {
+      result.current.undo()
+    })
+    expect(result.current.drawings.length).toBe(2)
+  })
+})
+
+describe('useDrawings — magnet and new tools', () => {
+  let refs: MockRefs
+  const candles: UnifiedCandle[] = Array.from({ length: 10 }, (_, i) => ({
+    symbol: 'BTCUSDT', exchange: 'binance-spot', timeframe: '5m',
+    time: 1700000000 + i * 300, open: 100, high: 110, low: 90, close: 100, volume: 0,
+  }))
+
+  beforeEach(() => {
+    refs = makeMockRefs()
+    localStorage.clear()
+    useDrawingHotkeysStore.getState().deactivate()
+  })
+
+  it('rect, fib and circle place via two clicks each', () => {
+    for (const tool of ['rect', 'fib', 'circle'] as const) {
+      localStorage.clear()
+      const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+        initialProps: {
+          symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
+        },
+      })
+      act(() => {
+        useDrawingHotkeysStore.getState().activateTool(tool)
+      })
+      act(() => {
+        result.current.handleClick({ clientX: 30, clientY: 100 } as MouseEvent)
+      })
+      expect(result.current.drawings.length).toBe(0)
+      expect(result.current.pendingPoint).not.toBeNull()
+      act(() => {
+        result.current.handleClick({ clientX: 60, clientY: 200 } as MouseEvent)
+      })
+      expect(result.current.drawings.length).toBe(1)
+      expect(result.current.drawings[0].type).toBe(tool)
+      expect(result.current.pendingPoint).toBeNull()
+    }
+  })
+
+  it('magnet snaps h-ray price to the nearest candle high/low', () => {
+    // coordinateToPrice mock returns 100 for any y; magnet should override it
+    // with the bar's high (110) or low (90) when within MAGNET_PX (3px).
+    // Mock priceToCoordinate: y of high=110 → 100, y of low=90 → 120.
+    refs.series.priceToCoordinate = vi.fn((price: number) =>
+      price === 110 ? 100 : price === 90 ? 120 : 200,
+    ) as never
+
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
+      },
+    })
+    act(() => {
+      useDrawingHotkeysStore.getState().activateTool('h-ray')
+    })
+    // clientX=30 → logical=5 → bar 5 (high=110, low=90).
+    // clientY=100 → within 3px of high's coordinate (100) → snap to high=110.
+    act(() => {
+      result.current.handleClick({ clientX: 30, clientY: 100 } as MouseEvent)
+    })
+    expect(result.current.drawings.length).toBe(1)
+    const d = result.current.drawings[0]
+    const data = d.data as { price: number }
+    expect(data.price).toBe(110)
+  })
+
+  it('magnet does not snap when far from high/low', () => {
+    refs.series.priceToCoordinate = vi.fn((price: number) =>
+      price === 110 ? 100 : price === 90 ? 120 : 200,
+    ) as never
+
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
+      },
+    })
+    act(() => {
+      useDrawingHotkeysStore.getState().activateTool('h-ray')
+    })
+    // clientY=150 → 50px from both high/low → no snap, price stays 100 (mock).
+    act(() => {
+      result.current.handleClick({ clientX: 30, clientY: 150 } as MouseEvent)
+    })
+    expect(result.current.drawings.length).toBe(1)
+    const d = result.current.drawings[0]
+    const data = d.data as { price: number }
+    expect(data.price).toBe(100)
   })
 })

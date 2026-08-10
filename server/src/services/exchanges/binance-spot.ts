@@ -6,7 +6,7 @@ import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.
 import { fetchWithTimeout } from '../../utils/fetch.js'
 import { BinanceRateLimiter } from './rate-limiter.js'
 import { WsStreamPool } from './ws-pool.js'
-import { getWsAgent, getFetchDispatcher } from './proxy.js'
+import { getFetchDispatcher } from './proxy.js'
 import type { ProxyAgent } from 'undici'
 
 const WS_SILENCE_TIMEOUT = 30_000
@@ -54,7 +54,6 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   private depthPool: WsStreamPool
 
   constructor() {
-    this.wsAgent = getWsAgent()
     this.fetchDispatcher = getFetchDispatcher()
 
     this.candlePool = new WsStreamPool(

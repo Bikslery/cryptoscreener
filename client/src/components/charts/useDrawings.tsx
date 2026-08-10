@@ -1,9 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
-import type { Drawing, DrawingTool, HRayDrawing, TRayDrawing, SegmentDrawing, UnifiedCandle } from '../../types'
+import type { Drawing, DrawingTool, HRayDrawing, TwoPointDrawing, UnifiedCandle } from '../../types'
+import { isTwoPointTool } from '../../types'
 import api from '../../services/api'
 import { useAuthStore, useCoinListStore } from '../../store'
-import { useDrawingHotkeysStore } from '../../store/drawingHotkeys'
+import { useDrawingHotkeysStore, isInputFocused } from '../../store/drawingHotkeys'
 import { DrawingsPrimitive, resolveExactX, logicalToTime, findBarByTime } from './drawings/primitive'
 
 interface PendingPoint {
@@ -17,11 +18,15 @@ interface DragState {
   pointIndex: number | null
   startMouseX: number
   startMouseY: number
-  originalData: HRayDrawing | TRayDrawing | SegmentDrawing
+  originalData: HRayDrawing | TwoPointDrawing
 }
 
 const LOCAL_ID_PREFIX = 'local-'
 let localCounter = 0
+
+const SUPPORTED_DRAWING_TYPES = new Set<Drawing['type']>(['h-ray', 't-ray', 'segment', 'rect', 'fib', 'circle'])
+const HISTORY_LIMIT = 50
+const MAGNET_PX = 3
 
 function isLocalId(id: string): boolean {
   return id.startsWith(LOCAL_ID_PREFIX)
@@ -57,7 +62,7 @@ function isValidDrawingData(d: Drawing): boolean {
     const data = d.data as { price?: unknown; time?: unknown; logical?: unknown }
     return isFiniteNum(data.price) && isFiniteNum(data.time)
   }
-  if (d.type === 't-ray' || d.type === 'segment') {
+  if (d.type === 't-ray' || d.type === 'segment' || d.type === 'rect' || d.type === 'fib' || d.type === 'circle') {
     const data = d.data as {
       fromPrice?: unknown; fromTime?: unknown;
       toPrice?: unknown; toTime?: unknown;
@@ -82,13 +87,13 @@ function computeUpdatedDrawingData(
   chart: IChartApi,
   series: ISeriesApi<'Candlestick'>,
   candleData: ReadonlyArray<UnifiedCandle> | null,
-): HRayDrawing | TRayDrawing | SegmentDrawing {
+): HRayDrawing | TwoPointDrawing {
   if (drawing.type === 'h-ray') {
     return { price, time, logical }
   }
 
-  if (drawing.type === 't-ray' || drawing.type === 'segment') {
-    const orig = dragState.originalData as TRayDrawing | SegmentDrawing
+  if (isTwoPointTool(drawing.type as DrawingTool)) {
+    const orig = dragState.originalData as TwoPointDrawing
 
     if (pointIndex === 0) {
       return { ...orig, fromPrice: price, fromTime: time, fromLogical: logical }
@@ -98,9 +103,6 @@ function computeUpdatedDrawingData(
     }
 
     if (pointIndex === null) {
-      const deltaY = dragState.startMouseY - (dragState.startMouseY + (series.coordinateToPrice(dragState.startMouseY)! - price))
-      void deltaY
-
       const startPrice = series.coordinateToPrice(dragState.startMouseY) as number | null
       const currentPrice = price
       if (startPrice === null) return orig
@@ -130,7 +132,7 @@ function computeUpdatedDrawingData(
     }
   }
 
-  return drawing.data as HRayDrawing | TRayDrawing | SegmentDrawing
+  return drawing.data as HRayDrawing | TwoPointDrawing
 }
 
 export function useDrawings(
@@ -142,8 +144,11 @@ export function useDrawings(
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   chartVersion: number,
   isInitialLoading: boolean,
+  dataVersion: number = 0,
 ) {
   const [drawings, setDrawings] = useState<Drawing[]>([])
+  const undoStackRef = useRef<Drawing[][]>([])
+  const redoStackRef = useRef<Drawing[][]>([])
   const activeTool = useDrawingHotkeysStore(s => s.activeTool)
   const setActiveTool = useDrawingHotkeysStore(s => s.activateTool)
   const [pendingPoint, setPendingPoint] = useState<PendingPoint | null>(null)
@@ -166,6 +171,30 @@ export function useDrawings(
   const symbolRef = useRef(symbol)
   symbolRef.current = symbol
 
+  const pushHistory = useCallback(() => {
+    undoStackRef.current.push(drawingsRef.current)
+    if (undoStackRef.current.length > HISTORY_LIMIT) {
+      undoStackRef.current.shift()
+    }
+    redoStackRef.current = []
+  }, [])
+
+  const undo = useCallback(() => {
+    const prev = undoStackRef.current.pop()
+    if (!prev) return
+    redoStackRef.current.push(drawingsRef.current)
+    setDrawings(prev)
+    saveToStorage(symbolRef.current, prev)
+  }, [])
+
+  const redo = useCallback(() => {
+    const next = redoStackRef.current.pop()
+    if (!next) return
+    undoStackRef.current.push(drawingsRef.current)
+    setDrawings(next)
+    saveToStorage(symbolRef.current, next)
+  }, [])
+
   const dragStateRef = useRef<DragState | null>(null)
   const isDraggingRef = useRef(false)
   const hoveredIdRef = useRef<string | null>(null)
@@ -173,16 +202,18 @@ export function useDrawings(
   useEffect(() => {
     const reqSymbol = symbol
     const stored = sanitizeDrawings(loadFromStorage(reqSymbol)).filter(
-      d => d.type === 'h-ray' || d.type === 't-ray' || d.type === 'segment'
+      d => SUPPORTED_DRAWING_TYPES.has(d.type)
     )
     setDrawings(stored)
+    undoStackRef.current = []
+    redoStackRef.current = []
 
     if (!isLoggedIn) return
     api.get('/drawings', { params: { symbol: reqSymbol } })
       .then(res => {
         if (symbolRef.current !== reqSymbol) return
         const serverDrawings = sanitizeDrawings(res.data as Drawing[]).filter(
-          d => d.type === 'h-ray' || d.type === 't-ray' || d.type === 'segment'
+          d => SUPPORTED_DRAWING_TYPES.has(d.type)
         )
         const final = serverDrawings.length > 0 ? serverDrawings : stored
         setDrawings(final)
@@ -194,9 +225,12 @@ export function useDrawings(
   useEffect(() => {
     const chart = chartRef.current
     const series = candleRef.current
-    if (!chart || !series) return
-    if (isInitialLoading) return
+    if (!chart || !series || !chartVersion) return
 
+    // NB: no isInitialLoading in deps — the primitive must stay attached across
+    // TF switches / data reloads, otherwise drawings vanish while the new
+    // timeframe's candles are loading (they only reappear after a re-attach).
+    // Resyncs happen via the sync effect below on dataVersion change.
     const primitive = new DrawingsPrimitive()
     primitiveRef.current = primitive
 
@@ -214,9 +248,10 @@ export function useDrawings(
       }
       primitiveRef.current = null
     }
-  }, [chartVersion, isInitialLoading])
+  }, [chartVersion])
 
   const removeDrawing = useCallback((id: string) => {
+    pushHistory()
     setDrawings(prev => {
       const next = prev.filter(d => d.id !== id)
       saveToStorage(symbolRef.current, next)
@@ -225,15 +260,16 @@ export function useDrawings(
     if (!isLocalId(id) && isLoggedIn) {
       api.delete(`/drawings/${id}`).catch(() => {})
     }
-  }, [isLoggedIn])
+  }, [isLoggedIn, pushHistory])
 
   const updateDrawingState = useCallback((id: string, data: unknown) => {
+    pushHistory()
     setDrawings(prev => {
       const next = prev.map(d => d.id === id ? { ...d, data: data as Drawing['data'] } : d)
       saveToStorage(symbolRef.current, next)
       return next
     })
-  }, [])
+  }, [pushHistory])
 
   const commitDrawingToServer = useCallback((id: string, data: unknown) => {
     if (!isLoggedIn || isLocalId(id)) return
@@ -255,8 +291,8 @@ export function useDrawings(
           const newTime = logicalToTime(candlesDataRef.current, newLogical) ?? data.time
           return { ...d, data: { ...data, logical: newLogical, time: newTime } }
         }
-        if (d.type === 't-ray' || d.type === 'segment') {
-          const data = d.data as TRayDrawing | SegmentDrawing
+        if (d.type === 't-ray' || d.type === 'segment' || d.type === 'rect' || d.type === 'fib' || d.type === 'circle') {
+          const data = d.data as TwoPointDrawing
           const newFromLogical = data.fromLogical != null ? data.fromLogical + added : data.fromLogical
           const newToLogical = data.toLogical != null ? data.toLogical + added : data.toLogical
           const newFromTime = newFromLogical != null ? (logicalToTime(candlesDataRef.current, newFromLogical) ?? data.fromTime) : data.fromTime
@@ -290,8 +326,8 @@ export function useDrawings(
         }
         return d
       }
-      if (d.type === 't-ray' || d.type === 'segment') {
-        const data = d.data as TRayDrawing | SegmentDrawing
+      if (d.type === 't-ray' || d.type === 'segment' || d.type === 'rect' || d.type === 'fib' || d.type === 'circle') {
+        const data = d.data as TwoPointDrawing
         const fromIdx = findBarByTime(candleData, data.fromTime)
         const toIdx = findBarByTime(candleData, data.toTime)
         let changed = false
@@ -326,7 +362,7 @@ export function useDrawings(
       setDrawings(toPersist)
       saveToStorage(symbolRef.current, toPersist)
     }
-  }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, updateDrawingState, isInitialLoading, candlesDataRef])
+  }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, updateDrawingState, isInitialLoading, dataVersion, candlesDataRef])
 
   const saveDrawing = useCallback(async (drawing: Drawing) => {
     if (!isLoggedIn) return
@@ -353,6 +389,7 @@ export function useDrawings(
   }, [isLoggedIn])
 
   const clearAllDrawings = useCallback(() => {
+    pushHistory()
     const ids = drawingsRef.current.map(d => d.id)
     setDrawings([])
     saveToStorage(symbolRef.current, [])
@@ -361,7 +398,7 @@ export function useDrawings(
         if (!isLocalId(id)) api.delete(`/drawings/${id}`).catch(() => {})
       }
     }
-  }, [isLoggedIn])
+  }, [isLoggedIn, pushHistory])
 
   const clearPending = useCallback(() => {
     setPendingPoint(null)
@@ -385,6 +422,7 @@ export function useDrawings(
     const pp = pendingPointRef.current
 
     if (tool === 'h-ray') {
+      pushHistory()
       const data: HRayDrawing = { price, time, logical }
       const drawing: Drawing = {
         id: `${LOCAL_ID_PREFIX}${++localCounter}`,
@@ -404,7 +442,7 @@ export function useDrawings(
       return
     }
 
-    if (tool === 't-ray' || tool === 'segment') {
+    if (isTwoPointTool(tool)) {
       if (!pp) {
         setPendingPoint({ price, time, logical })
         const primitive = primitiveRef.current
@@ -420,7 +458,8 @@ export function useDrawings(
         }
         return
       }
-      const data: TRayDrawing | SegmentDrawing = {
+      pushHistory()
+      const data: TwoPointDrawing = {
         fromPrice: pp.price,
         fromTime: pp.time,
         fromLogical: pp.logical,
@@ -432,7 +471,7 @@ export function useDrawings(
         id: `${LOCAL_ID_PREFIX}${++localCounter}`,
         userId: '',
         symbol: curSymbol,
-        type: tool === 't-ray' ? 't-ray' : 'segment',
+        type: tool === 't-ray' ? 't-ray' : tool === 'rect' ? 'rect' : tool === 'fib' ? 'fib' : tool === 'circle' ? 'circle' : 'segment',
         data,
       }
       setDrawings(prev => {
@@ -444,12 +483,25 @@ export function useDrawings(
       setActiveTool(null)
       clearPending()
     }
-  }, [saveDrawing, clearPending])
+  }, [saveDrawing, clearPending, pushHistory])
 
   useEffect(() => {
     deactivateGlobal()
     clearPending()
   }, [symbol, clearPending, deactivateGlobal])
+
+  // Clear any in-progress pending point when the tool changes — otherwise a
+  // half-placed ray from a previous tool session snaps its second point to the
+  // wrong bar (stale pendingPointRef from the old tool).
+  useEffect(() => {
+    clearPending()
+  }, [activeTool, clearPending])
+
+  // Same for TF switch: the pending point's `time` belongs to the old TF's
+  // candles; keeping it makes the second click land on a shifted bar.
+  useEffect(() => {
+    clearPending()
+  }, [tf, clearPending])
 
   const pixelToPriceTime = useCallback((
     x: number,
@@ -469,6 +521,23 @@ export function useDrawings(
     return { price, time, logical }
   }, [candlesDataRef])
 
+  // Magnet: snap a placement point to the nearest candle's high/low when the
+  // click lands within MAGNET_PX of it (in screen pixels). Like scalpboard.
+  const applyMagnet = useCallback((y: number, price: number, logical?: number): number => {
+    const series = candleRef.current
+    const candleData = candlesDataRef.current
+    if (!series || !candleData || candleData.length === 0) return price
+    if (logical == null || !Number.isFinite(logical)) return price
+    const idx = Math.floor(logical)
+    if (idx < 0 || idx >= candleData.length) return price
+    const bar = candleData[idx]
+    const yHigh = series.priceToCoordinate(bar.high)
+    const yLow = series.priceToCoordinate(bar.low)
+    if (yHigh !== null && Math.abs(y - yHigh) <= MAGNET_PX) return bar.high
+    if (yLow !== null && Math.abs(y - yLow) <= MAGNET_PX) return bar.low
+    return price
+  }, [candlesDataRef])
+
   const handleClick = useCallback((e: MouseEvent) => {
     const tool = activeToolRef.current
     if (!tool) return
@@ -483,8 +552,9 @@ export function useDrawings(
     const result = pixelToPriceTime(x, y)
     if (!result) return
 
-    placeDrawing(result.price, result.time, result.logical)
-  }, [placeDrawing, pixelToPriceTime])
+    const snappedPrice = applyMagnet(y, result.price, result.logical)
+    placeDrawing(snappedPrice, result.time, result.logical)
+  }, [placeDrawing, pixelToPriceTime, applyMagnet])
 
   const handleMouseDown = useCallback((e: MouseEvent) => {
     if (activeToolRef.current !== null) return
@@ -510,7 +580,7 @@ export function useDrawings(
       pointIndex: hit.pointIndex,
       startMouseX: x,
       startMouseY: y,
-      originalData: drawing.data as HRayDrawing | TRayDrawing | SegmentDrawing,
+      originalData: drawing.data as HRayDrawing | TwoPointDrawing,
     }
     isDraggingRef.current = true
   }, [])
@@ -554,7 +624,10 @@ export function useDrawings(
         const px1 = resolveExactX(chart, candlesDataRef.current, pp.time as Time, pp.logical)
         const py1 = series.priceToCoordinate(pp.price)
         if (px1 === null || py1 === null) return
-        primitive.setPreview({ x1: px1, y1: py1, x2: x, y2: y })
+        const tool = activeToolRef.current
+        const previewType: 'line' | 'rect' | 'fib' | 'circle' =
+          tool === 'rect' ? 'rect' : tool === 'fib' ? 'fib' : tool === 'circle' ? 'circle' : 'line'
+        primitive.setPreview({ type: previewType, x1: px1, y1: py1, x2: x, y2: y })
       }
       return
     }
@@ -575,7 +648,7 @@ export function useDrawings(
     if (primitive) {
       const drawing = primitive.getDrawing(dragStateRef.current.drawingId)
       if (drawing) {
-        const data = drawing.data as HRayDrawing | TRayDrawing | SegmentDrawing
+        const data = drawing.data as HRayDrawing | TwoPointDrawing
         updateDrawingState(dragStateRef.current.drawingId, data)
         commitDrawingToServer(dragStateRef.current.drawingId, data)
       }
@@ -610,13 +683,34 @@ export function useDrawings(
     }
   }, [pendingPoint, drawings, symbol, tf, chartVersion, candlesDataRef])
 
+  // Undo/redo history navigation: Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isInputFocused()) return
+      const mod = e.ctrlKey || e.metaKey
+      if (!mod) return
+      const key = e.key.toLowerCase()
+      if (key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undo()
+      } else if ((key === 'z' && e.shiftKey) || key === 'y') {
+        e.preventDefault()
+        redo()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [undo, redo])
+
   return {
     drawings,
     activeTool,
     setActiveTool,
     removeDrawing,
     clearAllDrawings,
-    hasDrawings: drawings.some(d => d.type === 'h-ray' || d.type === 't-ray' || d.type === 'segment'),
+    undo,
+    redo,
+    hasDrawings: drawings.some(d => SUPPORTED_DRAWING_TYPES.has(d.type)),
     deactivateTool,
     handleClick,
     handleMouseDown,

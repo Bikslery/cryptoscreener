@@ -14,3 +14,22 @@ server/prisma/dev.db-journal
 *.png
 *.err
 TZ/
+
+# Local AI-agent tooling (not part of the project)
+.agent/
+.agents/
+.claude/
+.codebuddy/
+.codex/
+.continue/
+.cursor/
+.freebuff/
+.gemini/
+.gigacode/
+.hermes/
+.kiro/
+.opencode/
+.qoder/
+.roo/
+.trae/
+.windsurf/

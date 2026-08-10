@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Minus, TrendingUp, Slash, Trash2 } from 'lucide-react'
+import { Minus, TrendingUp, Slash, Trash2, Square, TrendingDown, Circle } from 'lucide-react'
 import type { DrawingTool } from '../../types'
 import { useDrawingHotkeysStore, formatCombo } from '../../store/drawingHotkeys'
 
@@ -15,6 +15,9 @@ const TOOLS: { id: DrawingTool; icon: typeof Minus; label: string }[] = [
   { id: 'h-ray', icon: Minus, label: 'Гориз. луч' },
   { id: 't-ray', icon: TrendingUp, label: 'Тренд. луч' },
   { id: 'segment', icon: Slash, label: 'Отрезок' },
+  { id: 'rect', icon: Square, label: 'Прямоугольник' },
+  { id: 'fib', icon: TrendingDown, label: 'Фибоначчи' },
+  { id: 'circle', icon: Circle, label: 'Окружность' },
 ]
 
 const DrawingToolsPanel = memo(function DrawingToolsPanel({

@@ -67,9 +67,15 @@ export interface Alert {
   createdAt: number
 }
 
-export type DrawingType = 'level' | 'measure' | 'h-ray' | 't-ray' | 'segment'
+export type DrawingType = 'level' | 'measure' | 'h-ray' | 't-ray' | 'segment' | 'rect' | 'fib' | 'circle'
 
-export type DrawingTool = 'h-ray' | 't-ray' | 'segment'
+export type DrawingTool = 'h-ray' | 't-ray' | 'segment' | 'rect' | 'fib' | 'circle'
+
+export const TWO_POINT_TOOLS: readonly DrawingTool[] = ['t-ray', 'segment', 'rect', 'fib', 'circle']
+
+export function isTwoPointTool(tool: DrawingTool): boolean {
+  return TWO_POINT_TOOLS.includes(tool)
+}
 
 export interface LevelDrawing {
   price: number
@@ -108,12 +114,41 @@ export interface SegmentDrawing {
   toLogical?: number
 }
 
+export interface RectDrawing {
+  fromPrice: number
+  fromTime: number
+  fromLogical?: number
+  toPrice: number
+  toTime: number
+  toLogical?: number
+}
+
+export interface FibDrawing {
+  fromPrice: number
+  fromTime: number
+  fromLogical?: number
+  toPrice: number
+  toTime: number
+  toLogical?: number
+}
+
+export interface CircleDrawing {
+  fromPrice: number
+  fromTime: number
+  fromLogical?: number
+  toPrice: number
+  toTime: number
+  toLogical?: number
+}
+
+export type TwoPointDrawing = TRayDrawing | SegmentDrawing | RectDrawing | FibDrawing | CircleDrawing
+
 export interface Drawing {
   id: string
   userId: string
   symbol: string
   type: DrawingType
-  data: LevelDrawing | MeasureDrawing | HRayDrawing | TRayDrawing | SegmentDrawing
+  data: LevelDrawing | MeasureDrawing | HRayDrawing | TRayDrawing | SegmentDrawing | RectDrawing | FibDrawing | CircleDrawing
 }
 
 export interface Watchlist {

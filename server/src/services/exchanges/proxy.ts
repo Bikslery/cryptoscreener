@@ -43,7 +43,9 @@ function init() {
       wsAgent = new HttpsProxyAgentCtor(url)
     }
 
-    fetchDispatcher = new ProxyAgent(url)
+    if (!isSocks(url)) {
+      fetchDispatcher = new ProxyAgent(url)
+    }
 
     pool.push({ url, wsAgent, fetchDispatcher, currentWeight: 0 })
     console.log(`[Proxy] Configured: ${url.replace(/:([^@]+)@/, ':****@')}`)
