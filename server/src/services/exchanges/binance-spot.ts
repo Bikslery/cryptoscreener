@@ -46,6 +46,8 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
   private precisionMap = new Map<string, number>()
+  private cryptoSymbols = new Set<string>()
+  private exchangeInfoLoaded = false
   private rateLimiter = new BinanceRateLimiter('spot')
   private wsAgent: Agent | undefined
   private fetchDispatcher: ProxyAgent | undefined
@@ -115,9 +117,15 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
       if (!res.ok) { this.rateLimiter.recordError(); return }
       const data = await res.json()
       if (!data.symbols || !Array.isArray(data.symbols)) { this.rateLimiter.recordError(); return }
+      let filtered = 0
       for (const s of data.symbols) {
         if (!s.symbol.endsWith('USDT')) continue
-        if (STABLECOIN_BASES.has(s.symbol.slice(0, -4))) continue
+        // Skip pairs that are NOT actively trading (BREAK/PENDING_TRADING/
+        // delisted etc.). The WS !miniTicker@arr still broadcasts stale stats
+        // for them, which pushes them into the screener with empty charts.
+        if (s.status && s.status !== 'TRADING') { filtered++; continue }
+        if (STABLECOIN_BASES.has(s.symbol.slice(0, -4))) { filtered++; continue }
+        this.cryptoSymbols.add(s.symbol)
         for (const f of s.filters || []) {
           if (f.filterType === 'PRICE_FILTER' && f.tickSize) {
             this.precisionMap.set(s.symbol, precisionFromTickSize(f.tickSize))
@@ -125,8 +133,9 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
           }
         }
       }
+      this.exchangeInfoLoaded = true
       this.rateLimiter.recordSuccess()
-      console.log(`[${this.name}] Loaded precision for ${this.precisionMap.size} symbols`)
+      console.log(`[${this.name}] Loaded ${this.cryptoSymbols.size} crypto symbols (filtered ${filtered} non-TRADING entries)`)
     } catch (e) {
       this.rateLimiter.recordError()
       console.error(`[${this.name}] Failed to fetch exchangeInfo:`, e)
@@ -220,6 +229,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
       const symbol = t.s || t.symbol
       if (!symbol?.endsWith('USDT')) continue
       if (STABLECOIN_BASES.has(symbol.slice(0, -4))) continue
+      if (this.exchangeInfoLoaded && !this.cryptoSymbols.has(symbol)) continue
       const ticker = this.parseTicker(t)
       for (const cb of this.tickerCbs) cb(ticker)
     }
