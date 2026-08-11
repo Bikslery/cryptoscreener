@@ -24,6 +24,48 @@ const TF_SECONDS: Record<string, number> = {
 }
 function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
 
+/**
+ * Zoom (ctrl/cmd+wheel or trackpad pinch) anchored at the cursor, so the bar
+ * under the pointer stays in place — zooming in/out never shifts what the
+ * user is looking at.
+ *
+ * lightweight-charts' own wheel zoom is cursor-anchored, but the direct
+ * `applyOptions({ barSpacing })` path (which the old handler used) anchors to
+ * the RIGHT EDGE of the data instead, because barSpacing keeps the bar-mode
+ * rightOffset fixed. With `handleScale.mouseWheel` also enabled, every
+ * ctrl+wheel/pinch tick used to run TWO zooms with different anchors — the
+ * view jumped back toward the newest bars and the chart visibly jittered
+ * when zooming out. The caller must intercept the event in the capture phase
+ * and stopPropagation so LWC's own handler never fires.
+ */
+function applyCursorAnchoredZoom(
+  chart: IChartApi,
+  container: HTMLElement,
+  clientX: number,
+  deltaY: number,
+) {
+  const ts = chart.timeScale()
+  const currentSpacing = (ts.options() as any).barSpacing || 6
+  const newSpacing = Math.max(1, Math.min(30, currentSpacing + (deltaY > 0 ? -0.5 : 0.5)))
+  if (newSpacing === currentSpacing) return
+  const rect = container.getBoundingClientRect()
+  const x = clientX - rect.left
+  // Float logical index under the cursor BEFORE the zoom — this is the bar
+  // that must not move on screen.
+  const anchorLogical = ts.coordinateToLogical(x)
+  ts.applyOptions({ barSpacing: newSpacing })
+  if (anchorLogical == null) return
+  const afterLogical = ts.coordinateToLogical(x)
+  if (afterLogical == null) return
+  // After the spacing change the cursor points at a different bar; scroll by
+  // the delta so the anchored bar returns exactly under the cursor.
+  const deltaLogical = anchorLogical - afterLogical
+  if (Math.abs(deltaLogical) < 1e-9) return
+  const vr = ts.getVisibleLogicalRange()
+  if (!vr) return
+  ts.setVisibleLogicalRange({ from: vr.from + deltaLogical, to: vr.to + deltaLogical })
+}
+
 function applyChartPatch(
   patch: CandlePatch,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
@@ -956,22 +998,22 @@ const MiniChart = memo(function MiniChart({
     ro.observe(containerRef.current)
 
     const onWheel = (e: WheelEvent) => {
+      // Capture phase: run BEFORE lightweight-charts' own wheel listener on
+      // the canvas and stopPropagation, so the native zoom (which would zoom
+      // a second time, anchored elsewhere) never fires.
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault()
         e.stopPropagation()
-        const ts = chart.timeScale()
-        const options = ts.options()
-        const currentSpacing = (options as any).barSpacing || 6
-        const delta = e.deltaY > 0 ? -0.5 : 0.5
-        const newSpacing = Math.max(1, Math.min(30, currentSpacing + delta))
-        ts.applyOptions({ barSpacing: newSpacing })
+        if (containerRef.current) {
+          applyCursorAnchoredZoom(chart, containerRef.current, e.clientX, e.deltaY)
+        }
       }
     }
-    containerRef.current.addEventListener('wheel', onWheel, { passive: false })
+    containerRef.current.addEventListener('wheel', onWheel, { passive: false, capture: true })
 
     return () => {
       destroyedRef.current = true
-      containerRef.current?.removeEventListener('wheel', onWheel)
+      containerRef.current?.removeEventListener('wheel', onWheel, { capture: true })
       ro.disconnect()
       chart.remove()
       chartRef.current = null
@@ -1336,22 +1378,22 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     ro.observe(containerRef.current)
 
     const onWheel = (e: WheelEvent) => {
+      // Capture phase: run BEFORE lightweight-charts' own wheel listener on
+      // the canvas and stopPropagation, so the native zoom (which would zoom
+      // a second time, anchored elsewhere) never fires.
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault()
         e.stopPropagation()
-        const ts = chart.timeScale()
-        const options = ts.options()
-        const currentSpacing = (options as any).barSpacing || 6
-        const delta = e.deltaY > 0 ? -0.5 : 0.5
-        const newSpacing = Math.max(1, Math.min(30, currentSpacing + delta))
-        ts.applyOptions({ barSpacing: newSpacing })
+        if (containerRef.current) {
+          applyCursorAnchoredZoom(chart, containerRef.current, e.clientX, e.deltaY)
+        }
       }
     }
-    containerRef.current.addEventListener('wheel', onWheel, { passive: false })
+    containerRef.current.addEventListener('wheel', onWheel, { passive: false, capture: true })
 
     return () => {
       destroyedRef.current = true
-      containerRef.current?.removeEventListener('wheel', onWheel)
+      containerRef.current?.removeEventListener('wheel', onWheel, { capture: true })
       ro.disconnect()
       chart.remove()
       chartRef.current = null
