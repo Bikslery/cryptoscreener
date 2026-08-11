@@ -283,7 +283,7 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  options?: { limit?: number },
+  options?: { limit?: number; visibleBars?: number },
   lastUpdateRef?: React.RefObject<number>,
   lifecycleRef?: React.RefObject<CandleLifecycle | null>,
   chartVersion?: number,
@@ -342,7 +342,10 @@ function useFullHistory(
             ts.setVisibleLogicalRange(prevLogical)
           } else {
             const lastBar = candleData.length - 1
-            const visibleBars = 150
+            // Initial scale when opening a chart with no saved view: how many
+            // bars fit on screen. Mini charts default to 150; the expanded
+            // chart opens wider (450) via options.visibleBars.
+            const visibleBars = options?.visibleBars ?? 150
             ts.setVisibleLogicalRange({ from: lastBar - visibleBars, to: lastBar + 5 })
           }
         }
@@ -1400,7 +1403,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef, chartVersion)
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000, visibleBars: 450 }, lastUpdateRef, lifecycleRef, chartVersion)
 
   const {
     activeTool,
