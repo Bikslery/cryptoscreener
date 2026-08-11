@@ -78,6 +78,10 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
 
   private candlePool: WsStreamPool
   private depthPool: WsStreamPool
+  private bookTickerPool: WsStreamPool
+
+  private bookTickerSubs = new Set<string>()
+  private bookTickerCbs: Array<(symbol: string, midPrice: number) => void> = []
 
   constructor() {
     this.wsAgent = getWsAgent()
@@ -125,12 +129,51 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       undefined,
       true  // supportsIncrementalSub
     )
+
+    // Best bid/ask feed. `!miniTicker@arr` is a batched snapshot pushed only
+    // ~1x/sec; bookTicker fires on EVERY book change (orders placed/cancelled
+    // at the top level) — for liquid pairs that's dozens of updates/sec, which
+    // is what makes the price feel truly "live". Only top-N symbols are
+    // subscribed (per-symbol @bookTicker streams) because the all-market
+    // !bookTicker@arr stream is very heavy.
+    this.bookTickerPool = new WsStreamPool(
+      `${WS_BASE}/stream`,
+      'Binance Futures BookTicker',
+      (msg) => {
+        try {
+          const d = msg.data || msg
+          const symbol = d.s
+          if (!symbol || d.b === undefined || d.a === undefined) return
+          const bid = parseFloat(d.b)
+          const ask = parseFloat(d.a)
+          if (!isFinite(bid) || !isFinite(ask) || bid <= 0 || ask <= 0) return
+          const mid = (bid + ask) / 2
+          for (const cb of this.bookTickerCbs) cb(symbol.toUpperCase(), mid)
+        } catch {}
+      },
+      undefined,
+      true  // supportsIncrementalSub
+    )
   }
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
   onDepth(cb: DepthCallback) { this.depthCbs.push(cb) }
+  onBookTicker(cb: (symbol: string, midPrice: number) => void) { this.bookTickerCbs.push(cb) }
   getRateLimiter() { return this.rateLimiter }
+
+  subscribeBookTicker(symbol: string) {
+    const stream = `${symbol.toLowerCase()}@bookTicker`
+    if (this.bookTickerSubs.has(stream)) return
+    this.bookTickerSubs.add(stream)
+    this.bookTickerPool.addStream(stream)
+  }
+
+  unsubscribeBookTicker(symbol: string) {
+    const stream = `${symbol.toLowerCase()}@bookTicker`
+    if (!this.bookTickerSubs.delete(stream)) return
+    this.bookTickerPool.removeStream(stream)
+  }
 
   connect() {
     this.rateLimiter.probeWeight(this.fetchDispatcher).then(() => {
@@ -388,6 +431,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     if (this.tickerWsSilenceTimer) clearTimeout(this.tickerWsSilenceTimer)
     this.candlePool.close()
     this.depthPool.close()
+    this.bookTickerPool.close()
     if (this.statsTimer) clearInterval(this.statsTimer)
     if (this.priceTimer) clearInterval(this.priceTimer)
     this.stopCandleSilenceChecker()

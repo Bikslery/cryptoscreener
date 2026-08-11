@@ -103,7 +103,11 @@ function flushBatchBuffer() {
   }
 }
 
-let batchTimer: ReturnType<typeof setInterval> | null = setInterval(flushBatchBuffer, 100)
+// Channel batches (depth/trades) flush every WS_BATCH_INTERVAL_MS — the
+// immediate per-symbol channels (candles, trades for subscribed charts) are
+// not affected by this timer.
+const WS_BATCH_INTERVAL_MS = parseInt(process.env.WS_BATCH_INTERVAL_MS || '40', 10)
+let batchTimer: ReturnType<typeof setInterval> | null = setInterval(flushBatchBuffer, WS_BATCH_INTERVAL_MS)
 
 export function stopWsHub() {
   if (batchTimer) { clearInterval(batchTimer); batchTimer = null }
@@ -301,14 +305,21 @@ export function broadcast(msg: WsMessage) {
     if (msg.type === 'ticker') {
       const tickers = msg.data as UnifiedTicker[]
       const fullTickers = msg.full as UnifiedTicker[] | undefined
+      const isSnapshot = !!(msg as { snapshot?: boolean }).snapshot
 
-      // For global subscribers: send full array once (not delta)
-      // For per-client: filter from full array
-      const sourceForAll = fullTickers || tickers
+      // Global subscribers get compact DELTA frames every broadcast and a
+      // full SNAPSHOT every ~2s (the aggregator stamps msg.snapshot). The full
+      // array of all exchanges is ~1200 tickers; shipping it at 25Hz would
+      // drown clients in bytes even deflated. The client merges deltas in
+      // place (identity-preserving) and replaces state on snapshots.
+      // Per-client filtered subscribers get the same delta/snapshot semantics.
+      const globalPayload = isSnapshot ? (fullTickers || tickers) : tickers
+      const filterSource = isSnapshot ? (fullTickers || tickers) : tickers
 
       // Serialization cache: group by ticker signature
       const sigCache = new Map<string, Buffer>()
-      let fullRaw: Buffer | null = null
+      let snapshotRaw: Buffer | null = null
+      let deltaRaw: Buffer | null = null
       let sentCount = 0
 
       for (const client of clients.values()) {
@@ -319,20 +330,28 @@ export function broadcast(msg: WsMessage) {
         }
 
         if (client.tickerSymbols.size === 0) {
-          // Subscribed to all tickers — send full array for state merge
-          if (fullRaw === null) {
-            fullRaw = encodePayload({ type: 'ticker', data: sourceForAll })
+          // Subscribed to all tickers
+          if (!globalPayload || globalPayload.length === 0) continue
+          let raw: Buffer | null = isSnapshot ? snapshotRaw : deltaRaw
+          if (raw === null) {
+            raw = encodePayload(isSnapshot
+              ? { type: 'ticker', data: globalPayload, snapshot: true }
+              : { type: 'ticker', data: globalPayload, delta: true })
+            if (isSnapshot) snapshotRaw = raw
+            else deltaRaw = raw
           }
-          client.ws.send(fullRaw, (err) => { if (err) client.buffered++ })
+          client.ws.send(raw, (err) => { if (err) client.buffered++ })
           sentCount++
         } else {
-          // Per-client filtered tickers — filter from full array, cache by signature
+          // Per-client filtered tickers — filter from the frame, cache by signature
           const sig = [...client.tickerSymbols].sort().join(',')
           let cached = sigCache.get(sig)
           if (cached === undefined) {
-            const filtered = (fullTickers || tickers).filter(t => client.tickerSymbols.has(t.symbol))
+            const filtered = filterSource.filter(t => client.tickerSymbols.has(t.symbol))
             if (filtered.length > 0) {
-              cached = encodePayload({ type: 'ticker', data: filtered })
+              cached = encodePayload(isSnapshot
+                ? { type: 'ticker', data: filtered, snapshot: true }
+                : { type: 'ticker', data: filtered, delta: true })
               sigCache.set(sig, cached)
             }
           }
@@ -382,9 +401,17 @@ export function startRedisListener() {
     sub.on('message', (channel, message) => {
       try {
         if (channel === 'tickers') {
-          const tickers = JSON.parse(message) as UnifiedTicker[]
+          // Ingestion nodes publish the full array; new payloads also carry
+          // the delta + snapshot flag so broadcast nodes forward the same
+          // compact frames their all-in-one cousins send. Plain arrays (old
+          // payloads) are treated as a full snapshot.
+          const parsed = JSON.parse(message)
+          const isObject = !Array.isArray(parsed)
+          const tickers = (isObject ? parsed.full : parsed) as UnifiedTicker[]
+          const delta = (isObject && Array.isArray(parsed.delta) ? parsed.delta : tickers) as UnifiedTicker[]
+          const snapshot = isObject ? !!parsed.snapshot : true
           setTickersFromRedis(tickers)
-          broadcast({ type: 'ticker', data: tickers })
+          broadcast({ type: 'ticker', data: delta, full: tickers, snapshot })
         } else if (channel === 'candles') {
           const candle = JSON.parse(message) as UnifiedCandle
           // Keep the local cache warm so initial-candles pushes and REST

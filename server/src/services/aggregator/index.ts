@@ -98,8 +98,14 @@ function pickBestFromMap(): Map<string, UnifiedTicker> {
   return best
 }
 
-const BROADCAST_INTERVAL = 100
+// Broadcast cadence: price deltas every TICKER_BROADCAST_INTERVAL_MS (default
+// 40ms ≈ 25Hz), plus a full snapshot every TICKER_SNAPSHOT_INTERVAL_MS (default
+// 2s). Clients merge deltas in place and replace state on snapshots — shipping
+// the whole ~1200-ticker array at 25Hz would drown the wire even deflated.
+const BROADCAST_INTERVAL = parseInt(process.env.TICKER_BROADCAST_INTERVAL_MS || '40', 10)
+const SNAPSHOT_INTERVAL = parseInt(process.env.TICKER_SNAPSHOT_INTERVAL_MS || '2000', 10)
 let lastBroadcast = 0
+let lastSnapshotBroadcast = 0
 let loggedFirst = false
 let tickerCount = 0
 let lastBroadcastLog = 0
@@ -134,6 +140,61 @@ function computeDelta(tickers: UnifiedTicker[]): UnifiedTicker[] {
   return delta
 }
 
+/**
+ * Throttled ticker fan-out (shared by the adapter onTicker handler and the
+ * aggTrade/bookTicker price paths). Emits a compact delta frame every
+ * BROADCAST_INTERVAL and a full snapshot every SNAPSHOT_INTERVAL so clients
+ * stay consistent without receiving the full array at 25Hz.
+ */
+function maybeBroadcastTickers() {
+  const now = Date.now()
+  if (now - lastBroadcast <= BROADCAST_INTERVAL) return
+  lastBroadcast = now
+
+  const best = getBestMap()
+  const arr = getAllTickers()
+  const bestArr = Array.from(best.values())
+
+  const delta = computeDelta(arr)
+  const isSnapshot = now - lastSnapshotBroadcast >= SNAPSHOT_INTERVAL
+  if (isSnapshot) lastSnapshotBroadcast = now
+
+  if (isIngestion && REDIS_ENABLED) {
+    try {
+      const redis = getRedisPub()
+      // Publish full + delta so broadcast-only nodes can forward the same
+      // compact frames instead of re-sending the whole array at 25Hz.
+      redis.publish('tickers', JSON.stringify({ full: arr, delta, snapshot: isSnapshot })).catch(() => {})
+    } catch {}
+  }
+
+  if (isBroadcast) {
+    if (isSnapshot || delta.length > 0) {
+      broadcast({ type: 'ticker', data: delta, full: arr, snapshot: isSnapshot })
+      broadcastCount++
+    }
+    const now2 = Date.now()
+    if (now2 - lastBroadcastLog > BROADCAST_LOG_INTERVAL) {
+      lastBroadcastLog = now2
+      console.log(`[Aggregator] Broadcast #${broadcastCount}: ${delta.length}/${arr.length} tickers changed, ${tickerCount} total ticks received${isSnapshot ? ' (snapshot)' : ''}`)
+    }
+  }
+
+  if (!loggedFirst) {
+    loggedFirst = true
+    console.log(`[Aggregator] First broadcast: ${arr.length} exchange tickers / ${bestArr.length} best coins (received ${tickerCount} ticks), top: ${bestArr.slice(0, 3).map(t => t.symbol).join(', ')}`)
+  }
+
+  // Re-evaluate aggTrade + bookTicker coverage periodically — the very first
+  // broadcast can fire with an almost-empty ticker map, so wait until it has
+  // populated before subscribing (and keep refreshing as rankings shift).
+  if (bestArr.length >= AGGTRADE_MIN_SYMBOLS && now - lastAggTradeResubscribe > AGGTRADE_RESUBSCRIBE_INTERVAL) {
+    lastAggTradeResubscribe = now
+    syncAggTradeSubscriptions()
+    syncBookTickerSubscriptions()
+  }
+}
+
 const ROLE = process.env.ROLE || 'all'
 const isBroadcast = ROLE === 'broadcast' || ROLE === 'all'
 const isIngestion = ROLE === 'ingestion' || ROLE === 'all'
@@ -159,45 +220,7 @@ export function startAggregator() {
       // never cross-fed into binance-futures entries (per-market prices can
       // decohere during volatile moves, and the UI label must match the
       // actual source).
-      const now = Date.now()
-      if (now - lastBroadcast > BROADCAST_INTERVAL) {
-        lastBroadcast = now
-        const best = getBestMap()
-        const arr = getAllTickers()
-        const bestArr = Array.from(best.values())
-
-        if (isIngestion && REDIS_ENABLED) {
-          try {
-            const redis = getRedisPub()
-            redis.publish('tickers', JSON.stringify(arr)).catch(() => {})
-          } catch {}
-        }
-
-        if (isBroadcast) {
-          const delta = computeDelta(arr)
-          if (delta.length > 0) {
-            broadcast({ type: 'ticker', data: delta, full: arr })
-            broadcastCount++
-          }
-          const now2 = Date.now()
-          if (now2 - lastBroadcastLog > BROADCAST_LOG_INTERVAL) {
-            lastBroadcastLog = now2
-            console.log(`[Aggregator] Broadcast #${broadcastCount}: ${delta.length}/${arr.length} tickers changed, ${tickerCount} total ticks received`)
-          }
-        }
-
-        if (!loggedFirst) {
-          loggedFirst = true
-          console.log(`[Aggregator] First broadcast: ${arr.length} exchange tickers / ${bestArr.length} best coins (received ${tickerCount} ticks), top: ${bestArr.slice(0, 3).map(t => t.symbol).join(', ')}`)
-        }
-        // Re-evaluate aggTrade coverage periodically — the very first broadcast
-        // can fire with an almost-empty ticker map, so wait until it has
-        // populated before subscribing (and keep refreshing as rankings shift).
-        if (bestArr.length >= AGGTRADE_MIN_SYMBOLS && now - lastAggTradeResubscribe > AGGTRADE_RESUBSCRIBE_INTERVAL) {
-          lastAggTradeResubscribe = now
-          syncAggTradeSubscriptions()
-        }
-      }
+      maybeBroadcastTickers()
     })
 
     adapter.onCandle((candle) => {
@@ -225,6 +248,13 @@ export function startAggregator() {
       }
     })
 
+    // Best bid/ask midpoint → live price for top liquid pairs (bookTicker).
+    // Optional capability — only adapters that expose it participate; others
+    // keep their price updates on aggTrade/miniTicker as before.
+    adapter.onBookTicker?.((symbol, mid) => {
+      updateTickerPrice(symbol, adapter.exchange, mid)
+    })
+
     console.log(`[Aggregator] Starting adapter: ${adapter.name} (${adapter.exchange})`)
     adapter.connect()
   }
@@ -236,6 +266,13 @@ const AGGTRADE_MIN_SYMBOLS = 30
 const AGGTRADE_RESUBSCRIBE_INTERVAL = 60_000
 const subscribedAggTradeSymbols = new Set<string>()
 let lastAggTradeResubscribe = 0
+
+// Per-symbol bookTicker (best bid/ask) coverage for the top BOOKTICKER_TOP_N
+// futures pairs by 24h quote volume. Unlike !miniTicker@arr (batched ~1Hz),
+// bookTicker fires on EVERY top-of-book change — dozens of updates/sec on
+// liquid pairs — so their displayed price tracks the market continuously.
+const BOOKTICKER_TOP_N = parseInt(process.env.BOOKTICKER_TOP_N || '50', 10)
+const subscribedBookTicker = new Set<string>()
 
 // Subscribe EVERY symbol on EVERY exchange to its aggTrade stream, so all
 // prices (coin list, top bar, charts) update instantly per trade — not just
@@ -267,6 +304,42 @@ function syncAggTradeSubscriptions() {
   subscribedAggTradeSymbols.clear()
   for (const s of newSymbols) subscribedAggTradeSymbols.add(s)
   console.log(`[Aggregator] Subscribed aggTrade for ${newSymbols.size} symbols`)
+}
+
+// Keep the per-symbol bookTicker pool aligned with the current top-N by volume
+// (rankings shift as the market moves; the pool refreshes every re-sync).
+function syncBookTickerSubscriptions() {
+  const adapter = adapters.find(a => a.exchange === 'binance-futures')
+  if (!adapter?.subscribeBookTicker || !adapter.unsubscribeBookTicker) return
+  const subscribe = adapter.subscribeBookTicker.bind(adapter)
+  const unsubscribe = adapter.unsubscribeBookTicker.bind(adapter)
+
+  const all = getAllTickers()
+  const top = all
+    .filter(t => t.exchange === 'binance-futures')
+    .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+    .slice(0, BOOKTICKER_TOP_N)
+  const wanted = new Set(top.map(t => t.symbol))
+
+  let added = 0
+  let removed = 0
+  for (const sym of wanted) {
+    if (!subscribedBookTicker.has(sym)) {
+      subscribe(sym)
+      added++
+    }
+  }
+  for (const sym of subscribedBookTicker) {
+    if (!wanted.has(sym)) {
+      unsubscribe(sym)
+      removed++
+    }
+  }
+  subscribedBookTicker.clear()
+  for (const s of wanted) subscribedBookTicker.add(s)
+  if (added > 0 || removed > 0) {
+    console.log(`[Aggregator] BookTicker sync: +${added} -${removed} → ${subscribedBookTicker.size} symbols`)
+  }
 }
 
 async function computeMetrics() {
@@ -366,32 +439,7 @@ export function updateTickerPrice(symbol: string, exchange: Exchange, price: num
   cachedBestMap = null
   cachedBest = null
   tickerCount++
-  const now = Date.now()
-  if (now - lastBroadcast > BROADCAST_INTERVAL) {
-    lastBroadcast = now
-    const best = getBestMap()
-    const arr = getAllTickers()
-
-    if (isIngestion && REDIS_ENABLED) {
-      try {
-        const redis = getRedisPub()
-        redis.publish('tickers', JSON.stringify(arr)).catch(() => {})
-      } catch {}
-    }
-
-    if (isBroadcast) {
-      const delta = computeDelta(arr)
-      if (delta.length > 0) {
-        broadcast({ type: 'ticker', data: delta, full: arr })
-        broadcastCount++
-      }
-      const now2 = Date.now()
-      if (now2 - lastBroadcastLog > BROADCAST_LOG_INTERVAL) {
-        lastBroadcastLog = now2
-        console.log(`[Aggregator] Broadcast #${broadcastCount}: ${delta.length}/${arr.length} tickers changed, ${tickerCount} total ticks received`)
-      }
-    }
-  }
+  maybeBroadcastTickers()
 }
 
 export function getTickers(): UnifiedTicker[] {

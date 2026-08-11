@@ -14,6 +14,10 @@ export interface ExchangeAdapter {
   onTicker(cb: (t: UnifiedTicker) => void): void
   onCandle(cb: (c: UnifiedCandle) => void): void
   onDepth(cb: (d: UnifiedDepth) => void): void
+  /** Best bid/ask midpoint feed (bookTicker). Optional — only some adapters expose it. */
+  onBookTicker?(cb: (symbol: string, midPrice: number) => void): void
+  subscribeBookTicker?(symbol: string): void
+  unsubscribeBookTicker?(symbol: string): void
   subscribeCandle(symbol: string, tf: string, cb: CandleCallback): void
   unsubscribeCandle(symbol: string, tf: string): void
   subscribeDepth(symbol: string, cb: DepthCallback): void

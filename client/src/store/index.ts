@@ -58,6 +58,75 @@ function buildCoinMap(coins: UnifiedTicker[]): Map<string, UnifiedTicker> {
   return m
 }
 
+/**
+ * Merge an incoming ticker batch into an existing list using identity
+ * preservation: unchanged entries keep their object reference (so memoized
+ * rows/charts don't re-render), changed entries are replaced. Duplicates are
+ * deduped by symbol keeping the highest-priority exchange (see dedup).
+ * Exported for unit tests.
+ */
+export function mergeTickerBatch(
+  list: UnifiedTicker[],
+  updates: UnifiedTicker[],
+): { next: UnifiedTicker[]; dirty: boolean } {
+  const updateMap = new Map<string, UnifiedTicker>()
+  for (const c of dedup(updates)) updateMap.set(c.symbol, c)
+  let dirty = false
+  const next = list.map((c) => {
+    const u = updateMap.get(c.symbol)
+    if (!u) return c
+    if (u.price === c.price && u.change24h === c.change24h && u.quoteVolume24h === c.quoteVolume24h) return c
+    dirty = true
+    return u
+  })
+  return { next, dirty }
+}
+
+/**
+ * Apply a ticker frame (delta or snapshot) to the store state.
+ * - Delta: identity-preserving in-place merge (fast path, no re-sort).
+ * - Snapshot (or the first message on connect): full replace + recompute
+ *   (re-sort, pageCount clamp, coinMap rebuild). Exported for unit tests.
+ */
+export function applyTickerFrame(
+  state: { coins: UnifiedTicker[]; sortedCoins: UnifiedTicker[]; coinMap: Map<string, UnifiedTicker>; autoRefresh: boolean; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; chartExchange: ChartExchange; minVolume24h: number; pageIndex: number },
+  coins: UnifiedTicker[],
+  isDelta: boolean,
+): Partial<CoinListStore> {
+  if (!state.autoRefresh) {
+    // Auto-refresh off: patch prices in place; never re-sort or replace
+    // wholesale (the visible order stays frozen by design).
+    const merged = mergeTickerBatch(state.coins, coins)
+    if (!merged.dirty) return {}
+    const updateMap = new Map<string, UnifiedTicker>()
+    for (const c of dedup(coins)) updateMap.set(c.symbol, c)
+    const newCoinMap = new Map(state.coinMap)
+    for (const [sym, u] of updateMap) newCoinMap.set(sym, u)
+    return {
+      coins: merged.next,
+      sortedCoins: state.sortedCoins.map((c) => updateMap.get(c.symbol) || c),
+      coinMap: newCoinMap,
+    }
+  }
+
+  if (isDelta) {
+    const merged = mergeTickerBatch(state.coins, coins)
+    if (!merged.dirty) return {}
+    const updateMap = new Map<string, UnifiedTicker>()
+    for (const c of dedup(coins)) updateMap.set(c.symbol, c)
+    const newCoinMap = new Map(state.coinMap)
+    for (const [sym, u] of updateMap) newCoinMap.set(sym, u)
+    return {
+      coins: merged.next,
+      sortedCoins: state.sortedCoins.map((c) => updateMap.get(c.symbol) || c),
+      coinMap: newCoinMap,
+    }
+  }
+
+  // Full snapshot (initial connect or periodic) — replace + recompute.
+  return { coins, ...recompute({ ...state, coins }) }
+}
+
 const VOLUME_FILTER_MIN = 0
 const VOLUME_FILTER_MAX = VOLUME_HIGH_THRESHOLD
 const VOLUME_FILTER_STORAGE_KEY = 'serotonin.minVolume24h'
@@ -228,70 +297,21 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   },
 
   init: () => {
-    let lastSortUpdate = 0
-    const SORT_INTERVAL = 10000
-
     const unsubTicker = wsOnType('ticker', (msg) => {
       if (!Array.isArray(msg.data)) return
       const s = get()
       const coins = msg.data as UnifiedTicker[]
-      const now = Date.now()
+      // Server stamps delta:true on compact frames (changed entries only) and
+      // snapshot:true on periodic full arrays. The initial push on connect is
+      // an unmarked full array → treated as a snapshot.
+      const isDelta = !!(msg as { delta?: boolean }).delta
+
       for (const c of coins) {
         setLivePrice(c.symbol, c.price)
       }
-      if (!s.autoRefresh) {
-        // Auto-refresh off: still update prices but skip re-sorting
-        const updateMap = new Map<string, UnifiedTicker>()
-        // Dedup by symbol keeping the highest-priority exchange — the delta
-        // contains one entry per exchange and the last-arriving one must NOT
-        // overwrite e.g. binance-futures with the spot ticker (BCH showed spot
-        // volume "1M" under the BI-F badge, and pricePrecision flips caused
-        // mini charts to recreate).
-        for (const c of dedup(coins)) updateMap.set(c.symbol, c)
 
-        let dirty = false
-        const newCoins = s.coins.map((c) => {
-          const u = updateMap.get(c.symbol)
-          if (!u) return c
-          if (u.price === c.price && u.change24h === c.change24h && u.quoteVolume24h === c.quoteVolume24h) return c
-          dirty = true
-          return u
-        })
-        if (!dirty) return
-
-        const newSorted = s.sortedCoins.map((c) => updateMap.get(c.symbol) || c)
-        const newCoinMap = new Map(s.coinMap)
-        for (const [sym, u] of updateMap) newCoinMap.set(sym, u)
-        set({ coins: newCoins, sortedCoins: newSorted, coinMap: newCoinMap })
-        return
-      }
-      if (now - lastSortUpdate > SORT_INTERVAL) {
-        lastSortUpdate = now
-        set({ coins, ...recompute({ ...s, coins }) })
-      } else {
-        // Quick price refresh without re-sorting/re-cloning everything.
-        // Merge in place: build a small updates map, then patch arrays
-        // using identity-preserving updates only for changed coins.
-        // Same priority-dedup as the full recompute so the chartExchange's
-        // entry always wins within the 10s window (see dedup()).
-        const updateMap = new Map<string, UnifiedTicker>()
-        for (const c of dedup(coins)) updateMap.set(c.symbol, c)
-
-        let dirty = false
-        const newCoins = s.coins.map((c) => {
-          const u = updateMap.get(c.symbol)
-          if (!u) return c
-          if (u.price === c.price && u.change24h === c.change24h && u.quoteVolume24h === c.quoteVolume24h) return c
-          dirty = true
-          return u
-        })
-        if (!dirty) return
-
-        const newSorted = s.sortedCoins.map((c) => updateMap.get(c.symbol) || c)
-        const newCoinMap = new Map(s.coinMap)
-        for (const [sym, u] of updateMap) newCoinMap.set(sym, u)
-        set({ coins: newCoins, sortedCoins: newSorted, coinMap: newCoinMap })
-      }
+      const patch = applyTickerFrame(s, coins, isDelta)
+      if (Object.keys(patch).length > 0) set(patch)
     })
 
     // Trade messages update only the live-price pub/sub — no array clones,

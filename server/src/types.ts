@@ -116,6 +116,8 @@ export interface WsMessage {
   channel?: string
   data?: unknown
   full?: unknown // full array for ticker delta broadcasts
+  delta?: boolean // ticker message carries only changed entries (merge in place)
+  snapshot?: boolean // ticker message carries the full array (replace state)
   token?: string // JWT token for WS auth
 }
 
