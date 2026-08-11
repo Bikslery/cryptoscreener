@@ -328,13 +328,17 @@ function useFullHistory(
       try {
         const ts = chartRef.current?.timeScale()
         // Capture BEFORE setData — setData resets the scale.
-        const prevRange = sameKey && prevData.length > 0 ? ts?.getVisibleRange() ?? null : null
+        const prevLogical = sameKey && prevData.length > 0 ? ts?.getVisibleLogicalRange() ?? null : null
         candleRef.current.setData(candleData)
         volumeRef.current.setData(volumeData)
         if (ts && candleData.length > 0) {
-          if (prevRange) {
-            // Re-load of the same chart: keep the user where they were.
-            ts.setVisibleRange(prevRange)
+          if (prevLogical) {
+            // Re-load of the same chart: keep the user exactly where they were.
+            // Restore by LOGICAL range, not by time — LWC's timeToIndex clamps
+            // times beyond the last bar to the last index, so a time-restore
+            // snapped the right edge onto the last candle whenever the view
+            // extended past it (e.g. default rightOffset or zoomed-out view).
+            ts.setVisibleLogicalRange(prevLogical)
           } else {
             const lastBar = candleData.length - 1
             const visibleBars = 150
@@ -540,7 +544,7 @@ function useLazyScroll(
         const ts = chart?.timeScale()
         if (!chart || !ts || destroyedRef.current) return
 
-        const prevRange = ts.getVisibleRange()
+        const prevLogical = ts.getVisibleLogicalRange()
         const prevLen = candlesDataRef.current.length
         candlesDataRef.current = merged
         const added = merged.length - prevLen
@@ -570,10 +574,15 @@ function useLazyScroll(
             applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
           }
 
-          // Restore by time — unlike the old logical-range restore this never
-          // jumps: prepending bars shifts logical indexes, not wall-clock times.
-          if (prevRange) {
-            ts.setVisibleRange(prevRange)
+          // Restore by LOGICAL range shifted by `added` — prepending bars
+          // shifts every old logical index by `added`, so [from+added, to+added]
+          // puts back the exact same bars at the same pixels, preserving the
+          // user's zoom and any empty space on the right. (Restoring by TIME
+          // snapped the right edge onto the last candle whenever the view
+          // extended past it: LWC's timeToIndex clamps beyond-the-last-bar
+          // times to the last index.)
+          if (prevLogical) {
+            ts.setVisibleLogicalRange({ from: prevLogical.from + added, to: prevLogical.to + added })
           }
         } catch (err) {
           console.error('[ChartGrid] setData failed during lazy scroll', { symbol, tf, error: err })
