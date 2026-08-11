@@ -4,13 +4,13 @@ import { useAuthStore, useUIStore } from '../../store'
 import { useDrawingHotkeysStore, eventToCombo, formatCombo, DRAWING_TOOL_LABELS, DEFAULT_DRAWING_HOTKEYS } from '../../store/drawingHotkeys'
 import type { DrawingTool } from '../../types'
 import api from '../../services/api'
-import { X, User, LogOut, Shield, KeyRound, Keyboard } from 'lucide-react'
+import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3 } from 'lucide-react'
 import './ProfileModal.css'
 
 type ResetStep = 'idle' | 'code' | 'password' | 'done'
 
 export default function ProfileModal() {
-  const { username, telegramVerified, userId, logout } = useAuthStore()
+  const { username, telegramVerified, userId, logout, settings, updateSettings } = useAuthStore()
   const { setShowProfile } = useUIStore()
 
   // Password reset inline flow
@@ -29,6 +29,29 @@ export default function ProfileModal() {
   const resetDefaults = useDrawingHotkeysStore(s => s.resetDefaults)
   const [recording, setRecording] = useState<DrawingTool | null>(null)
   const [hotkeyError, setHotkeyError] = useState('')
+
+  // Chart scale setting — slider with debounced save (range inputs fire many
+  // change events per drag; we don't want a PUT per tick).
+  const [visibleBars, setVisibleBars] = useState(settings?.chartVisibleBars ?? 450)
+  const scaleSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    setVisibleBars(settings?.chartVisibleBars ?? 450)
+  }, [settings?.chartVisibleBars])
+
+  const handleScaleChange = (v: number) => {
+    setVisibleBars(v)
+    if (scaleSaveTimer.current) clearTimeout(scaleSaveTimer.current)
+    scaleSaveTimer.current = setTimeout(() => {
+      updateSettings({ chartVisibleBars: v }).catch(() => {})
+    }, 400)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (scaleSaveTimer.current) clearTimeout(scaleSaveTimer.current)
+    }
+  }, [])
 
   const stopTimer = () => {
     if (timerRef.current) {
@@ -345,6 +368,35 @@ export default function ProfileModal() {
             <LogOut size={15} />
             выйти
           </button>
+        </div>
+
+        {/* Chart settings section */}
+        <div className="profile-section">
+          <div className="section-header">
+            <div className="section-icon">
+              <BarChart3 size={14} />
+            </div>
+            <h2>График</h2>
+          </div>
+
+          <div className="profile-field">
+            <label>Баров на экране при открытии</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={50}
+                max={1000}
+                step={50}
+                value={visibleBars}
+                onChange={(e) => handleScaleChange(Number(e.target.value))}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{visibleBars}</span>
+            </div>
+            <div className="profile-scale-hint">
+              Применяется к большому графику при открытии нового символа
+            </div>
+          </div>
         </div>
 
         {/* Hotkeys section */}

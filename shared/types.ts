@@ -129,6 +129,7 @@ export interface UserSettings {
   }
   defaultTimeframe: string
   chartBlocks: string[]
+  chartVisibleBars?: number
 }
 
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
