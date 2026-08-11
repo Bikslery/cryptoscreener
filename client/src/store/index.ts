@@ -364,6 +364,22 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
     })
 
     wsSubscribe('ticker')
+
+    // REST bootstrap: fill the list the moment the HTTP response lands instead
+    // of waiting for the WS snapshot (one extra round-trip to the VPS). Only
+    // applies while no WS ticker data has arrived — the WS snapshot (same
+    // payload, fresher by definition) wins if it lands first, and the guard
+    // prevents this older array from clobbering it.
+    api.get('/coins')
+      .then((res) => {
+        const s = get()
+        if (s.coins.length > 0) return
+        const coins = res.data
+        if (!Array.isArray(coins) || coins.length === 0) return
+        set({ coins, ...recompute({ ...s, coins }) })
+      })
+      .catch(() => { /* WS snapshot covers */ })
+
     return () => {
       unsubTicker()
       unsubTradeWild()

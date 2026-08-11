@@ -7,16 +7,21 @@ import { getTickers, getTicker } from '../aggregator/index.js'
 // переход на 1m всегда был холодным (REST к бирже). Топ-50 символов достаточно.
 export const PRELOAD_TFS = ['5m', '15m', '1h', '4h', '1m'] as const
 export const INITIAL_CANDLES_TF = '5m'
-const TOP_SYMBOLS_COUNT = 100
+// Cold symbols (anything outside the preload set) pay a direct REST round-trip
+// to the exchange on first request — the deeper the preload, the fewer cold
+// hits. 300 symbols × 1m/5m covers essentially every symbol a screener user
+// actually opens, while staying well inside the 2400 weight/min budget
+// (~825 klines at boot, ~165/min average on refresh).
+const TOP_SYMBOLS_COUNT = 300
 const P1_CONCURRENCY = 10
 const RATE_LIMIT_MS = 50
 const PERIODIC_REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes
 const PRELOAD_MATRIX: Record<string, { symbols: number; candles: number }> = {
-  '5m': { symbols: 100, candles: 1000 },
-  '15m': { symbols: 100, candles: 1000 },
+  '5m': { symbols: 300, candles: 1000 },
+  '15m': { symbols: 150, candles: 1000 },
   '1h': { symbols: 100, candles: 1000 },
   '4h': { symbols: 75, candles: 750 },
-  '1m': { symbols: 50, candles: 1000 },
+  '1m': { symbols: 200, candles: 1000 },
 }
 const WS_TFS = ['5m', '1m', '1h', '4h'] as const
 const REFRESH_TFS = ['5m', '1m', '15m', '1h', '4h'] as const
@@ -174,6 +179,10 @@ function periodicRefresh(
       }
       const promises = batch.map(async (symbol) => {
         for (const tf of REFRESH_TFS) {
+          // Only refresh timeframes this symbol actually preloaded — keeps the
+          // periodic burst proportional to the (now larger) preload matrix
+          // instead of multiplying every symbol by every timeframe.
+          if (i + batch.indexOf(symbol) >= (PRELOAD_MATRIX[tf]?.symbols ?? 0)) continue
           try {
             const limit = PRELOAD_MATRIX[tf]?.candles || 1000
             const { candles, source } = await fetchCandlesFor(symbol, tf, limit, adapters)

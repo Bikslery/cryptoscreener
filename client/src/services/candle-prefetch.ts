@@ -95,14 +95,32 @@ export function getOrFetchBulk(
   const existing = inflightBulk.get(bulkKey)
   if (existing) return existing
 
-  const missing: string[] = [...symbols]
+  // Client-cache fast path: symbols whose cached history already covers the
+  // request resolve instantly, with zero network round-trips. Repeated page
+  // views and timeframe flips (same exchange) paint straight from memory.
+  // Only valid when the exchange is known — in auto mode the server picks the
+  // source, so the client cache key can't be trusted to match.
+  const cachedResult: Record<string, UnifiedCandle[]> = {}
+  const missing: string[] = []
+  if (exchange) {
+    for (const symbol of symbols) {
+      const cached = candleCache.getCandles(exchange, symbol, tf)
+      if (cached && cached.length >= limit) {
+        cachedResult[symbol] = cached.slice(-limit)
+      } else {
+        missing.push(symbol)
+      }
+    }
+  } else {
+    missing.push(...symbols)
+  }
   if (missing.length === 0) {
-    return Promise.resolve({})
+    return Promise.resolve(cachedResult)
   }
 
   const request = api.post('/coins/candles-bulk', { symbols: missing, tf, limit, exchange, compact: true })
     .then(res => {
-      const result: Record<string, UnifiedCandle[]> = {}
+      const result: Record<string, UnifiedCandle[]> = { ...cachedResult }
       if (isCompactBulk(res.data)) {
         for (const [symbol, entry] of Object.entries(res.data.data)) {
           const ex = entry.exchange || exchange

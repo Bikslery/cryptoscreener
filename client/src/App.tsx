@@ -1,12 +1,15 @@
-import { useEffect } from 'react'
+import { useEffect, lazy, Suspense } from 'react'
 import { ChartGrid } from './components/charts/ChartGrid'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { TopBar } from './components/layout/TopBar'
 import { RightPanel } from './components/layout/RightPanel'
-import AuthModal from './components/auth/AuthModal'
-import { ProfileModalGate } from './components/auth/ProfileModal'
-import { ExchangeModalGate } from './components/exchange/ExchangeModal'
-import { TickerSearchModalGate } from './components/search/TickerSearchModal'
+// Modal-heavy screens are code-split so the main bundle (loaded by every
+// logged-in user on first paint) only contains the chart grid, list and WS
+// plumbing. Each modal downloads its own chunk on first open.
+const AuthModal = lazy(() => import('./components/auth/AuthModal'))
+const ProfileModalGate = lazy(() => import('./components/auth/ProfileModal').then(m => ({ default: m.ProfileModalGate })))
+const ExchangeModalGate = lazy(() => import('./components/exchange/ExchangeModal').then(m => ({ default: m.ExchangeModalGate })))
+const TickerSearchModalGate = lazy(() => import('./components/search/TickerSearchModal').then(m => ({ default: m.TickerSearchModalGate })))
 import { useCoinListStore, useAuthStore, useUIStore } from './store'
 import { useDrawingHotkeysStore } from './store/drawingHotkeys'
 import { wsConnect, wsDisconnect, ensureHealthyConnection } from './services/ws'
@@ -143,7 +146,15 @@ function App() {
 
   // Not logged in — auth gate (full screen, no charts behind)
   if (!isLoggedIn) {
-    return <AuthModal />
+    return (
+      <Suspense fallback={
+        <div className="w-full h-full flex items-center justify-center bg-[#0a0a0a]">
+          <div className="text-zinc-500 text-lg">Загрузка...</div>
+        </div>
+      }>
+        <AuthModal />
+      </Suspense>
+    )
   }
 
   // Logged in — main app
@@ -157,9 +168,11 @@ function App() {
         <div className="w-[1px] bg-[#1f1f1f] flex-shrink-0" />
         <RightPanel />
       </div>
-      <ProfileModalGate />
-      <ExchangeModalGate />
-      <TickerSearchModalGate />
+      <Suspense fallback={null}>
+        <ProfileModalGate />
+        <ExchangeModalGate />
+        <TickerSearchModalGate />
+      </Suspense>
       <ToastContainer />
     </div>
   )
