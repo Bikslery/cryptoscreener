@@ -178,8 +178,13 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     const valid = candles.filter(c => isFiniteOHLCV(c) && c.time > 0)
     if (valid.length === 0) return emptyPatch()
 
-    const earliestTail = tail.length > 0 ? tail[0].candle.time : Infinity
-    const older = valid.filter(c => c.time < earliestTail)
+    // Accept any candle the tail doesn't already track. The gap-backfill path
+    // (ChartGrid.backfillGap) fetches candles that sit BETWEEN tail entries
+    // (a WS stream skipped a period during sharp action) — filtering with
+    // `c.time < earliestTail` dropped exactly those, so the backfill fetched
+    // the missing data but never painted it, leaving a permanent hole.
+    const tailTimes = new Set(tail.map(t => t.candle.time))
+    const older = valid.filter(c => !tailTimes.has(c.time))
 
     return patchFromCandles(older, undefined, older)
   }

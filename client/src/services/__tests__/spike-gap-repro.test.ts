@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createCandleLifecycle, type TradePayload } from '../candle-lifecycle'
+import * as candleCache from '../candle-cache'
 import type { UnifiedCandle, Exchange } from '../../types'
 
 const EX: Exchange = 'binance_futures' as Exchange
@@ -27,6 +28,8 @@ function drawGuardPasses(c: UnifiedCandle): boolean {
 }
 
 describe('SPIKE-GAP repro: sharp spike produces a malformed candle', () => {
+  beforeEach(() => candleCache.clearAll())
+  afterEach(() => candleCache.clearAll())
   it('up-spike: open = first trade price, OHLC valid', () => {
     const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
     lc.applyHistory([makeCandle(300, 98, 101, 97, 100, 50)])
@@ -80,5 +83,59 @@ describe('SPIKE-GAP repro: sharp spike produces a malformed candle', () => {
     // first trade price (or clamped into the OHLC range), not the prev close.
     const fixedUp = makeCandle(360, 130, 130, 130, 130) // open = first trade
     expect(ohlcValid(fixedUp)).toBe(true)
+  })
+})
+
+describe('GAP-BACKFILL repro: fetched gap candles must be painted, not dropped', () => {
+  beforeEach(() => candleCache.clearAll())
+  afterEach(() => candleCache.clearAll())
+
+  it('applyOlderPage keeps candles that sit between tail entries (the gap window)', () => {
+    const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+    lc.applyHistory([
+      makeCandle(180, 98, 101, 97, 100, 50),
+      makeCandle(240, 100, 102, 99, 101, 40),
+      makeCandle(300, 101, 103, 100, 102, 60),
+    ])
+
+    // A trade jumps straight to period 420, skipping 360 → gap {360, 360}.
+    const jump = lc.applyTrade(makeTrade(420, 110, 5))
+    expect(jump.gapBackfill).toEqual({ fromTime: 360, toTime: 360 })
+
+    // backfillGap fetches the missing period and feeds it via applyOlderPage.
+    // Previously the `c.time < earliestTail` filter dropped it (360 is between
+    // the tail's 240 and 420), so the hole stayed on the chart forever.
+    const fill = lc.applyOlderPage([makeCandle(360, 105, 112, 104, 110, 80)])
+    const times = fill.candleUpdates.map(c => c.time)
+    expect(times).toContain(360)
+    expect(times).not.toContain(300) // existing tail candle untouched
+    expect(ohlcValid(fill.candleUpdates[0])).toBe(true)
+  })
+
+  it('candle-cache updateCandle inserts mid-array gap candles (sorted upsert)', () => {
+    candleCache.setCandles(EX, SYM, TF, [
+      makeCandle(240, 100, 102, 99, 101, 40),
+      makeCandle(300, 101, 103, 100, 102, 60),
+    ])
+
+    // The gap candle for period 360 sits BETWEEN existing entries (300 is the
+    // last). updateCandle must insert it, not silently drop it.
+    candleCache.updateCandle(EX, SYM, TF, makeCandle(360, 105, 112, 104, 110, 80))
+
+    const arr = candleCache.getCandles(EX, SYM, TF)!
+    const times = arr.map(c => c.time)
+    expect(times).toEqual([240, 300, 360])
+    expect(arr.every(c => ohlcValid(c))).toBe(true)
+  })
+
+  it('candle-cache updateCandle still replaces an existing time in the middle', () => {
+    candleCache.setCandles(EX, SYM, TF, [
+      makeCandle(240, 100, 102, 99, 101, 40),
+      makeCandle(300, 101, 103, 100, 102, 60),
+    ])
+    candleCache.updateCandle(EX, SYM, TF, makeCandle(300, 101, 105, 100, 104, 70))
+    const arr = candleCache.getCandles(EX, SYM, TF)!
+    expect(arr).toHaveLength(2)
+    expect(arr.find(c => c.time === 300)?.high).toBe(105)
   })
 })

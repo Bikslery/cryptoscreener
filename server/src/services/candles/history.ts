@@ -21,7 +21,22 @@ const LOCK_PREFIX = 'lock:'
 
 const inflightChunks = new Map<string, Promise<UnifiedCandle[]>>()
 
-const memChunks = new Map<string, UnifiedCandle[]>()
+// Chunk cache lifetimes. Historical (closed) chunks are immutable, but a
+// chunk written during a throttled/geo-blocked period may be PARTIAL — and
+// serving that forever is what produced permanent holes in history ("empty
+// spots" during sharp moves). Redis keys get an expiry so poisoned chunks
+// self-heal, and memory chunks are revalidated after MEM_CHUNK_TTL_MS so a
+// bad fetch is retried instead of being served indefinitely.
+const REDIS_CHUNK_TTL_FULL_S = 24 * 3600 // full chunk (CHUNK_SIZE candles)
+const REDIS_CHUNK_TTL_PARTIAL_S = 10 * 60 // partial chunk (short-lived: retry soon)
+const MEM_CHUNK_TTL_MS = 5 * 60 * 1000
+
+interface MemChunk {
+  candles: UnifiedCandle[]
+  ts: number
+}
+
+const memChunks = new Map<string, MemChunk>()
 const MAX_MEM_CHUNKS = 500
 
 function chunkStartMs(timeMs: number, tfMs: number): number {
@@ -75,21 +90,51 @@ async function writeChunkToRedis(key: string, candles: UnifiedCandle[]): Promise
   try {
     const redis = getRedisData()
     const tuples = candles.map(compactCandle)
-    await redis.set(key, JSON.stringify(tuples))
+    const ttl = candles.length >= CHUNK_SIZE ? REDIS_CHUNK_TTL_FULL_S : REDIS_CHUNK_TTL_PARTIAL_S
+    await redis.set(key, JSON.stringify(tuples), 'EX', ttl)
   } catch {}
 }
 
 function readChunkFromMem(key: string, symbol: string, exchange: Exchange, tf: string): UnifiedCandle[] | null {
-  const arr = memChunks.get(key)
-  if (!arr) return null
-  return arr.map(c => ({ ...c, symbol, exchange, timeframe: tf }))
+  const entry = memChunks.get(key)
+  if (!entry) return null
+  // Stale mem chunk (e.g. written during a throttled period with partial
+  // data) — treat as a miss so the fetch is retried and the hole heals.
+  if (Date.now() - entry.ts > MEM_CHUNK_TTL_MS) return null
+  return entry.candles.map(c => ({ ...c, symbol, exchange, timeframe: tf }))
 }
 
 function writeChunkToMem(key: string, candles: UnifiedCandle[]): void {
-  memChunks.set(key, candles)
+  memChunks.set(key, { candles, ts: Date.now() })
   if (memChunks.size > MAX_MEM_CHUNKS) {
     const first = memChunks.keys().next().value
     if (first !== undefined) memChunks.delete(first)
+  }
+}
+
+/**
+ * Drop every cached history chunk (Redis). Called once at startup: chunks
+ * written while an exchange was throttled/geo-blocked may be partial or from
+ * the wrong exchange, and serving them forever shows holes in history. Chunks
+ * are pure cache — they refetch on demand — so clearing is always safe.
+ */
+export async function flushHistoryChunkCache(): Promise<void> {
+  if (!REDIS_ENABLED) return
+  try {
+    const redis = getRedisData()
+    let cursor = '0'
+    let deleted = 0
+    do {
+      const [next, keys] = await redis.scan(cursor, 'MATCH', `${CHUNK_PREFIX}*`, 'COUNT', 200)
+      cursor = next
+      if (keys.length > 0) {
+        deleted += keys.length
+        await redis.del(...keys)
+      }
+    } while (cursor !== '0')
+    console.log(`[History] Flushed ${deleted} cached chunk(s) at startup`)
+  } catch (e) {
+    console.warn('[History] Failed to flush chunk cache:', e instanceof Error ? e.message : e)
   }
 }
 
@@ -127,8 +172,8 @@ async function waitForChunk(key: string, symbol: string, exchange: Exchange, tf:
         }
       } catch {}
     }
-    const mem = memChunks.get(key)
-    if (mem) return mem.map(c => ({ ...c, symbol, exchange, timeframe: tf }))
+    const mem = readChunkFromMem(key, symbol, exchange, tf)
+    if (mem) return mem
     await new Promise(r => setTimeout(r, 50))
   }
   return null

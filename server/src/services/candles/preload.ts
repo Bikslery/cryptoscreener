@@ -1,5 +1,6 @@
 import type { ExchangeAdapter } from '../exchanges/types.js'
-import { setCachedCandlesFromRest, getCachedCandles } from './candle-cache.js'
+import type { UnifiedCandle, Exchange } from '../../types.js'
+import { setCachedCandlesFromRest } from './candle-cache.js'
 import { getTickers, getTicker } from '../aggregator/index.js'
 
 // 1m включён: это рабочий таймфрейм для скальпинга, без прелоада первый
@@ -71,13 +72,40 @@ function getTopSymbols(limit: number): string[] {
     .map(t => t.symbol)
 }
 
-function getAlternateAdapter(
-  current: ExchangeAdapter,
-  adapters: ExchangeAdapter[]
-): ExchangeAdapter | null {
-  // Spot <-> Futures swap
-  const targetType = current.type === 'spot' ? 'futures' : 'spot'
-  return adapters.find(a => a.type === targetType) || null
+/**
+ * Fetch candles for a symbol, preferring the exchange the UI actually labels
+ * for this symbol (getTicker().exchange — e.g. binance-futures for top
+ * symbols), then falling back to the other adapters in priority order.
+ *
+ * Candles are ALWAYS cached under the ACTUAL source exchange key — never
+ * under the target key with data from another exchange. (Previously the
+ * preload fetched everything from adapters[0]=BinanceSpot and stored it
+ * under getTicker().exchange, which for top symbols is binance-futures — so
+ * SPOT candles were served as the "futures" history, and failed fetches left
+ * stale gapped data behind that the route served forever.)
+ */
+async function fetchCandlesFor(
+  symbol: string,
+  tf: string,
+  limit: number,
+  adapters: ExchangeAdapter[],
+): Promise<{ candles: UnifiedCandle[]; source: Exchange }> {
+  const target = getTicker(symbol)?.exchange || 'binance-futures'
+  const ordered = [
+    ...adapters.filter(a => a.exchange === target),
+    ...adapters.filter(a => a.exchange !== target),
+  ]
+  for (const adapter of ordered) {
+    try {
+      const candles = await adapter.fetchCandles(symbol, tf, limit)
+      if (candles.length > 0) {
+        return { candles, source: adapter.exchange }
+      }
+    } catch {
+      // Adapter failed (throttle/geo-block/network) — try the next one.
+    }
+  }
+  return { candles: [], source: target }
 }
 
 async function phase1(
@@ -99,18 +127,11 @@ async function phase1(
         const cfg = PRELOAD_MATRIX[tf]
         if (i + batch.indexOf(symbol) >= cfg.symbols) continue
         try {
-          let candles = await adapter.fetchCandles(symbol, tf, cfg.candles)
-
-          if (candles.length === 0) {
-            const alt = getAlternateAdapter(adapter, adapters)
-            if (alt) {
-              candles = await alt.fetchCandles(symbol, tf, cfg.candles)
-            }
-          }
-
+          const { candles, source } = await fetchCandlesFor(symbol, tf, cfg.candles, adapters)
           if (candles.length > 0) {
-            const exchange = getTicker(symbol)?.exchange || candles[0]?.exchange || adapter.exchange
-            setCachedCandlesFromRest(symbol, tf, candles, exchange)
+            // Cache under the ACTUAL source exchange so the key's data always
+            // matches its label (spot data must not live in a futures key).
+            setCachedCandlesFromRest(symbol, tf, candles, source)
             recordPreload(tf, candles.length)
           } else {
             recordFailure(tf)
@@ -155,14 +176,9 @@ function periodicRefresh(
         for (const tf of REFRESH_TFS) {
           try {
             const limit = PRELOAD_MATRIX[tf]?.candles || 1000
-            let candles = await adapter.fetchCandles(symbol, tf, limit)
-            if (candles.length === 0) {
-              const alt = getAlternateAdapter(adapter, adapters)
-              if (alt) candles = await alt.fetchCandles(symbol, tf, limit)
-            }
+            const { candles, source } = await fetchCandlesFor(symbol, tf, limit, adapters)
             if (candles.length > 0) {
-              const exchange = getTicker(symbol)?.exchange || candles[0]?.exchange || adapter.exchange
-              setCachedCandlesFromRest(symbol, tf, candles, exchange)
+              setCachedCandlesFromRest(symbol, tf, candles, source)
             }
           } catch {}
           await sleep(RATE_LIMIT_MS)

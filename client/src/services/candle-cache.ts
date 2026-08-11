@@ -114,8 +114,22 @@ export function updateCandle(exchange: Exchange, symbol: string, tf: string, can
     }
     touchLru(k)
   } else {
-    const idx = arr.findIndex(c => c.time === normalized.time)
-    if (idx >= 0) arr[idx] = normalized
+    // Sorted upsert: replace if present, otherwise insert at the right index.
+    // Gap backfill (applyOlderPage) writes candles that sit BETWEEN existing
+    // entries — without the insert they never reached the cache and vanished
+    // again on the next setData() rebuild, re-opening the hole.
+    const idx = arr.findIndex(c => c.time >= normalized.time)
+    if (idx >= 0 && arr[idx].time === normalized.time) {
+      arr[idx] = normalized
+    } else if (idx >= 0) {
+      arr.splice(idx, 0, normalized)
+      totalCandleCount++
+      if (arr.length > MAX_CANDLES_PER_KEY + 200) {
+        const excess = arr.length - MAX_CANDLES_PER_KEY
+        arr.splice(0, excess)
+        totalCandleCount -= excess
+      }
+    }
   }
 }
 
