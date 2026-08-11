@@ -1034,16 +1034,12 @@ const MiniChart = memo(function MiniChart({
 
   const {
     activeTool,
-    setActiveTool,
     removeDrawing,
-    clearAllDrawings,
-    hasDrawings,
     handleClick: drawingClickHandler,
     handleMouseDown: drawingMouseDownHandler,
     handleMouseMove: drawingMouseMoveHandler,
     handleMouseUp: drawingMouseUpHandler,
     deactivateTool,
-    pendingPoint,
     primitiveRef,
     isDraggingRef,
     shiftLogicalOffset,
@@ -1184,13 +1180,6 @@ const MiniChart = memo(function MiniChart({
     )}
     {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
     {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
-    <DrawingToolsPanel
-      activeTool={activeTool}
-      setActiveTool={setActiveTool}
-      clearAllDrawings={clearAllDrawings}
-      hasDrawings={hasDrawings}
-      pendingPoint={pendingPoint}
-    />
   </div>
 )
 })
