@@ -242,7 +242,12 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
       if (!s.autoRefresh) {
         // Auto-refresh off: still update prices but skip re-sorting
         const updateMap = new Map<string, UnifiedTicker>()
-        for (const c of coins) updateMap.set(c.symbol, c)
+        // Dedup by symbol keeping the highest-priority exchange — the delta
+        // contains one entry per exchange and the last-arriving one must NOT
+        // overwrite e.g. binance-futures with the spot ticker (BCH showed spot
+        // volume "1M" under the BI-F badge, and pricePrecision flips caused
+        // mini charts to recreate).
+        for (const c of dedup(coins)) updateMap.set(c.symbol, c)
 
         let dirty = false
         const newCoins = s.coins.map((c) => {
@@ -267,8 +272,10 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
         // Quick price refresh without re-sorting/re-cloning everything.
         // Merge in place: build a small updates map, then patch arrays
         // using identity-preserving updates only for changed coins.
+        // Same priority-dedup as the full recompute so the chartExchange's
+        // entry always wins within the 10s window (see dedup()).
         const updateMap = new Map<string, UnifiedTicker>()
-        for (const c of coins) updateMap.set(c.symbol, c)
+        for (const c of dedup(coins)) updateMap.set(c.symbol, c)
 
         let dirty = false
         const newCoins = s.coins.map((c) => {

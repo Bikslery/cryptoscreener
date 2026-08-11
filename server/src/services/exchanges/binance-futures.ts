@@ -156,6 +156,11 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
         if (!s.symbol.endsWith('USDT')) continue
         if (s.underlyingType === 'INDEX') { filtered++; continue }
         if (s.contractType !== 'PERPETUAL') { filtered++; continue }
+        // Skip contracts that are NOT actively trading (SETTLING/delisting,
+        // PAUSED, etc.). The WS !miniTicker@arr still broadcasts their stale
+        // stats (e.g. FXSUSDT showed a fake 34B quote volume), which pushed
+        // them into the top of the screener with an empty flat-line chart.
+        if (s.status && s.status !== 'TRADING') { filtered++; continue }
         if (STABLECOIN_BASES.has(s.symbol.slice(0, -4))) { filtered++; continue }
         this.cryptoSymbols.add(s.symbol)
         for (const f of s.filters || []) {
