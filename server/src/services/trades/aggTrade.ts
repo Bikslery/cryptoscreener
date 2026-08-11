@@ -57,8 +57,12 @@ function getChunkForSymbol(exchange: Exchange, symbol: string): AggTradeStream {
 }
 
 function getWsBase(exchange: Exchange): string {
+  // Futures: use the new official stream domain — fstream.binance.com is
+  // geo-blocked from some regions (connects then closes without data).
+  // Verified live from a German VPS: fstream.binancefuture.com delivers
+  // aggTrades in realtime. Overridable via env.
   return exchange === 'binance-futures'
-    ? 'wss://fstream.binance.com'
+    ? (process.env.BINANCE_FUTURES_WS_BASE || 'wss://fstream.binancefuture.com')
     : 'wss://stream.binance.com:9443'
 }
 

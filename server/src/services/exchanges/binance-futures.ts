@@ -27,7 +27,13 @@ const STABLECOIN_BASES = new Set([
   'USDC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'EUR', 'AEUR', 'EURI', 'USDSB', 'PYUSD',
 ])
 
-const TICKER_WS_URL = 'wss://fstream.binance.com/ws/!miniTicker@arr'
+// NOTE: fstream.binance.com is geo-blocked from some regions (e.g. EU/Germany
+// datacenter IPs) — the connection opens then closes without data. The official
+// new futures stream domain fstream.binancefuture.com is NOT blocked and
+// delivers tickers/klines/aggTrades in realtime from those regions (verified
+// live from the German VPS). Overridable via env if Binance ever re-routes it.
+const WS_BASE = process.env.BINANCE_FUTURES_WS_BASE || 'wss://fstream.binancefuture.com'
+const TICKER_WS_URL = `${WS_BASE}/ws/!miniTicker@arr`
 const TICKER_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/24hr'
 const TICKER_PRICE_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/price'
 const TICKER_PRICE_POLL_INTERVAL = 1_000
@@ -78,7 +84,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     this.fetchDispatcher = getFetchDispatcher()
 
     this.candlePool = new WsStreamPool(
-      'wss://fstream.binance.com/stream',
+      `${WS_BASE}/stream`,
       'Binance Futures Candle',
       (msg) => {
         try {
@@ -106,7 +112,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     )
 
     this.depthPool = new WsStreamPool(
-      'wss://fstream.binance.com/stream',
+      `${WS_BASE}/stream`,
       'Binance Futures Depth',
       (msg) => {
         try {
