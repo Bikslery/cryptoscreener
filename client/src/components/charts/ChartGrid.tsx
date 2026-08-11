@@ -14,6 +14,7 @@ import { expandCompactCandles, type CompactCandle } from '../../services/candle-
 import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
 import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload, type GapBackfill } from '../../services/candle-lifecycle'
 import { isFiniteOHLCV, validateCandle, normalizeCandle } from '../../services/candle-utils'
+import { computeCursorAnchoredZoomRange } from '../../services/chart-zoom'
 import { useDrawings } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
 
@@ -29,14 +30,18 @@ function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
  * under the pointer stays in place — zooming in/out never shifts what the
  * user is looking at.
  *
- * lightweight-charts' own wheel zoom is cursor-anchored, but the direct
- * `applyOptions({ barSpacing })` path (which the old handler used) anchors to
- * the RIGHT EDGE of the data instead, because barSpacing keeps the bar-mode
- * rightOffset fixed. With `handleScale.mouseWheel` also enabled, every
- * ctrl+wheel/pinch tick used to run TWO zooms with different anchors — the
- * view jumped back toward the newest bars and the chart visibly jittered
- * when zooming out. The caller must intercept the event in the capture phase
- * and stopPropagation so LWC's own handler never fires.
+ * Why this is needed: lightweight-charts' own wheel zoom is cursor-anchored,
+ * but with `handleScale.mouseWheel` enabled every ctrl+wheel/pinch tick ALSO
+ * hit the old custom handler, which called `applyOptions({ barSpacing })` —
+ * that path anchors to the RIGHT EDGE of the data (bar-mode rightOffset stays
+ * fixed), so the view jumped back toward the newest bars and the chart
+ * visibly jittered when zooming out. The caller intercepts the event in the
+ * capture phase and stopPropagation so LWC's native handler never fires.
+ *
+ * The new range is computed purely from the PRE-zoom visible range — nothing
+ * is read after `applyOptions`/`setVisibleLogicalRange` (LWC applies options
+ * asynchronously, and `coordinateToLogical` is integer-rounded, so both are
+ * unreliable mid-zoom).
  */
 function applyCursorAnchoredZoom(
   chart: IChartApi,
@@ -45,25 +50,14 @@ function applyCursorAnchoredZoom(
   deltaY: number,
 ) {
   const ts = chart.timeScale()
-  const currentSpacing = (ts.options() as any).barSpacing || 6
-  const newSpacing = Math.max(1, Math.min(30, currentSpacing + (deltaY > 0 ? -0.5 : 0.5)))
-  if (newSpacing === currentSpacing) return
-  const rect = container.getBoundingClientRect()
-  const x = clientX - rect.left
-  // Float logical index under the cursor BEFORE the zoom — this is the bar
-  // that must not move on screen.
-  const anchorLogical = ts.coordinateToLogical(x)
-  ts.applyOptions({ barSpacing: newSpacing })
-  if (anchorLogical == null) return
-  const afterLogical = ts.coordinateToLogical(x)
-  if (afterLogical == null) return
-  // After the spacing change the cursor points at a different bar; scroll by
-  // the delta so the anchored bar returns exactly under the cursor.
-  const deltaLogical = anchorLogical - afterLogical
-  if (Math.abs(deltaLogical) < 1e-9) return
   const vr = ts.getVisibleLogicalRange()
   if (!vr) return
-  ts.setVisibleLogicalRange({ from: vr.from + deltaLogical, to: vr.to + deltaLogical })
+  const width = ts.width()
+  if (width <= 0) return
+  const rect = container.getBoundingClientRect()
+  const next = computeCursorAnchoredZoomRange(vr, width, clientX - rect.left, deltaY)
+  if (!next) return
+  ts.setVisibleLogicalRange(next)
 }
 
 function applyChartPatch(
