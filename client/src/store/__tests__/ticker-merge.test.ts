@@ -37,18 +37,29 @@ function state(coins: UnifiedTicker[]): FrameState {
 }
 
 describe('mergeTickerBatch', () => {
-  it('preserves identity of unchanged coins and replaces changed ones', () => {
-    const a = t('BTCUSDT', 'binance-futures', 50000)
-    const b = t('ETHUSDT', 'binance-futures', 3000)
-    const list = [a, b]
+  it('preserves identity of unchanged coins and replaces changed ones per exchange', () => {
+    const futures = t('ETHUSDT', 'binance-futures', 3000)
+    const spot = t('ETHUSDT', 'binance-spot', 3001)
+    const list = [futures, spot]
 
-    const updated = t('ETHUSDT', 'binance-futures', 3010)
-    const { next, dirty } = mergeTickerBatch(list, [updated])
+    const updatedFutures = t('ETHUSDT', 'binance-futures', 3010)
+    const { next, dirty } = mergeTickerBatch(list, [updatedFutures])
 
     expect(dirty).toBe(true)
-    expect(next[0]).toBe(a) // unchanged → same reference
-    expect(next[1]).not.toBe(b) // changed → new reference
-    expect(next[1].price).toBe(3010)
+    expect(next[0]).not.toBe(futures) // changed futures → new reference
+    expect(next[0].price).toBe(3010)
+    expect(next[1]).toBe(spot) // spot untouched → same reference
+  })
+
+  it('a spot-only update never overwrites the futures entry', () => {
+    const futures = t('ETHUSDT', 'binance-futures', 3000, 61800)
+    const spot = t('ETHUSDT', 'binance-spot', 3001, 1500)
+    const list = [futures, spot]
+
+    const { next } = mergeTickerBatch(list, [t('ETHUSDT', 'binance-spot', 3011, 1510)])
+    expect(next[0]).toBe(futures) // futures entry identical → same ref
+    expect(next[0].quoteVolume24h).toBe(61800)
+    expect(next[1].price).toBe(3011) // only spot updated
   })
 
   it('returns dirty=false and the same array when nothing changed', () => {
@@ -58,17 +69,12 @@ describe('mergeTickerBatch', () => {
     expect(next[0]).toBe(a)
   })
 
-  it('dedups by symbol keeping the highest-priority exchange', () => {
-    const spot = t('BTCUSDT', 'binance-spot', 50000, 1)
-    const futures = t('BTCUSDT', 'binance-futures', 50001, 999)
-    const list = [t('ETHUSDT', 'binance-futures', 3000)]
-    const { next } = mergeTickerBatch(list, [spot, futures])
-    // Only BTCUSDT in the delta gets merged — futures wins over spot
-    expect(next).toHaveLength(1)
-    expect(next[0].symbol).toBe('ETHUSDT')
-    const merged = mergeTickerBatch([spot], [futures, spot])
-    expect(merged.next[0].exchange).toBe('binance-futures')
-    expect(merged.next[0].price).toBe(50001)
+  it('appends brand-new (symbol, exchange) pairs and marks dirty', () => {
+    const a = t('BTCUSDT', 'binance-futures', 50000)
+    const { next, dirty } = mergeTickerBatch([a], [t('NEWUSDT', 'binance-futures', 5, 42)])
+    expect(dirty).toBe(true)
+    expect(next).toHaveLength(2)
+    expect(next[1].symbol).toBe('NEWUSDT')
   })
 })
 
@@ -88,27 +94,30 @@ describe('applyTickerFrame', () => {
     expect(patch.coinMap?.get('CCCUSDT')?.price).toBe(3)
   })
 
-  it('delta merges in place without re-sorting or dropping other coins', () => {
-    const a = t('AAAUSDT', 'binance-futures', 1, 1000)
-    const b = t('BBBUSDT', 'binance-futures', 2, 500)
-    const s = state([a, b])
-    const delta = [t('BBBUSDT', 'binance-futures', 2.5, 500)]
+  it('delta merges per exchange and keeps coinMap on the highest-priority entry', () => {
+    const futures = t('ETHUSDT', 'binance-futures', 3000, 61800)
+    const spot = t('ETHUSDT', 'binance-spot', 3001, 1500)
+    const s = state([futures, spot])
 
-    const patch = applyTickerFrame(s, delta, true) // delta
+    // Only the SPOT side changed in this delta — the futures entry must stay
+    // intact and coinMap must still resolve ETH to futures (priority 5 > 2).
+    const patch = applyTickerFrame(s, [t('ETHUSDT', 'binance-spot', 3011, 1510)], true)
+
     expect(patch.coins).toHaveLength(2)
-    expect(patch.coins?.[0]).toBe(a) // unchanged ref preserved
-    expect(patch.sortedCoins?.[0]).toBe(a) // no re-sort (order untouched)
-    expect(patch.sortedCoins?.[1]?.price).toBe(2.5)
+    expect(patch.coins?.[0]).toBe(futures) // untouched ref
+    expect(patch.coins?.[1]?.price).toBe(3011)
+    expect(patch.coinMap?.get('ETHUSDT')?.exchange).toBe('binance-futures')
+    expect(patch.coinMap?.get('ETHUSDT')?.quoteVolume24h).toBe(61800)
     expect(patch.pageIndex).toBeUndefined() // delta never touches pagination
   })
 
-  it('delta with only a brand-new symbol is a no-op — the snapshot settles it into lists', () => {
-    const s = state([t('AAAUSDT', 'binance-futures', 1, 1000)])
-    const delta = [t('NEWUSDT', 'binance-futures', 5, 42)]
-    const patch = applyTickerFrame(s, delta, true)
-    // Nothing existing changed → empty patch; the periodic snapshot (2s) adds
-    // the listing to coins/sortedCoins/coinMap in one consistent replace.
-    expect(Object.keys(patch)).toHaveLength(0)
+  it('delta with a brand-new symbol appends it and exposes it via coinMap', () => {
+    const a = t('AAAUSDT', 'binance-futures', 1, 1000)
+    const s = state([a])
+    const patch = applyTickerFrame(s, [t('NEWUSDT', 'binance-futures', 5, 42)], true)
+    expect(patch.coins).toHaveLength(2)
+    expect(patch.sortedCoins?.some(c => c.symbol === 'NEWUSDT')).toBe(true)
+    expect(patch.coinMap?.get('NEWUSDT')?.price).toBe(5)
   })
 
   it('with autoRefresh off, patches prices but never re-sorts', () => {

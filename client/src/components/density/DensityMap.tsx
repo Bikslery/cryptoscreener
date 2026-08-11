@@ -32,9 +32,13 @@ const TIER_STYLES: Record<string, { bg: string; border: string; text: string }> 
 
 export function DensityMap() {
   const selectCoin = useCoinListStore(s => s.selectCoin)
-  const coins = useCoinListStore(s => s.coins)
-  const coinsRef = useRef(coins)
-  coinsRef.current = coins
+  // coinMap is the deduplicated highest-priority exchange entry per symbol —
+  // the raw `coins` list holds one entry per exchange (spot first), so a
+  // `.find(symbol)` there would pick the SPOT ticker's volume/precision and
+  // the density thresholds/tiers would be computed from the wrong market.
+  const coinMap = useCoinListStore(s => s.coinMap)
+  const coinMapRef = useRef(coinMap)
+  coinMapRef.current = coinMap
   const [cells, setCells] = useState<DensityCell[]>([])
   const [thresholdPct, setThresholdPct] = useState<1 | 2>(1)
   const pendingCellsRef = useRef<DensityCell[]>([])
@@ -46,7 +50,7 @@ export function DensityMap() {
     const unsub = wsOnMessage((msg) => {
       if (msg.type === 'depth' && msg.data) {
         const depth = msg.data as UnifiedDepth
-        const ticker = coinsRef.current.find(c => c.symbol === depth.symbol)
+        const ticker = coinMapRef.current.get(depth.symbol)
         if (!ticker) return
 
         const threshold = ticker.quoteVolume24h * (thresholdPct * 0.001)

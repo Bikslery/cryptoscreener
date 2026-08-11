@@ -286,6 +286,7 @@ function useFullHistory(
   options?: { limit?: number },
   lastUpdateRef?: React.RefObject<number>,
   lifecycleRef?: React.RefObject<CandleLifecycle | null>,
+  chartVersion?: number,
 ): { isInitialLoading: boolean; status: 'loading' | 'ready' | 'empty' | 'error'; dataVersion: number } {
   const limit = options?.limit ?? 1000
   const [isInitialLoading, setIsInitialLoading] = useState(true)
@@ -422,7 +423,12 @@ function useFullHistory(
 
     run()
     return () => { cancelled.value = true }
-  }, [symbol, exchange, tf])
+    // `chartVersion` re-paints history when the canvas/series is recreated
+    // (e.g. pricePrecision flips): the new chart starts empty and would only
+    // show the live forming candle until the next symbol/TF change, because
+    // symbol/exchange/tf haven't changed. Without this, a recreated chart
+    // showed "just the last candle" until a kline arrived.
+  }, [symbol, exchange, tf, chartVersion])
 
   return { isInitialLoading, status, dataVersion }
 }
@@ -1028,7 +1034,7 @@ const MiniChart = memo(function MiniChart({
     // chart destroy/recreate. This makes TF switching near-instant on warm cache.
   }, [symbol, pricePrecision])
 
-  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: GRID_CANDLE_LIMIT }, lastUpdateRef, lifecycleRef)
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: GRID_CANDLE_LIMIT }, lastUpdateRef, lifecycleRef, chartVersion)
 
   const adjustingRef = useRef(false)
 
@@ -1394,7 +1400,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef)
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000 }, lastUpdateRef, lifecycleRef, chartVersion)
 
   const {
     activeTool,

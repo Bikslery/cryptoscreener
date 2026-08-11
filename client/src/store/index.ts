@@ -59,10 +59,16 @@ function buildCoinMap(coins: UnifiedTicker[]): Map<string, UnifiedTicker> {
 }
 
 /**
- * Merge an incoming ticker batch into an existing list using identity
- * preservation: unchanged entries keep their object reference (so memoized
- * rows/charts don't re-render), changed entries are replaced. Duplicates are
- * deduped by symbol keeping the highest-priority exchange (see dedup).
+ * Merge an incoming ticker batch into the master per-exchange list using
+ * identity preservation: unchanged entries keep their object reference (so
+ * memoized rows/charts don't re-render), changed entries are replaced.
+ *
+ * Entries are keyed by `${symbol}:${exchange}` — a delta carries one entry per
+ * exchange, and a spot update must NEVER overwrite the futures entry (or vice
+ * versa). Deduping by symbol here would pick whichever exchange changed last
+ * (often spot) and clobber the other exchanges' entries, which made volumes
+ * and precision flicker between spot/futures values. Brand-new (symbol,
+ * exchange) pairs are appended so listings don't wait for the next snapshot.
  * Exported for unit tests.
  */
 export function mergeTickerBatch(
@@ -70,21 +76,68 @@ export function mergeTickerBatch(
   updates: UnifiedTicker[],
 ): { next: UnifiedTicker[]; dirty: boolean } {
   const updateMap = new Map<string, UnifiedTicker>()
-  for (const c of dedup(updates)) updateMap.set(c.symbol, c)
+  for (const c of updates) updateMap.set(`${c.symbol}:${c.exchange}`, c)
+
+  const existingKeys = new Set<string>()
   let dirty = false
   const next = list.map((c) => {
-    const u = updateMap.get(c.symbol)
+    const key = `${c.symbol}:${c.exchange}`
+    existingKeys.add(key)
+    const u = updateMap.get(key)
     if (!u) return c
     if (u.price === c.price && u.change24h === c.change24h && u.quoteVolume24h === c.quoteVolume24h) return c
     dirty = true
     return u
   })
+  // New (symbol, exchange) pairs not in the master list yet (new listings).
+  for (const [key, u] of updateMap) {
+    if (!existingKeys.has(key)) {
+      next.push(u)
+      dirty = true
+    }
+  }
   return { next, dirty }
+}
+
+// Rebuild the deduped view (sortedCoins + coinMap) from the per-exchange
+// master list, keeping the previous sort ORDER stable and only updating
+// entries / appending newly-listed chartExchange symbols. The full re-sort
+// happens on snapshots.
+function rebuildDedupedView(
+  state: { sortedCoins: UnifiedTicker[]; chartExchange: ChartExchange },
+  raw: UnifiedTicker[],
+): Partial<CoinListStore> {
+  const deduped = dedup(raw)
+  const bySymbol = new Map<string, UnifiedTicker>()
+  for (const d of deduped) bySymbol.set(d.symbol, d)
+
+  const seen = new Set<string>()
+  const newSorted: UnifiedTicker[] = []
+  for (const c of state.sortedCoins) {
+    if (seen.has(c.symbol)) continue
+    seen.add(c.symbol)
+    const u = bySymbol.get(c.symbol)
+    // Only swap in the same-exchange entry — the sorted list is scoped to the
+    // active chartExchange; a foreign-exchange entry would mislabel the row.
+    newSorted.push(u && u.exchange === c.exchange ? u : c)
+  }
+  for (const d of deduped) {
+    if (seen.has(d.symbol) || d.exchange !== state.chartExchange) continue
+    seen.add(d.symbol)
+    newSorted.push(d)
+  }
+  return {
+    coins: raw,
+    sortedCoins: newSorted,
+    coinMap: buildCoinMap(newSorted),
+  }
 }
 
 /**
  * Apply a ticker frame (delta or snapshot) to the store state.
- * - Delta: identity-preserving in-place merge (fast path, no re-sort).
+ * - Delta: per-exchange identity-preserving merge (fast path, no re-sort) +
+ *   deduped view rebuild so coinMap/sortedCoins always hold the highest-
+ *   priority exchange entry per symbol.
  * - Snapshot (or the first message on connect): full replace + recompute
  *   (re-sort, pageCount clamp, coinMap rebuild). Exported for unit tests.
  */
@@ -93,34 +146,18 @@ export function applyTickerFrame(
   coins: UnifiedTicker[],
   isDelta: boolean,
 ): Partial<CoinListStore> {
+  const merged = mergeTickerBatch(state.coins, coins)
+
   if (!state.autoRefresh) {
     // Auto-refresh off: patch prices in place; never re-sort or replace
     // wholesale (the visible order stays frozen by design).
-    const merged = mergeTickerBatch(state.coins, coins)
     if (!merged.dirty) return {}
-    const updateMap = new Map<string, UnifiedTicker>()
-    for (const c of dedup(coins)) updateMap.set(c.symbol, c)
-    const newCoinMap = new Map(state.coinMap)
-    for (const [sym, u] of updateMap) newCoinMap.set(sym, u)
-    return {
-      coins: merged.next,
-      sortedCoins: state.sortedCoins.map((c) => updateMap.get(c.symbol) || c),
-      coinMap: newCoinMap,
-    }
+    return rebuildDedupedView(state, merged.next)
   }
 
   if (isDelta) {
-    const merged = mergeTickerBatch(state.coins, coins)
     if (!merged.dirty) return {}
-    const updateMap = new Map<string, UnifiedTicker>()
-    for (const c of dedup(coins)) updateMap.set(c.symbol, c)
-    const newCoinMap = new Map(state.coinMap)
-    for (const [sym, u] of updateMap) newCoinMap.set(sym, u)
-    return {
-      coins: merged.next,
-      sortedCoins: state.sortedCoins.map((c) => updateMap.get(c.symbol) || c),
-      coinMap: newCoinMap,
-    }
+    return rebuildDedupedView(state, merged.next)
   }
 
   // Full snapshot (initial connect or periodic) — replace + recompute.
