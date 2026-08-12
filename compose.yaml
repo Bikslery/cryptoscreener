@@ -50,6 +50,7 @@ services:
       PORT: 3001
       ROLE: all
       NODE_ENV: production
+      DIAG_LOG: ${DIAG_LOG:-0}
     expose:
       - "3001"
     depends_on:

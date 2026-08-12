@@ -1,4 +1,5 @@
 import { normalizeCandle, isFiniteOHLCV } from './candle-utils'
+import { sanitizeCandle, contextWindow } from './candle-sanity'
 import type { UnifiedCandle } from '../types'
 
 /**
@@ -23,20 +24,34 @@ export function applyCandleUpdates(arr: UnifiedCandle[], updates: UnifiedCandle[
   // Track only the candles that actually land in the array: invalid OHLC must
   // never become a phantom bar (it would skew logical indexes on prepends and
   // linger in the backing array even though the incremental paint path skips it).
+  //
+  // Sanity gate: every candle that ENTERS the array passes through the
+  // phantom-candle detector. A clear outlier (absurd range/price vs its local
+  // neighbours) is clamped into the neighbours' band instead of being painted
+  // as a giant fake candle — the log record keeps the original for diagnosis.
   const applied: UnifiedCandle[] = []
   for (const raw of updates) {
     const c = normalizeCandle(raw)
     if (!isFiniteOHLCV(c) || !(c.time > 0)) continue
-    applied.push(c)
     const tail = arr[arr.length - 1]
+    let safe: UnifiedCandle
     if (tail && tail.time === c.time) {
-      arr[arr.length - 1] = c
+      safe = sanitizeCandle(c, contextWindow(arr, arr.length - 1), 'array-update')
     } else if (!tail || c.time > tail.time) {
-      arr.push(c)
+      safe = sanitizeCandle(c, contextWindow(arr, -1), 'array-update')
     } else {
       const idx = arr.findIndex(x => x.time >= c.time)
-      if (idx >= 0 && arr[idx].time === c.time) arr[idx] = c
-      else arr.splice(idx, 0, c)
+      safe = sanitizeCandle(c, contextWindow(arr, Math.max(0, idx)), 'array-update')
+    }
+    applied.push(safe)
+    if (tail && tail.time === safe.time) {
+      arr[arr.length - 1] = safe
+    } else if (!tail || safe.time > tail.time) {
+      arr.push(safe)
+    } else {
+      const idx = arr.findIndex(x => x.time >= safe.time)
+      if (idx >= 0 && arr[idx].time === safe.time) arr[idx] = safe
+      else arr.splice(idx, 0, safe)
     }
   }
 

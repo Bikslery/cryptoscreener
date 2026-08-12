@@ -15,6 +15,7 @@ import { expandCompactCandles, type CompactCandle } from '../../services/candle-
 import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
 import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload, type GapBackfill } from '../../services/candle-lifecycle'
 import { recordDiag } from '../../services/candle-diag'
+import { sanitizeCandle, sanitizeSeries, contextWindow, findOutlierCandles } from '../../services/candle-sanity'
 import { isFiniteOHLCV, validateCandle, normalizeCandle } from '../../services/candle-utils'
 import { applyCandleUpdates } from '../../services/candle-merge'
 import { beginFormingGlide, advanceFormingGlide, type FormingTarget, type FormingGlide } from '../../services/candle-anim'
@@ -244,6 +245,7 @@ function applyChartPatch(
   tf: Timeframe,
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
   chartRef?: React.RefObject<IChartApi | null>,
+  via?: string,
 ) {
   const arr = candlesDataRef?.current
   // Sync the backing array (sorted upsert) and detect out-of-order updates.
@@ -266,8 +268,12 @@ function applyChartPatch(
     // skip that bar in the exact-volume loop below so it doesn't jump.
     let formingTime: number | null = null
     for (const raw of patch.candleUpdates) {
-      const c = normalizeCandle(raw)
+      let c = normalizeCandle(raw)
       if (!isFiniteOHLCV(c)) continue
+      // Paint-side sanity gate: a clear outlier (absurd range/price) is clamped
+      // into the local band so the phantom is never drawn — even if it somehow
+      // reached the patch without passing the array gate.
+      c = sanitizeCandle(c, arr ? contextWindow(arr, -1) : [], via ?? 'paint')
       const arrLast = arr && arr.length > 0 ? arr[arr.length - 1] : null
       if (animator) {
         if (c.isFinal) {
@@ -477,6 +483,17 @@ function useSeriesSelfHeal(
       } else {
         diagHoleHistory.delete(series)
       }
+
+      // --- DIAG: phantom-candle sweep (outliers that survived the gates) ---
+      const outliers = findOutlierCandles(arr.slice(-80))
+      if (outliers.length > 0) {
+        recordDiag('render_outlier_present', {
+          symbol: arrLast.symbol,
+          tf: arrLast.timeframe,
+          periods: outliers.length,
+          detail: JSON.stringify(outliers.slice(0, 3).map(o => ({ t: o.time, h: o.high, l: o.low, c: o.close }))),
+        })
+      }
     }, SERIES_SELF_HEAL_INTERVAL_MS)
     return () => clearInterval(timer)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -551,7 +568,7 @@ function backfillGap(
       }
       // Apply through the lifecycle so tail state stays consistent, then paint.
       const patch = lc.applyOlderPage(inWindow)
-      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
+      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'backfill')
       recordDiag('backfill_filled', {
         symbol, exchange, tf,
         from: gap.fromTime, to: gap.toTime,
@@ -711,9 +728,12 @@ function useFullHistory(
         return
       }
       const prevData = candlesDataRef.current
-      candlesDataRef.current = candles
+      // History/repaint sanitize gate: clamp any phantom outlier into the local
+      // band before it becomes authoritative data or reaches the canvas.
+      const safeSeries = sanitizeSeries(candles, 'history')
+      candlesDataRef.current = safeSeries
       // Filter out invalid candles before rendering
-      const validCandles = candles.filter(validateCandle).map(normalizeCandle)
+      const validCandles = safeSeries.filter(validateCandle).map(normalizeCandle)
       const candleData = validCandles.map(c => ({
         time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
       }))
@@ -768,7 +788,7 @@ function useFullHistory(
         }
         const flushPatch = lifecycleRef.current?.setBuffered(false)
         if (flushPatch && flushPatch.candleUpdates.length > 0) {
-          applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
+          applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'buffer-flush')
         }
       }
     }
@@ -968,7 +988,8 @@ function useLazyScroll(
 
         const prevLogical = ts.getVisibleLogicalRange()
         const prevLen = candlesDataRef.current.length
-        candlesDataRef.current = merged
+        const safeMerged = sanitizeSeries(merged, 'lazy-scroll')
+        candlesDataRef.current = safeMerged
         const added = merged.length - prevLen
 
         if (added <= 0) return
@@ -977,7 +998,7 @@ function useLazyScroll(
         lifecycleRef?.current?.setBuffered(true)
 
         try {
-          const normalized = merged.map(normalizeCandle)
+          const normalized = safeMerged.map(normalizeCandle)
           const candleData = normalized.map(c => ({
             time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
           }))
@@ -992,10 +1013,10 @@ function useLazyScroll(
           candleRef.current?.setData(candleData)
           volumeRef.current?.setData(volumeData)
 
-          lifecycleRef?.current?.applyHistory(merged)
+          lifecycleRef?.current?.applyHistory(safeMerged)
           const flushPatch = lifecycleRef?.current?.setBuffered(false)
           if (flushPatch && flushPatch.candleUpdates.length > 0) {
-            applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
+            applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'buffer-flush')
           }
 
           // Restore by LOGICAL range shifted by `added` — prepending bars
@@ -1048,7 +1069,7 @@ function useLazyScroll(
             // fetch onto the current chart.
             const flush = lifecycleRef?.current?.setBuffered(false)
             if (flush && flush.candleUpdates.length > 0) {
-              applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef, chartRef)
+              applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef, chartRef, 'buffer-flush')
             }
             return
           }
@@ -1080,7 +1101,7 @@ function useLazyScroll(
           // End reconciliation: replay buffered live events onto the chart.
           const flush = lifecycleRef?.current?.setBuffered(false)
           if (flush && flush.candleUpdates.length > 0) {
-            applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef, chartRef)
+            applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef, chartRef, 'buffer-flush')
           }
         })
     }
@@ -1208,7 +1229,7 @@ function useWsCandle(
       const patch = lc.applyKline(c)
       if (adjustingRef?.current) return
 
-      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
+      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'ws-kline')
       if (patch.gapBackfill) {
         backfillGap(patch.gapBackfill, symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, chartRef)
       }
@@ -1273,7 +1294,7 @@ function useWsTrade(
       const patch = lc.applyTrade(payload)
       if (adjustingRef?.current) return
 
-      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
+      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'ws-trade')
       if (patch.gapBackfill) {
         backfillGap(patch.gapBackfill, symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, chartRef)
       }
@@ -1302,7 +1323,7 @@ function useWsTrade(
       if (!lc || adjustingRef?.current) return
       const patch = lc.applyMid(d.price)
       if (patch.candleUpdates.length > 0) {
-        applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
+        applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'mid')
       }
     })
     wsSubscribe(priceChannel)

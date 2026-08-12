@@ -38,6 +38,7 @@ export interface CandleDiagStats {
   gapsDetected: number
   gapsSkippedLarge: number
   lateCandles: number
+  oddCandles: number
   lastSeenCount: number
   recentGaps: GapEvent[]
 }
@@ -47,7 +48,9 @@ const candleDiagState = {
   gapsDetected: 0,
   gapsSkippedLarge: 0,
   lateCandles: 0,
+  oddCandles: 0,
   lastSeen: new Map<string, number>(),
+  lastCandleRange: new Map<string, number>(),
   recentGaps: [] as GapEvent[],
 }
 const MAX_RECENT_GAPS = 50
@@ -63,6 +66,21 @@ function recordInboundCandle(candle: UnifiedCandle): GapEvent | null {
     candleDiagState.lateCandles++
     return null
   }
+  // Phantom-candle watchdog: a candle whose range explodes vs its own previous
+  // step (>25x) is a strong outlier signal on the inbound lane (whatever the
+  // exchange/fallback actually sent). Reported as diag only — no mutation.
+  const thisRange = candle.high - candle.low
+  const prevRange = candleDiagState.lastCandleRange.get(key)
+  candleDiagState.lastCandleRange.set(key, thisRange)
+  if (prevRange != null && prevRange > 1e-12 && thisRange > prevRange * 25) {
+    candleDiagState.oddCandles++
+    if (DIAG_LOG) {
+      console.warn(
+        `[Diag][Manager] Anomalous inbound candle ${key} time=${candle.time} range=${thisRange} vs prev=${prevRange} (×${(thisRange / prevRange).toFixed(0)})`
+      )
+    }
+  }
+
   const tfSec = TF_SECONDS[candle.timeframe] || 60
   const periods = Math.round((candle.time - prev) / tfSec)
   if (periods <= 1) return null
@@ -92,6 +110,7 @@ export function getCandleDiagStats(): CandleDiagStats {
     gapsDetected: candleDiagState.gapsDetected,
     gapsSkippedLarge: candleDiagState.gapsSkippedLarge,
     lateCandles: candleDiagState.lateCandles,
+    oddCandles: candleDiagState.oddCandles,
     lastSeenCount: candleDiagState.lastSeen.size,
     recentGaps: candleDiagState.recentGaps.slice(-MAX_RECENT_GAPS),
   }

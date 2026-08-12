@@ -33,6 +33,28 @@ function findHoles(candles: { time: number }[], tfSec: number) {
   return holes
 }
 
+/** Phantom-candle report: candles whose range is >15x the local median range
+ *  of their predecessors (compare with the client's candle-sanity gate). */
+function findAnomalies(candles: { time: number; high: number; low: number }[]) {
+  const res: { time: number; high: number; low: number; ratio: number }[] = []
+  const win: number[] = []
+  for (const c of candles) {
+    if (win.length >= 12) win.shift()
+    if (win.length >= 3) {
+      const sorted = [...win].sort((a, b) => a - b)
+      const mid = Math.floor(sorted.length / 2)
+      const med = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+      const rr = (c.high - c.low) / Math.max(med, 1e-12)
+      if (rr > 8) {
+        res.push({ time: c.time, high: c.high, low: c.low, ratio: Math.round(rr) })
+        if (res.length >= 10) break
+      }
+    }
+    win.push(c.high - c.low)
+  }
+  return res
+}
+
 // DIAGNOSTIC (read-only): fetch a candle window the EXACT way the app does and
 // report continuity holes. mode=exchange skips caches and hits the exchange
 // adapter directly (source of truth); mode=cache reads the raw in-memory cache
@@ -86,6 +108,7 @@ router.get('/history-check', async (req, res) => {
       lastTime: sorted.length > 0 ? sorted[sorted.length - 1].time : null,
       holesCount: rawHoles.length,
       holes: rawHoles,
+      anomalies: findAnomalies(sorted),
       // how many synthetic flat candles the serve-time hole-guarantee adds
       servedFlatCount: gapless.length - sorted.length,
       elapsedMs: Date.now() - startedAt,
@@ -115,6 +138,7 @@ router.get('/history-check', async (req, res) => {
     lastTime: sorted.length > 0 ? sorted[sorted.length - 1].time : null,
     holesCount: holes.length,
     holes,
+    anomalies: findAnomalies(sorted),
     elapsedMs: Date.now() - startedAt,
   })
 })

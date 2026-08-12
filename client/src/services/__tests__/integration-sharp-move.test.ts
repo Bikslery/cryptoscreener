@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest'
 import { createCandleLifecycle, type TradePayload } from '../candle-lifecycle'
 import { applyCandleUpdates } from '../candle-merge'
 import { validateCandle, normalizeCandle } from '../candle-utils'
+import { sanitizeCandle, contextWindow } from '../candle-sanity'
 import type { UnifiedCandle, Exchange } from '../../types'
 
 /**
@@ -190,5 +191,43 @@ describe.skipIf(!serverUp)('Integration: real server history + sharp-move replay
     expect(hasHoles(arr.filter(c => c.time >= gapStart))).toBe(false)
     expect(arr.every(validateCandle)).toBe(true)
     expect(arr.map(c => c.time)).toEqual(sortedTimes(arr))
+  })
+
+  it('sanitizes a phantom giant candle entering the backing array — clamped, no hole', { timeout: 30000 }, async () => {
+    expect(history.length).toBeGreaterThan(20)
+    const arr = history.filter(validateCandle).map(normalizeCandle)
+
+    // Inject a fake row ~60x off the local price level between two real bars
+    // (the "huge candle that was never really there").
+    const anchor = arr[15]
+    const phantom: UnifiedCandle = {
+      ...anchor,
+      time: anchor.time + 30, // lands between two real 60s buckets
+      open: anchor.close * 60,
+      high: anchor.close * 120,
+      low: anchor.close * 10,
+      close: anchor.close * 60,
+      volume: 0,
+      source: 'trade',
+    }
+
+    // The array gate itself (applyCandleUpdates) sanitizes on entry:
+    const needsRepaint = applyCandleUpdates(arr, [phantom])
+    const inserted = arr.find(c => c.time === phantom.time)
+    expect(inserted).toBeDefined()
+    expect(arr.map(c => c.time)).toEqual(sortedTimes(arr))
+    expect(arr.every(validateCandle)).toBe(true)
+    // Clamped into the neighbours' band — NOT ~120x the real price.
+    expect(inserted!.high).toBeLessThan(anchor.close * 10)
+    expect(inserted!.low).toBeGreaterThan(anchor.close / 10)
+    // needsRepaint semantics preserved (out-of-order insert → full repaint).
+    expect(typeof needsRepaint).toBe('boolean')
+
+    // And the paint-side gate agrees when applied with the same context.
+    const idx = arr.findIndex(c => c.time === phantom.time)
+    const ctx = contextWindow(arr, Math.max(0, idx))
+    const repaintSafe = sanitizeCandle({ ...phantom }, ctx, 'paint-test')
+    expect(repaintSafe.high).toBeLessThan(anchor.close * 10)
+    expect(validateCandle(repaintSafe)).toBe(true)
   })
 })
