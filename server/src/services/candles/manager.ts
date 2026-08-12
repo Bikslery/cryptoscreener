@@ -13,6 +13,88 @@ import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 const activeCandleSubs = new Map<string, { adapter: ExchangeAdapter; count: number }>()
 const activeDepthSubs = new Map<string, { adapter: ExchangeAdapter; count: number }>()
 
+// --- DIAGNOSTICS: inbound candle continuity --------------------------------
+// Answers the question "does the server already receive holes from the
+// exchange adapter (Binance kline WS / REST fallback), or is the stream
+// continuous?" Counters run always (cheap); ring buffer + verbose console
+// logs are thin. Toggle verbose logs with env DIAG_LOG=1.
+const TF_SECONDS: Record<string, number> = {
+  '1m': 60, '5m': 300, '15m': 900,
+  '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
+}
+const DIAG_LOG = process.env.DIAG_LOG === '1'
+
+export interface GapEvent {
+  ts: number
+  key: string
+  from: number
+  to: number
+  periods: number
+}
+
+export interface CandleDiagStats {
+  candlesReceived: number
+  gapsDetected: number
+  gapsSkippedLarge: number
+  lateCandles: number
+  lastSeenCount: number
+  recentGaps: GapEvent[]
+}
+
+const candleDiagState = {
+  candlesReceived: 0,
+  gapsDetected: 0,
+  gapsSkippedLarge: 0,
+  lateCandles: 0,
+  lastSeen: new Map<string, number>(),
+  recentGaps: [] as GapEvent[],
+}
+const MAX_RECENT_GAPS = 50
+
+function recordInboundCandle(candle: UnifiedCandle) {
+  candleDiagState.candlesReceived++
+  const key = `${candle.exchange}:${candle.symbol}:${candle.timeframe}`
+  const prev = candleDiagState.lastSeen.get(key)
+  candleDiagState.lastSeen.set(key, candle.time)
+  if (prev == null) return
+  if (candle.time === prev) return // normal repeat update of the same period
+  if (candle.time < prev) {
+    candleDiagState.lateCandles++
+    return
+  }
+  const tfSec = TF_SECONDS[candle.timeframe] || 60
+  const periods = Math.round((candle.time - prev) / tfSec)
+  if (periods <= 1) return
+  const missing = periods - 1
+  candleDiagState.gapsDetected++
+  const ev: GapEvent = {
+    ts: Date.now(),
+    key,
+    from: prev + tfSec,
+    to: candle.time - tfSec,
+    periods: missing,
+  }
+  if (missing > 10) candleDiagState.gapsSkippedLarge++
+  candleDiagState.recentGaps.push(ev)
+  if (candleDiagState.recentGaps.length > MAX_RECENT_GAPS) candleDiagState.recentGaps.shift()
+  if (DIAG_LOG) {
+    console.warn(
+      `[Diag][Manager] Candle gap on server input ${key}: missing ${missing} periods [${ev.from}..${ev.to}]`
+    )
+  }
+}
+
+export function getCandleDiagStats(): CandleDiagStats {
+  return {
+    candlesReceived: candleDiagState.candlesReceived,
+    gapsDetected: candleDiagState.gapsDetected,
+    gapsSkippedLarge: candleDiagState.gapsSkippedLarge,
+    lateCandles: candleDiagState.lateCandles,
+    lastSeenCount: candleDiagState.lastSeen.size,
+    recentGaps: candleDiagState.recentGaps.slice(-MAX_RECENT_GAPS),
+  }
+}
+
 export function getCandleManagerStats() {
   const byTimeframe: Record<string, { subscriptions: number; clients: number }> = {}
   for (const [key, sub] of activeCandleSubs) {
@@ -62,6 +144,7 @@ function getBestAdapter(symbol: string, adapters: ExchangeAdapter[], preferredEx
 export function createCandleManager(adapters: ExchangeAdapter[]) {
   const candleCallback: CandleCallback = (candle: UnifiedCandle) => {
     const channel = `candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`
+    recordInboundCandle(candle)
     broadcastToChannel(channel, candle, true)
   }
 

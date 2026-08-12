@@ -1,7 +1,35 @@
 import type { WsMessage } from '../types.js'
 import { recordFrameLatency } from './latency.js'
+import { recordDiag } from './candle-diag.js'
 
 type WsCallback = (msg: WsMessage) => void
+
+// --- DIAGNOSTICS ---
+export interface WsDiagStats {
+  framesReceived: number
+  framesProcessed: number
+  parseErrors: number
+  queueErrors: number
+  maxQueueLagMs: number
+  reconnects: number
+}
+
+const wsDiag = {
+  framesReceived: 0,
+  framesProcessed: 0,
+  parseErrors: 0,
+  queueErrors: 0,
+  maxQueueLagMs: 0,
+  reconnects: 0,
+}
+
+export function getWsDiag(): WsDiagStats {
+  return { ...wsDiag }
+}
+
+if (typeof window !== 'undefined') {
+  ;(window as unknown as { __wsDiag: unknown }).__wsDiag = { inspect: getWsDiag }
+}
 
 let ws: WebSocket | null = null
 const wildcardCallbacks = new Set<WsCallback>()
@@ -67,18 +95,35 @@ function connect() {
   let frameQueue: Promise<void> = Promise.resolve()
   ws.onmessage = (e) => {
     lastMessageAt = Date.now()
-    frameQueue = frameQueue.then(async () => {
-      try {
-        const text = typeof e.data === 'string' ? e.data : await decompressFrame(e.data)
-        const msg = JSON.parse(text) as WsMessage
-        // Server stamps ts on ticker/price frames — arrival latency incl. the
-        // client-side queue, so it reflects what the user actually sees.
-        if (typeof msg.ts === 'number') {
-          recordFrameLatency(Date.now() - msg.ts)
+    wsDiag.framesReceived++
+    const arrivedAt = Date.now()
+    frameQueue = frameQueue
+      .then(async () => {
+        wsDiag.framesProcessed++
+        const lag = Date.now() - arrivedAt
+        if (lag > wsDiag.maxQueueLagMs) wsDiag.maxQueueLagMs = lag
+        if (lag > 500) {
+          recordDiag('ws_frame_lag', { detail: `${lag}ms queue lag, stale=${lag / 1000}s` })
         }
-        dispatch(msg)
-      } catch { /* ignore malformed frame */ }
-    })
+        try {
+          const text = typeof e.data === 'string' ? e.data : await decompressFrame(e.data)
+          const msg = JSON.parse(text) as WsMessage
+          // Server stamps ts on ticker/price frames — arrival latency incl. the
+          // client-side queue, so it reflects what the user actually sees.
+          if (typeof msg.ts === 'number') {
+            recordFrameLatency(Date.now() - msg.ts)
+          }
+          dispatch(msg)
+        } catch { wsDiag.parseErrors++ /* ignore malformed frame */ }
+      })
+      .catch((err) => {
+        // A rejected frame must NEVER blackhole the whole chain: without a
+        // failure handler every subsequent frame would silently vanish while
+        // this promise stays rejected. Log it and let the chain continue.
+        wsDiag.queueErrors++
+        console.error('[WS] frame-queue rejection, chain reseeded', err)
+        recordDiag('ws_frame_queue_error', { detail: err instanceof Error ? err.message : String(err) })
+      })
   }
 
   ws.onclose = () => {
@@ -91,7 +136,9 @@ function scheduleReconnect() {
   if (reconnectTimer) return
   const delay = Math.min(BASE_DELAY * Math.pow(2, reconnectAttempt) + Math.random() * 1000, MAX_BACKOFF)
   reconnectAttempt++
+  wsDiag.reconnects++
   console.warn(`[WS] Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttempt})`)
+  recordDiag('ws_reconnect', { detail: `attempt ${reconnectAttempt} in ${Math.round(delay)}ms` })
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
     connect()

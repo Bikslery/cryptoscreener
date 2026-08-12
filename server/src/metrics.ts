@@ -34,6 +34,12 @@ export const wsClientKilledTotal = new client.Counter({
   registers: [register]
 })
 
+export const wsBufferedBytesMaxGauge = new client.Gauge({
+  name: 'cs_ws_buffered_bytes_max',
+  help: 'Max outbound buffer (bytes) queued for any connected WS client — a rising value means the client is falling behind without drops',
+  registers: [register]
+})
+
 export const wsBroadcastLatency = new client.Histogram({
   name: 'cs_ws_broadcast_duration_seconds',
   help: 'Time spent in broadcast()',

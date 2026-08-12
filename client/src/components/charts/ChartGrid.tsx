@@ -14,6 +14,7 @@ import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT, 
 import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
 import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
 import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload, type GapBackfill } from '../../services/candle-lifecycle'
+import { recordDiag } from '../../services/candle-diag'
 import { isFiniteOHLCV, validateCandle, normalizeCandle } from '../../services/candle-utils'
 import { applyCandleUpdates } from '../../services/candle-merge'
 import { beginFormingGlide, advanceFormingGlide, type FormingTarget, type FormingGlide } from '../../services/candle-anim'
@@ -348,6 +349,11 @@ const lastPriceLineColor = new WeakMap<object, string>()
  */
 const SERIES_SELF_HEAL_INTERVAL_MS = 2500
 
+// DIAG: per-series persistence tracker for backing-array holes. A hole seen on
+// 2+ consecutive checks (~5s apart) is a permanent gap, not a transient one
+// waiting for a late kline/backfill — logged as 'persistent_holes'.
+const diagHoleHistory = new WeakMap<ISeriesApi<'Candlestick'>, { key: string; count: number }>()
+
 function useSeriesSelfHeal(
   chartRef: React.RefObject<IChartApi | null>,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
@@ -398,6 +404,49 @@ function useSeriesSelfHeal(
           arr: { time: arrLast.time, close: arrLast.close, volume: arrLast.volume },
         })
         repaintSeries(chartRef, candleRef, volumeRef, arr)
+      }
+
+      // --- DIAG: whole-array continuity scan (holes in the middle) ---
+      const tfSecScan = getTfSeconds(arrLast.timeframe as Timeframe)
+      const holes: { from: number; to: number; periods: number }[] = []
+      if (tfSecScan > 0) {
+        for (let i = arr.length - 1; i > 0; i--) {
+          const diff = arr[i].time - arr[i - 1].time
+          if (diff > tfSecScan * 1.5) {
+            holes.push({
+              from: arr[i - 1].time + tfSecScan,
+              to: arr[i].time - tfSecScan,
+              periods: Math.max(1, Math.round(diff / tfSecScan) - 1),
+            })
+            if (holes.length >= 15) break
+          }
+        }
+      }
+      if (holes.length > 0) {
+        const key = holes.map(h => `${h.from}-${h.to}`).join(';')
+        const prev = diagHoleHistory.get(series)
+        if (prev && prev.key === key) {
+          prev.count++
+          if (prev.count === 2) {
+            const totalPeriods = holes.reduce((a, h) => a + h.periods, 0)
+            console.warn('[Diag][SelfHeal] Persistent holes in backing array', {
+              symbol: arrLast.symbol,
+              tf: arrLast.timeframe,
+              holes: holes.slice(0, 5),
+              totalPeriods,
+            })
+            recordDiag('persistent_holes', {
+              symbol: arrLast.symbol,
+              tf: arrLast.timeframe,
+              periods: totalPeriods,
+              detail: JSON.stringify(holes.slice(0, 5)),
+            })
+          }
+        } else {
+          diagHoleHistory.set(series, { key, count: 1 })
+        }
+      } else {
+        diagHoleHistory.delete(series)
       }
     }, SERIES_SELF_HEAL_INTERVAL_MS)
     return () => clearInterval(timer)
@@ -461,14 +510,33 @@ function backfillGap(
       const lc = lifecycleRef.current
       if (!lc) return
       const inWindow = candles.filter(c => c.time >= gap.fromTime && c.time <= gap.toTime)
-      if (inWindow.length === 0) return
+      if (inWindow.length === 0) {
+        // DIAG: the REST window came back without the missing periods — the
+        // hole the client detected is NOT in its own data, it's upstream.
+        recordDiag('backfill_empty', {
+          symbol, exchange, tf,
+          from: gap.fromTime, to: gap.toTime,
+          detail: `fetched ${candles.length} candles, window had none`,
+        })
+        return
+      }
       // Apply through the lifecycle so tail state stays consistent, then paint.
       const patch = lc.applyOlderPage(inWindow)
       applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
+      recordDiag('backfill_filled', {
+        symbol, exchange, tf,
+        from: gap.fromTime, to: gap.toTime,
+        detail: `filled ${inWindow.length}/${candles.length} fetched`,
+      })
     })
-    .catch(() => {
+    .catch((err) => {
       // Network/server error — the gap remains visible but we don't crash.
       // A subsequent kline for a later period will trigger another attempt.
+      recordDiag('backfill_failed', {
+        symbol, exchange, tf,
+        from: gap.fromTime, to: gap.toTime,
+        detail: err instanceof Error ? err.message : String(err),
+      })
     })
     .finally(() => {
       backfillInflightKeys.delete(key)

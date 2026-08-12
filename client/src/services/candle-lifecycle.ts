@@ -1,5 +1,6 @@
 import type { UnifiedCandle, Exchange } from '../types'
 import { isFiniteOHLCV, normalizeCandle } from './candle-utils'
+import { recordDiag } from './candle-diag'
 
 export interface GapBackfill {
   /** Inclusive earliest missing period (epoch seconds, bucket-aligned). */
@@ -105,11 +106,28 @@ function nextSeq(): number { return ++seq }
  * gap exceeds MAX_BACKFILL_PERIODS (deferred to reconnect logic), or when
  * either bound is non-finite / misordered.
  */
-function detectGap(prevTime: number, newTime: number, tfSeconds: number): GapBackfill | null {
+function detectGap(
+  prevTime: number,
+  newTime: number,
+  tfSeconds: number,
+  ctx?: { symbol: string; exchange: Exchange; tf: string },
+): GapBackfill | null {
   if (!isFinite(prevTime) || !isFinite(newTime) || newTime <= prevTime) return null
   const periods = Math.round((newTime - prevTime) / tfSeconds)
   if (periods <= 1) return null
-  if (periods - 1 > MAX_BACKFILL_PERIODS) return null
+  const missing = periods - 1
+  if (missing > MAX_BACKFILL_PERIODS) {
+    // DIAG: the exactly-hole-that-never-heals case — a gap larger than the
+    // backfill cap is silently left open forever. Surface it loud.
+    recordDiag('gap_not_backfilled', {
+      ...ctx,
+      from: prevTime + tfSeconds,
+      to: newTime - tfSeconds,
+      periods: missing,
+      detail: `gap ${missing} periods exceeds MAX_BACKFILL_PERIODS=${MAX_BACKFILL_PERIODS}`,
+    })
+    return null
+  }
   return {
     fromTime: prevTime + tfSeconds,
     toTime: newTime - tfSeconds,
@@ -264,7 +282,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
       return EMPTY_PATCH
     } else {
       const open = trade.price
-      const gap = detectGap(current.candle.time, candleTime, tfSeconds)
+      const gap = detectGap(current.candle.time, candleTime, tfSeconds, { symbol, exchange, tf })
       const newCandle: UnifiedCandle = {
         symbol, exchange, timeframe: tf,
         time: candleTime,
@@ -355,7 +373,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
       // spikes), leaving a horizontal hole on the chart.
       const lastTailTime = tail.length > 0 ? tail[tail.length - 1].candle.time : null
       if (lastTailTime != null && kline.time > lastTailTime) {
-        const gap = detectGap(lastTailTime, kline.time, tfSeconds)
+        const gap = detectGap(lastTailTime, kline.time, tfSeconds, { symbol, exchange, tf })
         const prevClose = tail[tail.length - 1].candle.close
         const newCandle: UnifiedCandle = {
           ...kline,
@@ -374,6 +392,13 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
       }
       // kline.time is older than the tail window (or before any tail entry):
       // stale/out-of-window update — ignore, just like before.
+      // DIAG: a late FINAL kline landing outside the 3-entry tail is dropped
+      // here — the period keeps whatever non-final values were painted.
+      recordDiag('late_kline_dropped', {
+        symbol, exchange, tf,
+        from: kline.time,
+        detail: `kline.time=${kline.time} <= lastTailTime=${lastTailTime ?? 'none'}, isFinal=${kline.isFinal ?? false}`,
+      })
       return EMPTY_PATCH
     }
 

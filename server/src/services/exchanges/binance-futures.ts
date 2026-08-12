@@ -12,6 +12,36 @@ import type { ProxyAgent } from 'undici'
 const WS_SILENCE_TIMEOUT = 30_000
 const MAX_KLINES_LIMIT = 1000
 
+// --- DIAGNOSTICS: candle REST-fallback --------------------------------
+// Counts fallback lifecycle + poll outcomes. A rising `bucketMisses` means
+// the fallback is dropping whole periods (2-candle poll span > 2 buckets) —
+// a direct source of "missing candles". Exposed via /api/debug/candle-stats.
+export interface CandleFallbackDiagStats {
+  starts: number
+  stops: number
+  polls: number
+  skippedThrottled: number
+  fetchFailures: number
+  symbolsPolled: number
+  bucketMisses: number
+  periodDrifts: number
+}
+
+const candleFallbackDiag = {
+  starts: 0,
+  stops: 0,
+  polls: 0,
+  skippedThrottled: 0,
+  fetchFailures: 0,
+  symbolsPolled: 0,
+  bucketMisses: 0,
+  periodDrifts: 0,
+}
+
+export function getCandleFallbackDiagStats(): CandleFallbackDiagStats {
+  return { ...candleFallbackDiag }
+}
+
 const TF_MAP: Record<string, string> = {
   '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d', '1w': '1w',
 }
@@ -492,6 +522,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private startCandleFallback() {
     if (this.candleFallbackActive) return
     this.candleFallbackActive = true
+    candleFallbackDiag.starts++
     this.pollCandleFallback()
     this.candleFallbackTimer = setInterval(() => this.pollCandleFallback(), CANDLE_POLL_INTERVAL)
   }
@@ -499,6 +530,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private stopCandleFallback() {
     this.candleFallbackActive = false
     if (this.candleFallbackTimer) { clearInterval(this.candleFallbackTimer); this.candleFallbackTimer = null }
+    candleFallbackDiag.stops++
   }
 
   /**
@@ -517,6 +549,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     if (this.rateLimiter.isOverThreshold()) return
     const entries = Array.from(this.candleSubInfo.entries())
     if (entries.length === 0) return
+    candleFallbackDiag.polls++
 
     // Round-robin window: take the next MAX_FALLBACK_PER_TICK streams.
     const window: [string, { symbol: string; tf: string }][] = []
@@ -532,6 +565,15 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       const tfSec = TF_SECONDS[tf] || 60
       try {
         const candles = await this.fetchCandles(symbol, tf, 2)
+        candleFallbackDiag.symbolsPolled++
+        // A 2-candle poll should span at most 2 buckets (forming + previous).
+        // If the oldest fetched candle is more than one bucket behind the
+        // forming one, the fallback permanently skipped whole periods.
+        if (candles.length >= 2) {
+          const span = candles[candles.length - 1].time - candles[0].time
+          if (span > tfSec * 2) candleFallbackDiag.bucketMisses++
+        }
+        let driftCounted = false
         for (const c of candles) {
           const subCb = this.candleSubs.get(stream)
           const candle: UnifiedCandle = {
@@ -540,8 +582,16 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
           }
           if (subCb) subCb(candle)
           for (const cb of this.candleCbs) cb(candle)
+          if (!driftCounted && subCb && c.time + tfSec * 2 < nowSec) {
+            // The polled "latest" candle is already fully closed — the client
+            // has been cut off for at least one full period since this message.
+            driftCounted = true
+            candleFallbackDiag.periodDrifts++
+          }
         }
-      } catch {}
+      } catch {
+        candleFallbackDiag.fetchFailures++
+      }
     }))
     const failed = results.filter(r => r.status === 'rejected').length
     if (failed > 0) {

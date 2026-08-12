@@ -12,6 +12,7 @@ import {
   wsClientsGauge,
   wsSubscriptionsGauge,
   wsBufferedMaxGauge,
+  wsBufferedBytesMaxGauge,
   wsDroppedTotal,
   wsClientKilledTotal,
   wsBroadcastLatency,
@@ -33,6 +34,42 @@ const clients = new Map<WebSocket, Client>()
 const MAX_BUFFERED = 50
 const BACKPRESSURE_HARD_LIMIT = MAX_BUFFERED * 2
 const BACKPRESSURE_NOTIFY_INTERVAL = 5000
+
+// --- DIAGNOSTICS: outbound frame drops --------------------------------
+// Counts frames that never reached the wire because a client was lagging
+// (buffered >= MAX_BUFFERED). Distinguishes candle/trade/price/ticker lanes
+// so a burst loss on the candle lane is visible. Console log is throttled to
+// ~1 per lane per 5s to avoid flooding. Exposed via /api/debug/ws-stats.
+const dropDiag = {
+  candle: 0,
+  trade: 0,
+  price: 0,
+  ticker: 0,
+  other: 0,
+}
+const dropDiagPrintedAt: Record<string, number> = {}
+
+function classifyChannel(channel: string): keyof typeof dropDiag {
+  if (channel.startsWith('candle:')) return 'candle'
+  if (channel.startsWith('trade:')) return 'trade'
+  if (channel.startsWith('price:')) return 'price'
+  if (channel.startsWith('ticker')) return 'ticker'
+  return 'other'
+}
+
+function recordDroppedMsg(channel: string) {
+  const kind = classifyChannel(channel)
+  dropDiag[kind]++
+  const now = Date.now()
+  if (now - (dropDiagPrintedAt[kind] || 0) >= 5000) {
+    dropDiagPrintedAt[kind] = now
+    console.warn(`[Diag][Hub] WS frame dropped (lane=${kind}) channel=${channel} totals=${JSON.stringify(dropDiag)}`)
+  }
+}
+
+export function getHubDropDiag() {
+  return { ...dropDiag }
+}
 
 const CLIENT_PING_INTERVAL = 30_000
 let clientPingTimer: ReturnType<typeof setInterval> | null = null
@@ -98,6 +135,7 @@ function flushBatchBuffer() {
       for (const client of clients.values()) {
         if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
           if (client.buffered >= MAX_BUFFERED) {
+            recordDroppedMsg(channel)
             handleBackpressure(client)
             continue
           }
@@ -334,6 +372,7 @@ export function broadcast(msg: WsMessage) {
       for (const client of clients.values()) {
         if (client.ws.readyState !== WebSocket.OPEN) continue
         if (client.buffered >= MAX_BUFFERED) {
+          recordDroppedMsg(msg.channel || 'ticker')
           handleBackpressure(client)
           continue
         }
@@ -377,6 +416,7 @@ export function broadcast(msg: WsMessage) {
     for (const client of clients.values()) {
       if (client.ws.readyState !== WebSocket.OPEN) continue
       if (client.buffered >= MAX_BUFFERED) {
+        recordDroppedMsg(channel)
         handleBackpressure(client)
         continue
       }
@@ -394,9 +434,13 @@ export function broadcastToChannel(channel: string, data: unknown, immediate = f
     const msg: WsMessage = { type: channel as any, channel, data }
     const raw = encodePayload(msg)
     for (const client of clients.values()) {
-      if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN && client.buffered < MAX_BUFFERED) {
-        client.ws.send(raw, (err) => { if (err) client.buffered++ })
+      if (!client.subscriptions.has(channel) || client.ws.readyState !== WebSocket.OPEN) continue
+      if (client.buffered >= MAX_BUFFERED) {
+        recordDroppedMsg(channel)
+        handleBackpressure(client)
+        continue
       }
+      client.ws.send(raw, (err) => { if (err) client.buffered++ })
     }
   } else {
     wsBatchBuffer.set(channel, data)
@@ -489,13 +533,18 @@ export function getHubStats() {
   let totalSubscriptions = 0
   let maxBuffered = 0
   let totalDropped = 0
+  let maxBufferedBytes = 0
   for (const c of clients.values()) {
     totalClients++
     totalSubscriptions += c.subscriptions.size
     if (c.buffered > maxBuffered) maxBuffered = c.buffered
     totalDropped += c.totalDropped
+    try {
+      const bytes = (c.ws as unknown as { bufferedAmount?: number }).bufferedAmount ?? 0
+      if (bytes > maxBufferedBytes) maxBufferedBytes = bytes
+    } catch {}
   }
-  return { totalClients, totalSubscriptions, maxBuffered, totalDropped }
+  return { totalClients, totalSubscriptions, maxBuffered, totalDropped, maxBufferedBytes, dropDiag }
 }
 
 let lastDroppedSnapshot = 0
@@ -505,6 +554,7 @@ export function refreshMetrics() {
   wsClientsGauge.set(stats.totalClients)
   wsSubscriptionsGauge.set(stats.totalSubscriptions)
   wsBufferedMaxGauge.set(stats.maxBuffered)
+  wsBufferedBytesMaxGauge.set(stats.maxBufferedBytes)
   // Delta for the counter that was incremented per-event in handleBackpressure
   // totalDropped in stats includes historical drops from dead clients,
   // but the wsDroppedTotal counter already tracks live increments.
