@@ -289,7 +289,7 @@ const livePriceListeners = new Map<string, Set<() => void>>()
 // single step. The stored API (getLivePrice / useLivePrice / subscribeLivePrice)
 // is unchanged, so all consumers (CoinList cells, gliding headers) automatically
 // step at the fixed cadence.
-let LIVE_PRICE_INTERVAL_MS = 500
+let LIVE_PRICE_INTERVAL_MS = 1000
 const pendingPrices = new Map<string, number>()
 const lastPublishAt = new Map<string, number>()
 let pendingTimer: ReturnType<typeof setTimeout> | null = null

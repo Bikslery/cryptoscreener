@@ -1,13 +1,13 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+﻿import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setLivePrice, getLivePrice, subscribeLivePrice, flushLivePrices, setLivePriceInterval, resetLivePriceStore } from '../index'
 
 // Vitest fake timers also fake Date.now(), so sweeps scheduled on the
-// 500ms cadence fire exactly when advanceTimersByTime moves the clock.
-describe('live-price throttled publisher (500ms cadence)', () => {
+// 1000ms cadence fire exactly when advanceTimersByTime moves the clock.
+describe('live-price throttled publisher (1000ms cadence)', () => {
   beforeEach(() => {
     resetLivePriceStore() // store module is shared across tests in this file
     vi.useFakeTimers()
-    setLivePriceInterval(500)
+    setLivePriceInterval(1000)
   })
 
   afterEach(() => {
@@ -20,7 +20,7 @@ describe('live-price throttled publisher (500ms cadence)', () => {
     expect(getLivePrice('A')).toBe(100)
   })
 
-  it('coalesces a burst within 500ms into a single step with the latest value', () => {
+  it('coalesces a burst within 1000ms into a single step with the latest value', () => {
     const listener = vi.fn()
     const unsub = subscribeLivePrice('A', listener)
 
@@ -34,7 +34,7 @@ describe('live-price throttled publisher (500ms cadence)', () => {
     expect(getLivePrice('A')).toBe(100)
     expect(listener).not.toHaveBeenCalled()
 
-    vi.advanceTimersByTime(500)
+    vi.advanceTimersByTime(1000)
     // Latest-wins: exactly ONE step, to the newest value.
     expect(getLivePrice('A')).toBe(103)
     expect(listener).toHaveBeenCalledTimes(1)
@@ -42,14 +42,14 @@ describe('live-price throttled publisher (500ms cadence)', () => {
   })
 
   it('continues on the cadence even after a step (next commit at the boundary)', () => {
-    setLivePrice('A', 100) // first → immediate
+    setLivePrice('A', 100) // first в†’ immediate
     setLivePrice('A', 102) // queued
-    vi.advanceTimersByTime(500) // -> 102 committed at the 500ms boundary
+    vi.advanceTimersByTime(1000) // -> 102 committed at the 1000ms boundary
     expect(getLivePrice('A')).toBe(102)
 
-    setLivePrice('A', 250) // within the window again → queued, not instant
+    setLivePrice('A', 250) // within the window again в†’ queued, not instant
     expect(getLivePrice('A')).toBe(102)
-    vi.advanceTimersByTime(500) // -> 250 committed on the next boundary
+    vi.advanceTimersByTime(1000) // -> 250 committed on the next boundary
     expect(getLivePrice('A')).toBe(250)
   })
 
@@ -64,14 +64,14 @@ describe('live-price throttled publisher (500ms cadence)', () => {
   it('skips subscribers when the value is unchanged', () => {
     const listener = vi.fn()
     const unsub = subscribeLivePrice('A', listener)
-    setLivePrice('A', 100) // first price → immediate publish, listener fires once
+    setLivePrice('A', 100) // first price в†’ immediate publish, listener fires once
     expect(listener).toHaveBeenCalledTimes(1)
     listener.mockClear()
     setLivePrice('A', 100)
     setLivePrice('A', 100)
-    vi.advanceTimersByTime(500)
+    vi.advanceTimersByTime(1000)
     expect(getLivePrice('A')).toBe(100)
-    expect(listener).not.toHaveBeenCalled() // unchanged value → no re-notify
+    expect(listener).not.toHaveBeenCalled() // unchanged value в†’ no re-notify
     unsub()
   })
 })
