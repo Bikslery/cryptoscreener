@@ -404,24 +404,43 @@ describe('candle-lifecycle', () => {
       expect(c.source).toBe('mid')
     })
 
-    it('does not mark the candle as trade-newer — a later kline still replaces the mid range', () => {
+    it('keeps the wick monotonic — a lagged kline snapshot can never pull the extremes back', () => {
       const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
       lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
       lc.applyTrade(makeTrade(320, 108, 2))
 
-      // A kline arrives (no mid yet) — after this, kline is newer than trade.
+      // First kline: trade is newer → merge, high stays 110 / low stays 95.
       lc.applyKline(makeCandle(300, 100, 109, 96, 106, 45))
 
-      // Mid tries to inflate the high beyond the real market.
+      // Mid extends the high to 112.
       lc.applyMid(112)
 
-      // Next kline: because mid did NOT bump lastTradeAt, the kline is still
-      // newer → applyKline replaces with real values instead of merging (which
-      // would keep the inflated 112 high until finalization).
+      // Next kline is "newer" by ARRIVAL but its snapshot range is smaller
+      // (it lagged the trades) — the wick must stay at 112/95, close follows
+      // the newer source, open stays pinned.
       const patch = lc.applyKline(makeCandle(300, 100, 107, 97, 105, 46))
       const c = patch.candleUpdates[0]
-      expect(c.high).toBe(107)
+      expect(c.high).toBe(112)
+      expect(c.low).toBe(95)
       expect(c.close).toBe(105)
+      expect(c.open).toBe(100)
+    })
+
+    it('never shrinks the wick in the replace branch (kline newer, no trade since)', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      // First kline (kline newer than any trade) establishes high 112 / low 93.
+      lc.applyKline(makeCandle(300, 100, 112, 93, 106, 45))
+
+      // A LAGGED snapshot with a smaller range arrives — replace branch must
+      // keep 112/93 (wick monotonic), only close/volume follow the kline.
+      const patch = lc.applyKline(makeCandle(300, 100, 107, 97, 105, 46))
+      const c = patch.candleUpdates[0]
+      expect(c.high).toBe(112)
+      expect(c.low).toBe(93)
+      expect(c.close).toBe(105)
+      expect(c.open).toBe(100)
     })
   })
 

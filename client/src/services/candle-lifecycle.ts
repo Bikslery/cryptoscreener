@@ -363,13 +363,15 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
       const existingCandle = existing.candle
       const tradeIsNewer = existing.lastTradeAt > existing.lastKlineAt
 
-      // PIN THE OPEN. The exchange's kline open can differ from the open
-      // established by the first trade of the period (the period may have
-      // started a moment earlier, or the exchange's open is rounded
-      // differently) — rewriting it here made the forming candle's START
-      // teleport to a slightly different price mid-move. Once the candle
-      // exists, its open is fixed; the official kline open lands only when
-      // the candle finalizes (full exact replace below).
+      // PIN THE OPEN and keep the WICK MONOTONIC while the candle forms.
+      // The exchange's kline open can differ from the open established by the
+      // first trade of the period, and a kline snapshot can LAG the trades
+      // (generated before a trade, delivered after it — the "newer" check is
+      // arrival order, not data freshness). Rewriting open pulled the body
+      // start, and replacing high/low wholesale pulled the wick extremes back
+      // to a different price mid-move. Both branches therefore only EXTEND:
+      // open stays pinned, high only grows, low only shrinks. The official
+      // open/high/low land when the candle finalizes (full exact replace).
       if (tradeIsNewer) {
         const merged: UnifiedCandle = {
           ...existingCandle,
@@ -385,6 +387,8 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
           ...kline,
           symbol, exchange, timeframe: tf,
           open: existingCandle.open,
+          high: Math.max(existingCandle.high, kline.high),
+          low: Math.min(existingCandle.low, kline.low),
           source: 'kline',
         }
         updateTailEntry(idx, replaced, 'kline')
