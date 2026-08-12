@@ -1,5 +1,6 @@
 import { memo, useCallback, useMemo, useRef, useEffect } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
+import { Star } from 'lucide-react'
 import { useCoinListStore, useLivePrice } from '../../store'
 import type { UnifiedTicker } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
@@ -52,8 +53,10 @@ interface RowProps {
   isSelected: boolean
   isOnPage: boolean
   isNextOnPage: boolean
+  isWatched: boolean
   onClick: (symbol: string) => void
   onPrefetch: (symbol: string) => void
+  onToggleWatch: (symbol: string) => void
 }
 
 /**
@@ -118,7 +121,7 @@ const LivePriceCell = memo(function LivePriceCell({ symbol, initialPrice, precis
   return <span data-testid="price-cell" ref={spanRef} />
 })
 
-export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage, onClick, onPrefetch }: RowProps) {
+export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage, isWatched, onClick, onPrefetch, onToggleWatch }: RowProps) {
   const isUp = coin.change24h >= 0
   const bg = isSelected
     ? 'bg-white/[0.10]'
@@ -139,6 +142,15 @@ export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage,
       onClick={() => onClick(coin.symbol)}
     >
       <div className={`flex items-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
+        <button
+          data-testid="watch-toggle"
+          className={`shrink-0 mr-[5px] flex items-center justify-center cursor-pointer transition-colors ${isWatched ? 'text-[#f5c518]' : 'text-[#3a3a3a] hover:text-[#777]'}`}
+          title={isWatched ? 'Убрать из избранного' : 'В избранное'}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); onToggleWatch(coin.symbol) }}
+        >
+          <Star size={11} fill={isWatched ? 'currentColor' : 'none'} strokeWidth={isWatched ? 1.5 : 1.5} />
+        </button>
         <ArrowFlag />
         {formatVal('symbol', coin)}
       </div>
@@ -168,11 +180,14 @@ export function CoinList() {
   const selectedSymbol = useCoinListStore(s => s.selectedSymbol)
   const setSort = useCoinListStore(s => s.setSort)
   const expandChart = useCoinListStore(s => s.expandChart)
+  const watchlist = useCoinListStore(s => s.watchlist)
+  const toggleWatch = useCoinListStore(s => s.toggleWatch)
   const pageIndex = useCoinListStore(s => s.pageIndex)
   const topChartSymbols = sortedCoins.slice(pageIndex * 9, pageIndex * 9 + 9).map(c => c.symbol)
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const watchSet = useMemo(() => new Set(watchlist), [watchlist])
 
   const onPrefetch = useCallback((symbol: string) => getOrFetchHistory(symbol, tf), [tf])
 
@@ -196,11 +211,13 @@ export function CoinList() {
         isSelected={selectedSymbol === coin.symbol}
         isOnPage={onPage}
         isNextOnPage={nextOnPage}
+        isWatched={watchSet.has(coin.symbol)}
         onClick={expandChart}
         onPrefetch={onPrefetch}
+        onToggleWatch={toggleWatch}
       />
     )
-  }, [sortedCoins, selectedSymbol, expandChart, pageSet, highlightActive, onPrefetch])
+  }, [sortedCoins, selectedSymbol, expandChart, pageSet, highlightActive, onPrefetch, watchSet, toggleWatch])
 
   return (
     <div className="w-[480px] h-full flex flex-col bg-[#0a0a0a]">

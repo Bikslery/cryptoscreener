@@ -32,6 +32,7 @@ function state(coins: UnifiedTicker[]): FrameState {
     sortDir: 'desc',
     chartExchange: 'binance-futures',
     minVolume24h: 0,
+    watchlist: [],
     pageIndex: 0,
   }
 }
@@ -118,6 +119,35 @@ describe('applyTickerFrame', () => {
     expect(patch.coins).toHaveLength(2)
     expect(patch.sortedCoins?.some(c => c.symbol === 'NEWUSDT')).toBe(true)
     expect(patch.coinMap?.get('NEWUSDT')?.price).toBe(5)
+  })
+
+  it('snapshot pins watchlist symbols to the top, sorted by the active column', () => {
+    const s = { ...state([]), watchlist: ['CCCUSDT'] }
+    const snapshot = [
+      t('AAAUSDT', 'binance-futures', 1, 1000),
+      t('BBBUSDT', 'binance-futures', 2, 500),
+      t('CCCUSDT', 'binance-futures', 3, 100),
+      t('DDDUSDT', 'binance-futures', 4, 10),
+    ]
+    const patch = applyTickerFrame(s, snapshot, false)
+    const symbols = (patch.sortedCoins ?? []).map(c => c.symbol)
+    // CCC is watched → pinned to the top; the rest keep volume-desc order.
+    expect(symbols[0]).toBe('CCCUSDT')
+    expect(symbols.slice(1)).toEqual(['AAAUSDT', 'BBBUSDT', 'DDDUSDT'])
+  })
+
+  it('pinned group itself follows the sort criteria (not insertion order)', () => {
+    const s = { ...state([]), watchlist: ['ZZZUSDT', 'AAAUSDT'] }
+    const snapshot = [
+      t('AAAUSDT', 'binance-futures', 1, 1000),
+      t('ZZZUSDT', 'binance-futures', 2, 2000),
+      t('BBBUSDT', 'binance-futures', 3, 100),
+    ]
+    const patch = applyTickerFrame(s, snapshot, false)
+    const symbols = (patch.sortedCoins ?? []).map(c => c.symbol)
+    // Both pinned; among them volume desc → ZZZ (2000) before AAA (1000).
+    expect(symbols.slice(0, 2)).toEqual(['ZZZUSDT', 'AAAUSDT'])
+    expect(symbols[2]).toBe('BBBUSDT')
   })
 
   it('with autoRefresh off, patches prices but never re-sorts', () => {

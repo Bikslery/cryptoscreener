@@ -41,14 +41,32 @@ function dedup(coins: UnifiedTicker[]): UnifiedTicker[] {
   return Array.from(map.values())
 }
 
-function sortCoins(coins: UnifiedTicker[], sortBy: keyof UnifiedTicker, sortDir: 'asc' | 'desc'): UnifiedTicker[] {
-  return dedup(coins).sort((a, b) => {
+/**
+ * Sort a deduped coin list by the active column, with WATCHLIST symbols
+ * pinned to the top. Both groups follow the same comparator — the top of the
+ * list is always the user's favourites in the current sort order, and the
+ * rest of the list is unchanged by the pinning.
+ */
+function sortCoins(
+  coins: UnifiedTicker[],
+  sortBy: keyof UnifiedTicker,
+  sortDir: 'asc' | 'desc',
+  watchlist: string[],
+): UnifiedTicker[] {
+  const watched = new Set(watchlist)
+  const cmp = (a: UnifiedTicker, b: UnifiedTicker) => {
     const dir = sortDir === 'desc' ? -1 : 1
     const aVal = a[sortBy] ?? 0
     const bVal = b[sortBy] ?? 0
     if (typeof aVal === 'string' && typeof bVal === 'string') return dir * aVal.localeCompare(bVal)
     return dir * ((aVal as number) - (bVal as number))
-  })
+  }
+  const pinned: UnifiedTicker[] = []
+  const rest: UnifiedTicker[] = []
+  for (const c of dedup(coins)) (watched.has(c.symbol) ? pinned : rest).push(c)
+  pinned.sort(cmp)
+  rest.sort(cmp)
+  return [...pinned, ...rest]
 }
 
 
@@ -142,7 +160,7 @@ function rebuildDedupedView(
  *   (re-sort, pageCount clamp, coinMap rebuild). Exported for unit tests.
  */
 export function applyTickerFrame(
-  state: { coins: UnifiedTicker[]; sortedCoins: UnifiedTicker[]; coinMap: Map<string, UnifiedTicker>; autoRefresh: boolean; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; chartExchange: ChartExchange; minVolume24h: number; pageIndex: number },
+  state: { coins: UnifiedTicker[]; sortedCoins: UnifiedTicker[]; coinMap: Map<string, UnifiedTicker>; autoRefresh: boolean; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; chartExchange: ChartExchange; minVolume24h: number; pageIndex: number; watchlist: string[] },
   coins: UnifiedTicker[],
   isDelta: boolean,
 ): Partial<CoinListStore> {
@@ -168,6 +186,27 @@ const VOLUME_FILTER_MIN = 0
 const VOLUME_FILTER_MAX = VOLUME_HIGH_THRESHOLD
 const VOLUME_FILTER_STORAGE_KEY = 'serotonin.minVolume24h'
 
+const WATCHLIST_STORAGE_KEY = 'serotonin.watchlist'
+const WATCHLIST_MAX = 200
+
+function readStoredWatchlist(): string[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(WATCHLIST_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((x): x is string => typeof x === 'string').slice(0, WATCHLIST_MAX)
+  } catch {
+    return []
+  }
+}
+
+function persistWatchlist(list: string[]) {
+  if (typeof window === 'undefined') return
+  try { window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(list)) } catch { /* ignore */ }
+}
+
 function readStoredMinVolume(): number {
   if (typeof window === 'undefined') return VOLUME_FILTER_DEFAULT
   try {
@@ -192,6 +231,8 @@ interface CoinListStore {
   activeTimeframe: Timeframe
   chartExchange: ChartExchange
   minVolume24h: number
+  /** Symbols pinned to the top of the list (persisted to localStorage). */
+  watchlist: string[]
   pageIndex: number
   pageCount: number
   autoRefresh: boolean
@@ -203,6 +244,7 @@ interface CoinListStore {
   setChartExchange: (ce: ChartExchange) => void
   setMinVolume24h: (v: number) => void
   setPageIndex: (n: number) => void
+  toggleWatch: (symbol: string) => void
   toggleAutoRefresh: () => void
   tickCountdown: () => void
   init: () => () => void
@@ -217,10 +259,10 @@ function filterByMinVolume(coins: UnifiedTicker[], minVolume24h: number): Unifie
   return coins.filter(c => (c.quoteVolume24h ?? 0) >= minVolume24h)
 }
 
-function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; chartExchange: ChartExchange; minVolume24h: number; pageIndex: number }) {
+function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker; sortDir: 'asc' | 'desc'; chartExchange: ChartExchange; minVolume24h: number; pageIndex: number; watchlist: string[] }) {
   const byExchange = filterByChartExchange(state.coins, state.chartExchange)
   const filtered = filterByMinVolume(byExchange, state.minVolume24h)
-  const sorted = sortCoins(filtered, state.sortBy, state.sortDir)
+  const sorted = sortCoins(filtered, state.sortBy, state.sortDir, state.watchlist)
   const pageCount = Math.max(1, Math.ceil(sorted.length / 9))
   const safePage = Math.min(Math.max(0, state.pageIndex), pageCount - 1)
   return { sortedCoins: sorted, coinMap: buildCoinMap(sorted), pageCount, pageIndex: safePage }
@@ -278,6 +320,7 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   activeTimeframe: '5m',
   chartExchange: readStoredChartExchange(),
   minVolume24h: readStoredMinVolume(),
+  watchlist: readStoredWatchlist(),
   pageIndex: 0,
   pageCount: 1,
   autoRefresh: true,
@@ -337,6 +380,16 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
     const s = get()
     set(recompute({ ...s, pageIndex: n }))
   },
+
+  toggleWatch: (symbol) => set((s) => {
+    const next = s.watchlist.includes(symbol)
+      ? s.watchlist.filter(x => x !== symbol)
+      : [...s.watchlist, symbol]
+    persistWatchlist(next)
+    // Re-sort immediately so the pin takes effect without waiting for the
+    // next 5s snapshot.
+    return { watchlist: next, ...recompute({ ...s, watchlist: next }) }
+  }),
 
   init: () => {
     const unsubTicker = wsOnType('ticker', (msg) => {
