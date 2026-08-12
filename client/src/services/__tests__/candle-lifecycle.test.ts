@@ -424,4 +424,59 @@ describe('candle-lifecycle', () => {
       expect(c.close).toBe(105)
     })
   })
+
+  describe('forming-candle open is pinned (no start teleport when kline arrives)', () => {
+    it('keeps the trade-established open in the merge branch when a non-final kline has a different open', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      // New period opens with a trade at 108 — the candle's open is 108.
+      lc.applyTrade(makeTrade(360, 108, 3))
+
+      // The exchange's kline for the same period reports a DIFFERENT open (110)
+      // — without pinning this teleported the body start. It must stay 108.
+      // makeCandle(time, open, high, low, close, ...)
+      const patch = lc.applyKline(makeCandle(360, 110, 111, 107, 109, 40, { isFinal: false }))
+      const c = patch.candleUpdates[0]
+      expect(c.time).toBe(360)
+      expect(c.open).toBe(108)
+      expect(c.high).toBe(111)
+      expect(c.low).toBe(107)
+      // Trade is newer than the kline → merge keeps the trade close (a delayed
+      // kline never moves close backward); only high/low/volume merge in.
+      expect(c.close).toBe(108)
+    })
+
+    it('keeps the established open in the replace branch across later klines', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+      lc.applyTrade(makeTrade(320, 108, 2))
+
+      // First kline: trade is newer → merge, open stays 100 (history open).
+      lc.applyKline(makeCandle(300, 101, 109, 96, 106, 45))
+
+      // Second kline with yet another open, no trade since → replace branch:
+      // the open must STILL be pinned to the established 100, not flip to 102.
+      const patch = lc.applyKline(makeCandle(300, 102, 108, 97, 105, 46))
+      const c = patch.candleUpdates[0]
+      expect(c.open).toBe(100)
+      expect(c.close).toBe(105)
+    })
+
+    it('lets the FINAL kline apply the official open', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+      lc.applyTrade(makeTrade(360, 108, 3))
+
+      // Non-final kline with a different open — pinned to 108.
+      lc.applyKline(makeCandle(360, 110, 111, 107, 109, 40, { isFinal: false }))
+
+      // Final kline carries the official open 110 — now the candle is closed,
+      // so the exact exchange values apply.
+      const patch = lc.applyKline(makeCandle(360, 110, 112, 106, 111, 42, { isFinal: true }))
+      const c = patch.candleUpdates[0]
+      expect(c.open).toBe(110)
+      expect(c.isFinal).toBe(true)
+    })
+  })
 })

@@ -116,7 +116,8 @@ describe.skipIf(!serverUp)('Integration: real server history + sharp-move replay
     lc.applyTrade({ symbol: SYM, exchange: EX, price: p3, qty: 4, time: moveTime + 50 } as TradePayload)
 
     // Non-final kline covering the period (trades are newer → merge keeps the
-    // real kline open while high/low envelope everything).
+    // trade-established open — pinned so the body start never teleports —
+    // while high/low envelope everything).
     const kline: UnifiedCandle = {
       symbol: SYM, exchange: EX, timeframe: TF, time: moveTime,
       open: basePrice, high: p2 * 1.001, low: p1 * 0.999, close: p3, volume: 1200,
@@ -125,10 +126,13 @@ describe.skipIf(!serverUp)('Integration: real server history + sharp-move replay
     const kp = lc.applyKline(kline)
     applyCandleUpdates(arr, kp.candleUpdates)
 
-    // The sharp-move candle exists with the expected shape.
+// The sharp-move candle exists with the expected shape.
     const sharp = arr.find(c => c.time === moveTime)
     expect(sharp).toBeDefined()
-    expect(sharp!.open).toBe(basePrice)
+    // Open is PINNED to the first trade of the period (p1), not rewritten to
+    // the kline's open (basePrice) — the kline's open would teleport the
+    // candle start mid-move. The official open lands only at finalization.
+    expect(sharp!.open).toBe(p1)
     expect(sharp!.close).toBe(p3)
     expect(sharp!.high).toBeGreaterThanOrEqual(Math.max(p1, p2, p3, kline.high))
     expect(sharp!.low).toBeLessThanOrEqual(Math.min(p1, p2, p3, kline.low))
