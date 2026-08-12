@@ -68,22 +68,22 @@ describe('CoinList Row — live price cell', () => {
   })
 })
 
-describe('CoinList Row — watchlist star', () => {
+describe('CoinList Row — watchlist flag', () => {
   it('toggles the watch on click without selecting the row', () => {
     const onClick = vi.fn()
     const onToggleWatch = vi.fn()
     const { getByTestId } = renderBaseRow({ onClick, onToggleWatch })
     fireEvent.click(getByTestId('watch-toggle'))
     expect(onToggleWatch).toHaveBeenCalledWith('BTCUSDT')
-    expect(onClick).not.toHaveBeenCalled() // star must not open the chart
+    expect(onClick).not.toHaveBeenCalled() // flag must not open the chart
   })
 
-  it('renders the star filled when watched', () => {
+  it('renders the flag filled when watched', () => {
     const { getByTestId } = renderBaseRow({ isWatched: true })
     expect(getByTestId('watch-toggle').className).toContain('text-[#f5c518]')
   })
 
-  it('renders the star dim when not watched', () => {
+  it('renders the flag dim when not watched', () => {
     const { getByTestId } = renderBaseRow({ isWatched: false })
     expect(getByTestId('watch-toggle').className).not.toContain('text-[#f5c518]')
   })

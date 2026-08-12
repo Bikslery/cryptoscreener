@@ -4,7 +4,8 @@ import { useAuthStore, useUIStore } from '../../store'
 import { useDrawingHotkeysStore, eventToCombo, formatCombo, DRAWING_TOOL_LABELS, DEFAULT_DRAWING_HOTKEYS } from '../../store/drawingHotkeys'
 import type { DrawingTool } from '../../types'
 import api from '../../services/api'
-import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3 } from 'lucide-react'
+import { playAlertSound } from '../../services/alert-notify'
+import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3, Bell, Volume2 } from 'lucide-react'
 import './ProfileModal.css'
 
 type ResetStep = 'idle' | 'code' | 'password' | 'done'
@@ -46,6 +47,39 @@ export default function ProfileModal() {
       updateSettings({ chartVisibleBars: v }).catch(() => {})
     }, 400)
   }
+
+  // Alert notification settings — sound on/off + volume (0–1).
+  const [notifySound, setNotifySound] = useState(settings?.notifySound !== false)
+  const [notifyVolume, setNotifyVolume] = useState(settings?.notifyVolume ?? 1)
+  const notifySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    setNotifySound(settings?.notifySound !== false)
+  }, [settings?.notifySound])
+
+  useEffect(() => {
+    setNotifyVolume(settings?.notifyVolume ?? 1)
+  }, [settings?.notifyVolume])
+
+  const handleNotifySoundChange = (on: boolean) => {
+    setNotifySound(on)
+    updateSettings({ notifySound: on }).catch(() => {})
+    if (on) playAlertSound(notifyVolume)
+  }
+
+  const handleNotifyVolumeChange = (v: number) => {
+    setNotifyVolume(v)
+    if (notifySaveTimer.current) clearTimeout(notifySaveTimer.current)
+    notifySaveTimer.current = setTimeout(() => {
+      updateSettings({ notifyVolume: v }).catch(() => {})
+    }, 400)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (notifySaveTimer.current) clearTimeout(notifySaveTimer.current)
+    }
+  }, [])
 
   useEffect(() => {
     return () => {
@@ -397,6 +431,59 @@ export default function ProfileModal() {
               Применяется к большому графику при открытии нового символа
             </div>
           </div>
+        </div>
+
+        {/* Notifications section */}
+        <div className="profile-section">
+          <div className="section-header">
+            <div className="section-icon">
+              <Bell size={14} />
+            </div>
+            <h2>Уведомления</h2>
+          </div>
+
+          <div className="profile-field">
+            <div className="profile-notify-row">
+              <label>Звук при срабатывании</label>
+              <label className="profile-switch">
+                <input
+                  type="checkbox"
+                  checked={notifySound}
+                  onChange={(e) => handleNotifySoundChange(e.target.checked)}
+                  data-testid="notify-sound-toggle"
+                />
+                <span className="track" />
+              </label>
+            </div>
+          </div>
+
+          <div className="profile-field">
+            <label>Громкость звука</label>
+            <div className="profile-volume-row">
+              <Volume2 size={13} className="shrink-0 text-[#888]" />
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={notifyVolume}
+                disabled={!notifySound}
+                onChange={(e) => handleNotifyVolumeChange(Number(e.target.value))}
+                className="profile-volume-slider"
+                data-testid="notify-volume-slider"
+              />
+              <span className="profile-volume-value">{Math.round(notifyVolume * 100)}%</span>
+            </div>
+          </div>
+
+          <button
+            className="profile-notify-test"
+            disabled={!notifySound}
+            onClick={() => playAlertSound(notifyVolume)}
+          >
+            <Volume2 size={13} />
+            проверить звук
+          </button>
         </div>
 
         {/* Hotkeys section */}

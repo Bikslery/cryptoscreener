@@ -1,6 +1,5 @@
 import { memo, useCallback, useMemo, useRef, useEffect } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
-import { Star } from 'lucide-react'
 import { useCoinListStore, useLivePrice } from '../../store'
 import type { UnifiedTicker } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
@@ -28,11 +27,23 @@ const COLS: ColumnDef[] = [
 
 const ROW_COLS = '80px 88px 72px 72px 72px 80px'
 
-function ArrowFlag() {
+/**
+ * The flag that always sat next to the ticker name. It is the watchlist
+ * toggle: click pins the coin to the top of the list (gold when pinned).
+ */
+function WatchFlag({ watched, onClick }: { watched: boolean; onClick: (e: React.MouseEvent<HTMLButtonElement>) => void }) {
   return (
-    <svg width="0.7em" height="0.7em" viewBox="0 0 8 8" fill="none" className="inline-block mr-1 text-[#555] shrink-0">
-      <path d="M8 8L5 4L8 0H0V8H8Z" fill="currentColor" />
-    </svg>
+    <button
+      data-testid="watch-toggle"
+      className={`shrink-0 mr-[5px] flex items-center justify-center cursor-pointer transition-colors ${watched ? 'text-[#f5c518]' : 'text-[#3a3a3a] hover:text-[#777]'}`}
+      title={watched ? 'Убрать из избранного' : 'В избранное'}
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={onClick}
+    >
+      <svg width="0.7em" height="0.7em" viewBox="0 0 8 8" fill="none" className="inline-block shrink-0">
+        <path d="M8 8L5 4L8 0H0V8H8Z" fill="currentColor" />
+      </svg>
+    </button>
   )
 }
 
@@ -142,16 +153,7 @@ export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage,
       onClick={() => onClick(coin.symbol)}
     >
       <div className={`flex items-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
-        <button
-          data-testid="watch-toggle"
-          className={`shrink-0 mr-[5px] flex items-center justify-center cursor-pointer transition-colors ${isWatched ? 'text-[#f5c518]' : 'text-[#3a3a3a] hover:text-[#777]'}`}
-          title={isWatched ? 'Убрать из избранного' : 'В избранное'}
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => { e.stopPropagation(); onToggleWatch(coin.symbol) }}
-        >
-          <Star size={11} fill={isWatched ? 'currentColor' : 'none'} strokeWidth={isWatched ? 1.5 : 1.5} />
-        </button>
-        <ArrowFlag />
+        <WatchFlag watched={isWatched} onClick={(e) => { e.stopPropagation(); onToggleWatch(coin.symbol) }} />
         {formatVal('symbol', coin)}
       </div>
       <div className={`flex items-center justify-end px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>

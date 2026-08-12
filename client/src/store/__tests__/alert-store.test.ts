@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useAlertStore } from '../index'
+import { onAlertRemoved } from '../../services/alert-drawing-sync'
 import type { Alert } from '../../types'
 
 function makeAlert(id: string, overrides: Partial<Alert> = {}): Alert {
@@ -40,5 +41,28 @@ describe('useAlertStore — addCreated', () => {
       useAlertStore.getState().addCreated(makeAlert(`a${i}`))
     }
     expect(useAlertStore.getState().alerts).toHaveLength(100)
+  })
+})
+
+describe('useAlertStore — dismissAlert', () => {
+  beforeEach(() => {
+    useAlertStore.setState({ alerts: [] })
+  })
+
+  it('removes the alert from the list', () => {
+    useAlertStore.getState().addCreated(makeAlert('a1'))
+    useAlertStore.getState().dismissAlert('a1')
+    expect(useAlertStore.getState().alerts).toHaveLength(0)
+  })
+
+  it('emits alertRemoved so every chart drops the linked ray', () => {
+    const seen: string[] = []
+    const unsub = onAlertRemoved((id) => seen.push(id))
+    try {
+      useAlertStore.getState().dismissAlert('al-7')
+      expect(seen).toEqual(['al-7'])
+    } finally {
+      unsub()
+    }
   })
 })

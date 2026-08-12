@@ -5,9 +5,14 @@ import type { IChartApi, ISeriesApi, ITimeScaleApi, Time } from 'lightweight-cha
 import type { UnifiedCandle } from '../../../types'
 import { useDrawings } from '../useDrawings'
 import { DrawingsPrimitive } from '../drawings/primitive'
+import { emitAlertRemoved } from '../../../services/alert-drawing-sync'
 import { useDrawingHotkeysStore } from '../../../store/drawingHotkeys'
 
-const { mockPost } = vi.hoisted(() => ({ mockPost: vi.fn(() => Promise.resolve({ data: {} })) }))
+const { mockPost, mockAddCreated, mockDismiss } = vi.hoisted(() => ({
+  mockPost: vi.fn(() => Promise.resolve({ data: {} })),
+  mockAddCreated: vi.fn(),
+  mockDismiss: vi.fn(),
+}))
 
 vi.mock('../../../services/api', () => ({
   default: {
@@ -31,7 +36,7 @@ vi.mock('../../../store', () => {
     useCoinListStore: Object.assign(coinListStore, { getState: () => ({ coinMap }) }),
     useAlertStore: Object.assign(
       (selector: (s: { alerts: unknown[] }) => unknown) => selector({ alerts: [] }),
-      { getState: () => ({ alerts: [], addCreated: vi.fn() }) },
+      { getState: () => ({ alerts: [], addCreated: mockAddCreated, dismissAlert: mockDismiss }) },
     ),
   }
 })
@@ -487,9 +492,23 @@ describe('useDrawings — price-alert tool', () => {
     localStorage.clear()
     useDrawingHotkeysStore.getState().deactivate()
     mockPost.mockClear()
+    mockAddCreated.mockClear()
+    mockDismiss.mockClear()
+    // The drawings POST must return a real saved drawing (id/type/data),
+    // otherwise saveDrawing replaces the placed ray with an empty object.
+    // Once-values in individual tests still take precedence over this default.
+    mockPost.mockImplementation(() => Promise.resolve({
+      data: {
+        id: 'drw-1',
+        userId: '',
+        symbol: 'BTCUSDT',
+        type: 'h-ray',
+        data: { price: 100, time: 1700000000, logical: 0, style: 'dashed' },
+      },
+    }))
   })
 
-  it('places a dashed h-ray and creates a price alert on click', () => {
+  it('places a dashed h-ray and creates a price alert on click', async () => {
     const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
       initialProps: {
         symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
@@ -501,6 +520,9 @@ describe('useDrawings — price-alert tool', () => {
     act(() => {
       result.current.handleClick({ clientX: 60, clientY: 120 } as MouseEvent)
     })
+    // The alert is created after the drawing persists (async chain) — flush it.
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { await Promise.resolve() })
 
     expect(result.current.drawings.length).toBe(1)
     const d = result.current.drawings[0]
@@ -533,7 +555,14 @@ describe('useDrawings — price-alert tool', () => {
     expect(useDrawingHotkeysStore.getState().activeTool).toBeNull()
   })
 
-  it('keeps the dashed style when the alert ray is dragged', () => {
+  it('links the ray to the created alert (alertId stored on the drawing)', async () => {
+    mockPost.mockClear()
+    // The alert POST resolves with a real id; the drawings POST resolves first
+    // with a server id so the link lands on the persisted drawing.
+    mockPost
+      .mockResolvedValueOnce({ data: { id: 'drw-1' } }) // POST /drawings
+      .mockResolvedValueOnce({ data: { id: 'al-42' } }) // POST /alerts
+
     const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
       initialProps: {
         symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
@@ -545,6 +574,74 @@ describe('useDrawings — price-alert tool', () => {
     act(() => {
       result.current.handleClick({ clientX: 60, clientY: 120 } as MouseEvent)
     })
+
+    // Wait for the async save → alert → link chain to flush.
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { await Promise.resolve() })
+
+    expect(mockAddCreated).toHaveBeenCalledWith({ id: 'al-42' })
+    const linked = result.current.drawings.find(d => d.id === 'drw-1')
+    expect(linked).toBeDefined()
+    expect((linked!.data as { alertId?: string }).alertId).toBe('al-42')
+  })
+
+  it('deleting the ray dismisses its linked alert', () => {
+    localStorage.setItem('drawings:BTCUSDT', JSON.stringify([{
+      id: 'drw-9',
+      userId: '',
+      symbol: 'BTCUSDT',
+      type: 'h-ray',
+      data: { price: 100, time: 1700000000, logical: 0, style: 'dashed', alertId: 'al-9' },
+    }]))
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
+      },
+    })
+    mockDismiss.mockClear()
+    act(() => {
+      result.current.removeDrawing('drw-9')
+    })
+    expect(mockDismiss).toHaveBeenCalledWith('al-9')
+    expect(result.current.drawings).toHaveLength(0)
+  })
+
+  it('removing the alert from the list removes its ray from the chart', () => {
+    localStorage.setItem('drawings:BTCUSDT', JSON.stringify([{
+      id: 'drw-9',
+      userId: '',
+      symbol: 'BTCUSDT',
+      type: 'h-ray',
+      data: { price: 100, time: 1700000000, logical: 0, style: 'dashed', alertId: 'al-9' },
+    }]))
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
+      },
+    })
+    // The real alert-drawing-sync bus: dismissing from the list emits and every
+    // chart drops the linked ray.
+    act(() => {
+      emitAlertRemoved('al-9')
+    })
+    expect(result.current.drawings).toHaveLength(0)
+  })
+
+  it('keeps the dashed style when the alert ray is dragged', async () => {
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
+      },
+    })
+    act(() => {
+      useDrawingHotkeysStore.getState().activateTool('alert')
+    })
+    act(() => {
+      result.current.handleClick({ clientX: 60, clientY: 120 } as MouseEvent)
+    })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { await Promise.resolve() })
     expect(result.current.drawings.length).toBe(1)
     expect((result.current.drawings[0].data as { style?: string }).style).toBe('dashed')
 

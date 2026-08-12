@@ -3,6 +3,7 @@ import { useSyncExternalStore } from 'react'
 import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, Alert as AlertType, UserSettings } from '../types.js'
 import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
 import { notifyNewAlert } from '../services/alert-notify.js'
+import { emitAlertRemoved } from '../services/alert-drawing-sync.js'
 import api from '../services/api.js'
 import { VOLUME_HIGH_THRESHOLD, VOLUME_FILTER_DEFAULT } from '../constants/volume.js'
 
@@ -544,7 +545,11 @@ export const useAlertStore = create<AlertStore>((set) => ({
         return { alerts: next.slice(0, 100) }
       })
       // Sound + native browser notification for every fired alert.
-      notifyNewAlert(alert)
+      const settings = useAuthStore.getState().settings
+      notifyNewAlert(alert, {
+        sound: settings?.notifySound !== false,
+        volume: settings?.notifyVolume ?? 1,
+      })
     })
     return unsub
   },
@@ -554,9 +559,15 @@ export const useAlertStore = create<AlertStore>((set) => ({
     return { alerts: [alert, ...s.alerts].slice(0, 100) }
   }),
 
-  dismissAlert: (id) => set((s) => ({
-    alerts: s.alerts.filter(a => a.id !== id),
-  })),
+  dismissAlert: (id) => {
+    set((s) => ({
+      alerts: s.alerts.filter(a => a.id !== id),
+    }))
+    // Stop the alert server-side (delete the row) and remove its ray from any
+    // chart that shows it — the list and the drawings stay in sync.
+    emitAlertRemoved(id)
+    api.delete(`/alerts/${id}`).catch(() => { /* already gone */ })
+  },
 
   muteAlert: (id) => set((s) => ({
     alerts: s.alerts.map(a => a.id === id ? { ...a, muted: true } : a),

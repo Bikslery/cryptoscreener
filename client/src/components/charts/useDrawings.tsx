@@ -4,6 +4,7 @@ import type { Drawing, DrawingTool, HRayDrawing, TwoPointDrawing, UnifiedCandle,
 import { isTwoPointTool } from '../../types'
 import api from '../../services/api'
 import { useAuthStore, useCoinListStore, useAlertStore } from '../../store'
+import { onAlertRemoved } from '../../services/alert-drawing-sync'
 import { useDrawingHotkeysStore, isInputFocused } from '../../store/drawingHotkeys'
 import { DrawingsPrimitive, resolveExactX, logicalToTime, findBarByTime } from './drawings/primitive'
 
@@ -210,11 +211,21 @@ export function useDrawings(
     setDrawings(stored)
     undoStackRef.current = []
     redoStackRef.current = []
+    const initialLocalIds = new Set(stored.map(d => d.id))
 
     if (!isLoggedIn) return
     api.get('/drawings', { params: { symbol: reqSymbol } })
       .then(res => {
         if (symbolRef.current !== reqSymbol) return
+        // Race guard: the server snapshot is from BEFORE this fetch started.
+        // If the user already drew something since then (a new local id), the
+        // snapshot is stale and must never overwrite the session drawings.
+        const current = drawingsRef.current
+        const hasNewSessionDrawings = current.length > 0 && current.some(d => !initialLocalIds.has(d.id))
+        if (hasNewSessionDrawings) {
+          saveToStorage(reqSymbol, current)
+          return
+        }
         const serverDrawings = sanitizeDrawings(res.data as Drawing[]).filter(
           d => SUPPORTED_DRAWING_TYPES.has(d.type)
         )
@@ -254,6 +265,13 @@ export function useDrawings(
   }, [chartVersion])
 
   const removeDrawing = useCallback((id: string) => {
+    // If the deleted line is an alert ray, remove the linked alert too — the
+    // drawing and the Уведомления list stay in sync (dismissAlert deletes it
+    // server-side, emits to other charts, and stops it firing).
+    const victim = drawingsRef.current.find(d => d.id === id)
+    if (victim?.type === 'h-ray' && (victim.data as HRayDrawing).alertId) {
+      useAlertStore.getState().dismissAlert((victim.data as HRayDrawing).alertId!)
+    }
     pushHistory()
     setDrawings(prev => {
       const next = prev.filter(d => d.id !== id)
@@ -264,6 +282,25 @@ export function useDrawings(
       api.delete(`/drawings/${id}`).catch(() => {})
     }
   }, [isLoggedIn, pushHistory])
+
+  // When an alert is dismissed from the Уведомления list, remove its ray from
+  // this chart (any chart showing it) — deletion is two-way.
+  useEffect(() => {
+    return onAlertRemoved((alertId) => {
+      setDrawings(prev => {
+        const removed = prev.filter(d => d.type === 'h-ray' && (d.data as HRayDrawing).alertId === alertId)
+        if (removed.length === 0) return prev
+        const next = prev.filter(d => !(d.type === 'h-ray' && (d.data as HRayDrawing).alertId === alertId))
+        saveToStorage(symbolRef.current, next)
+        for (const d of removed) {
+          if (!isLocalId(d.id) && isLoggedIn) {
+            api.delete(`/drawings/${d.id}`).catch(() => {})
+          }
+        }
+        return next
+      })
+    })
+  }, [isLoggedIn])
 
   const updateDrawingState = useCallback((id: string, data: unknown) => {
     pushHistory()
@@ -367,8 +404,8 @@ export function useDrawings(
     }
   }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, updateDrawingState, isInitialLoading, dataVersion, candlesDataRef])
 
-  const saveDrawing = useCallback(async (drawing: Drawing) => {
-    if (!isLoggedIn) return
+  const saveDrawing = useCallback(async (drawing: Drawing): Promise<Drawing | null> => {
+    if (!isLoggedIn) return null
     const drawingSymbol = drawing.symbol
     try {
       const res = await api.post('/drawings', {
@@ -388,10 +425,19 @@ export function useDrawings(
         const updated = stored.map(d => d.id === drawing.id ? saved : d)
         saveToStorage(drawingSymbol, updated)
       }
-    } catch {}
+      return saved
+    } catch {
+      return null
+    }
   }, [isLoggedIn])
 
   const clearAllDrawings = useCallback(() => {
+    // Dismiss every linked alert so no alert keeps firing without its ray.
+    for (const d of drawingsRef.current) {
+      if (d.type === 'h-ray' && (d.data as HRayDrawing).alertId) {
+        useAlertStore.getState().dismissAlert((d.data as HRayDrawing).alertId!)
+      }
+    }
     pushHistory()
     const ids = drawingsRef.current.map(d => d.id)
     setDrawings([])
@@ -429,6 +475,8 @@ export function useDrawings(
       // a price alert for that level. The line is an ordinary h-ray drawing
       // (persisted like any other), rendered amber/dashed by primitive.ts;
       // the alert is created server-side and fires through the alert engine.
+      // The ray is linked to the alert by alertId so deleting either one
+      // removes the other (see removeDrawing / onAlertRemoved).
       pushHistory()
       const data: HRayDrawing = { price, time, logical, style: 'dashed' }
       const drawing: Drawing = {
@@ -443,7 +491,6 @@ export function useDrawings(
         saveToStorage(curSymbol, next)
         return next
       })
-      saveDrawing(drawing)
 
       // Direction is chosen so the alert does NOT fire instantly: clicked
       // above the current price → 'above' (price must rise to the level),
@@ -451,7 +498,12 @@ export function useDrawings(
       const coin = useCoinListStore.getState().coinMap.get(curSymbol)
       const currentPrice = coin?.price
       const direction = currentPrice !== undefined && price < currentPrice ? 'below' : 'above'
-      if (isLoggedIn) {
+
+      // Persist the drawing first so we know its server id, then create the
+      // alert and link them. Both steps are required for two-way deletion.
+      saveDrawing(drawing).then((saved) => {
+        if (!saved) return
+        if (!isLoggedIn) return
         api.post('/alerts', {
           type: 'price',
           symbol: curSymbol,
@@ -459,11 +511,21 @@ export function useDrawings(
           condition: { price, direction },
         })
           .then((res) => {
+            const alert = res.data as Alert
             // Show the created alert in the Уведомления list right away.
-            useAlertStore.getState().addCreated(res.data as Alert)
+            useAlertStore.getState().addCreated(alert)
+            // Link the ray to the alert: store alertId on the drawing and
+            // persist it (server + localStorage).
+            const linkedData: HRayDrawing = { ...data, alertId: alert.id }
+            setDrawings(prev => {
+              const next = prev.map(d => d.id === saved.id ? { ...d, data: linkedData } : d)
+              saveToStorage(curSymbol, next)
+              return next
+            })
+            api.put(`/drawings/${saved.id}`, { data: linkedData }).catch(() => {})
           })
           .catch(() => { /* alert engine covers failures silently */ })
-      }
+      })
       setActiveTool(null)
       clearPending()
       return

@@ -98,6 +98,8 @@ export interface HRayDrawing {
   logical?: number
   /** Dashed (alert-level) rays render amber with a dotted pattern. */
   style?: 'solid' | 'dashed'
+  /** Linked price alert id — deleting the line deletes the alert and vice versa. */
+  alertId?: string
 }
 
 export interface TRayDrawing {
@@ -174,6 +176,9 @@ export interface UserSettings {
   drawingHotkeys?: Record<DrawingTool, string>
   // Initial visible bars when opening the expanded chart (50–1000).
   chartVisibleBars?: number
+  // Alert notifications: play a sound on fire (default true) and its volume (0–1).
+  notifySound?: boolean
+  notifyVolume?: number
 }
 
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'

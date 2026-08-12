@@ -18,6 +18,12 @@ let lastBeepAt = 0
 /** Min gap between beeps — a burst of alerts in one 5s tick must not machine-gun. */
 const BEEP_MIN_GAP_MS = 700
 
+/** How much of the alert to act on — sound can be muted, volume 0–1. */
+export interface AlertNotifyOptions {
+  sound?: boolean
+  volume?: number
+}
+
 function getAudioCtx(): AudioContext | null {
   if (typeof window === 'undefined') return null
   const w = window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }
@@ -33,12 +39,13 @@ function getAudioCtx(): AudioContext | null {
 }
 
 /** Short two-tone beep (880 → 660 Hz). Best-effort: silently no-ops anywhere audio is unavailable. */
-export function playAlertSound(): void {
+export function playAlertSound(volume = 1): void {
   const now = Date.now()
   if (now - lastBeepAt < BEEP_MIN_GAP_MS) return
   lastBeepAt = now
   const ctx = getAudioCtx()
   if (!ctx || ctx.state !== 'running') return
+  const peak = Math.max(0.0001, Math.min(1, volume)) * 0.22
   try {
     const t0 = ctx.currentTime
     const beep = (freq: number, start: number, dur: number) => {
@@ -47,7 +54,7 @@ export function playAlertSound(): void {
       osc.type = 'sine'
       osc.frequency.value = freq
       gain.gain.setValueAtTime(0.0001, start)
-      gain.gain.exponentialRampToValueAtTime(0.22, start + 0.02)
+      gain.gain.exponentialRampToValueAtTime(peak, start + 0.02)
       gain.gain.exponentialRampToValueAtTime(0.0001, start + dur)
       osc.connect(gain)
       gain.connect(ctx.destination)
@@ -88,8 +95,8 @@ export function initAlertNotifications(): void {
 }
 
 /** Sound + native browser notification for a newly fired alert. */
-export function notifyNewAlert(alert: Alert): void {
-  playAlertSound()
+export function notifyNewAlert(alert: Alert, opts: AlertNotifyOptions = {}): void {
+  if (opts.sound !== false) playAlertSound(opts.volume ?? 1)
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
   const base = extractBaseAsset(alert.symbol) || 'ANY'
   const label = ALERT_LABELS[alert.type] ?? 'Алерт'
