@@ -48,10 +48,28 @@ function chunkKeysFor(exchange: Exchange, symbol: string, tf: string, beforeMs: 
   if (!tfMs) return []
   const keys: { key: string; csMs: number }[] = []
   let cursor = beforeMs
-  const numChunks = Math.ceil(limit / CHUNK_SIZE)
-  for (let i = 0; i < numChunks; i++) {
+  // The most-recent chunk is usually PARTIAL (it only holds candles that
+  // elapsed since the chunk-grid boundary — for 5m that can be ~250 rows of
+  // 1000). Naive ceil(limit / CHUNK_SIZE) planning under-plans depth: a
+  // limit=1000 5m request would get ~250 bars and never go deeper. Plan
+  // against expected rows per chunk (partial first chunk, full ones beyond)
+  // so the request reliably covers the full requested depth.
+  const maxChunks = Math.ceil(limit / CHUNK_SIZE) + 1
+  let remaining = limit
+  let prevCs: number | undefined
+  while (remaining > 0 && keys.length < maxChunks) {
     const cs = chunkStartMs(cursor, tfMs)
-    keys.push({ key: `${CHUNK_PREFIX}${exchange}:${symbol}:${tf}:${cs}`, csMs: cs })
+    if (cs !== prevCs) {
+      keys.push({ key: `${CHUNK_PREFIX}${exchange}:${symbol}:${tf}:${cs}`, csMs: cs })
+    } else {
+      break
+    }
+    prevCs = cs
+    const rowsInChunk =
+      cs + CHUNK_SIZE * tfMs > beforeMs
+        ? Math.min(CHUNK_SIZE, Math.max(1, Math.floor((beforeMs - cs) / tfMs)) + 1)
+        : CHUNK_SIZE
+    remaining -= rowsInChunk
     cursor = cs - 1
     if (cursor <= 0) break
   }
@@ -336,21 +354,21 @@ export async function getHistory(
   }
 
   if (misses.length > 0) {
-    // Fetch missing chunks in parallel with seamless stitching. A chunk that
-    // fails transiently (budget exhausted, fetch timeout, circuit breaker)
-    // must NOT look like end-of-history: throw so the client gets a 5xx and
-    // retries later. Successfully fetched chunks stay cached (Redis/mem), so
-    // the retry is cheap.
-    const fetchPromises = misses.map(m =>
-      getOrFetchChunk(m.key, symbol, tf, m.csMs, resolvedExchange),
-    )
-    const results = await Promise.allSettled(fetchPromises)
-    const failed = results.filter(r => r.status === 'rejected').length
-    if (failed > 0) {
-      throw new Error(`[History] ${failed}/${results.length} chunks failed transiently (${resolvedExchange} ${symbol} ${tf})`)
-    }
-    for (const r of results) {
-      if (r.status === 'fulfilled') allCandles.push(...r.value)
+    // Fetch missing chunks ONE AT A TIME. A parallel blast of chunk fetches
+    // (3+ chunks per request, across every symbol the grid polls) is what
+    // trips Binance rate limits — and once an adapter 429s it THROWS a
+    // RateLimitError, so a throttled chunk fails the whole request loudly
+    // instead of silently reading as "history ended". Sequential + the
+    // inflightChunks dedup keeps concurrent callers from doubling up.
+    for (const m of misses) {
+      try {
+        const chunk = await getOrFetchChunk(m.key, symbol, tf, m.csMs, resolvedExchange)
+        allCandles.push(...chunk)
+      } catch (e) {
+        throw new Error(
+          `[History] chunk fetch failed transiently (${resolvedExchange} ${symbol} ${tf} ${m.key}): ${e instanceof Error ? e.message : String(e)}`,
+        )
+      }
     }
   }
 

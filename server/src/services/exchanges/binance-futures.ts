@@ -5,6 +5,7 @@ import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../..
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
 import { fetchWithTimeout } from '../../utils/fetch.js'
 import { BinanceRateLimiter } from './rate-limiter.js'
+import { RateLimitError, ExchangeRequestError } from './errors.js'
 import { WsStreamPool } from './ws-pool.js'
 import { getWsAgent, getFetchDispatcher } from './proxy.js'
 import type { ProxyAgent } from 'undici'
@@ -639,11 +640,14 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     try {
       const res = await fetchWithTimeout(url, 10000, options?.dispatcher ?? this.fetchDispatcher)
       this.rateLimiter.updateFromHeaders(res.headers)
-      if (res.status === 429) { this.rateLimiter.handle429(res.headers); return [] }
-      if (res.status === 418) { this.rateLimiter.handle418(res.headers); return [] }
-      if (!res.ok) { this.rateLimiter.recordError(); return [] }
+      // Throttling must NOT masquerade as end-of-history: an empty array read
+      // "no older data" downstream and silently emptied chart pages. Throw a
+      // typed error so the history layer retries/fails properly.
+      if (res.status === 429) { this.rateLimiter.handle429(res.headers); throw new RateLimitError(`fapi 429 (${symbol} ${tf})`) }
+      if (res.status === 418) { this.rateLimiter.handle418(res.headers); throw new RateLimitError(`fapi 418 IP ban (${symbol} ${tf})`) }
+      if (!res.ok) { this.rateLimiter.recordError(); throw new ExchangeRequestError(`fapi ${res.status} (${symbol} ${tf})`) }
       const data = await res.json()
-      if (!Array.isArray(data)) { this.rateLimiter.recordError(); return [] }
+      if (!Array.isArray(data)) { this.rateLimiter.recordError(); throw new ExchangeRequestError(`fapi invalid body (${symbol} ${tf})`) }
       this.rateLimiter.recordSuccess()
       return data.map((k: any[]) => ({
         symbol,

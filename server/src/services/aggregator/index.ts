@@ -3,6 +3,7 @@ import { BinanceSpotAdapter } from '../exchanges/binance-spot.js'
 import { BinanceFuturesAdapter } from '../exchanges/binance-futures.js'
 import { BybitFuturesAdapter } from '../exchanges/bybit-futures.js'
 import type { ExchangeAdapter } from '../exchanges/types.js'
+import { RateLimitError } from '../exchanges/errors.js'
 import { broadcast, broadcastToChannel } from '../../ws/hub.js'
 import { updateCachedCandle, getCachedCandles } from '../candles/candle-cache.js'
 import { getRedisPub, getRedisData, REDIS_ENABLED } from '../../redis.js'
@@ -629,7 +630,11 @@ export async function fetchCandlesSeamless(
         // Got full range — no stitching needed
         break
       }
-    } catch {
+    } catch (e) {
+      // Throttling is transient, NOT end-of-history: propagate it so the
+      // history layer fails loudly instead of treating the gap as "the pair
+      // has no data" (which permanently starved chart pages of depth).
+      if (e instanceof RateLimitError) throw e
       continue
     }
   }
