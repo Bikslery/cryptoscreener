@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest'
 import { beginFormingGlide, advanceFormingGlide, type FormingGlide } from '../candle-anim'
 import { easeOutCubic } from '../glide'
 
-const displayed = { time: 300, open: 100, high: 110, low: 95, close: 100 }
-const target = { time: 300, open: 100, high: 110, low: 95, close: 110 }
+const displayed = { time: 300, open: 100, high: 110, low: 95, close: 100, volume: 500 }
+const target = { time: 300, open: 100, high: 110, low: 95, close: 110, volume: 500 }
 
 describe('forming-candle glide — time-based easing', () => {
   it('moves close with eased progress at half duration and does not converge', () => {
@@ -14,11 +14,24 @@ describe('forming-candle glide — time-based easing', () => {
   })
 
   it('extends high/low toward the target with the same eased progress', () => {
-    const t = { time: 300, open: 100, high: 112, low: 96, close: 108 }
+    const t = { time: 300, open: 100, high: 112, low: 96, close: 108, volume: 500 }
     const r = advanceFormingGlide(beginFormingGlide(displayed, t, 100), 50)
     const p = easeOutCubic(0.5)
     expect(r.next.high).toBeCloseTo(110 + 2 * p) // high: 110 → 112
     expect(r.next.low).toBeCloseTo(95 + 1 * p) // low: 95 → 96
+  })
+
+  it('glides the volume with the same eased progress and converges exactly', () => {
+    const t = { time: 300, open: 100, high: 110, low: 95, close: 110, volume: 700 }
+    let g: FormingGlide = beginFormingGlide(displayed, t, 100)
+    let r = advanceFormingGlide(g, 50)
+    g = r.glide
+    const p = easeOutCubic(0.5)
+    expect(r.next.volume).toBeCloseTo(500 + 200 * p) // 500 → 700
+    expect(r.converged).toBe(false)
+    r = advanceFormingGlide(g, 50)
+    expect(r.converged).toBe(true)
+    expect(r.next.volume).toBe(700)
   })
 
   it('converges exactly once elapsed passes the duration', () => {
@@ -31,10 +44,11 @@ describe('forming-candle glide — time-based easing', () => {
     r = advanceFormingGlide(g, 16)
     expect(r.converged).toBe(true)
     expect(r.next.close).toBe(110)
+    expect(r.next.volume).toBe(500)
   })
 
   it('keeps the bar time pinned to the target (never glides across periods)', () => {
-    const t = { time: 360, open: 102, high: 103, low: 101, close: 102 }
+    const t = { time: 360, open: 102, high: 103, low: 101, close: 102, volume: 600 }
     const r = advanceFormingGlide(beginFormingGlide(displayed, t, 100), 50)
     expect(r.next.time).toBe(360)
   })

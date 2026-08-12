@@ -73,7 +73,7 @@ function repaintSeries(
   if (!candleRef.current || !volumeRef.current || candles.length === 0) return
   // A repaint paints exact data — any pending forming-candle glide must stop
   // so it can't overwrite the exact values on the next frame.
-  getFormingAnimator(candleRef.current, () => candleRef.current).reset()
+  getFormingAnimator(candleRef.current, () => candleRef.current, volumeRef.current, () => volumeRef.current).reset()
   const valid = candles.filter(validateCandle).map(normalizeCandle)
   if (valid.length === 0) return
   // Capture the view BEFORE setData — LWC recomputes the scale from the new
@@ -113,10 +113,19 @@ class FormingAnimator implements Glider {
   private lastTargetAt = 0
   private readonly series: ISeriesApi<'Candlestick'>
   private readonly getRef: () => ISeriesApi<'Candlestick'> | null
+  private readonly volSeries: ISeriesApi<'Histogram'>
+  private readonly getVolRef: () => ISeriesApi<'Histogram'> | null
 
-  constructor(series: ISeriesApi<'Candlestick'>, getRef: () => ISeriesApi<'Candlestick'> | null) {
+  constructor(
+    series: ISeriesApi<'Candlestick'>,
+    getRef: () => ISeriesApi<'Candlestick'> | null,
+    volSeries: ISeriesApi<'Histogram'>,
+    getVolRef: () => ISeriesApi<'Histogram'> | null,
+  ) {
     this.series = series
     this.getRef = getRef
+    this.volSeries = volSeries
+    this.getVolRef = getVolRef
   }
 
   get isAnimating(): boolean {
@@ -125,7 +134,10 @@ class FormingAnimator implements Glider {
 
   /** Route a live forming-candle update through the animator. Returns true when handled. */
   paint(c: UnifiedCandle): boolean {
-    const t: FormingTarget = { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }
+    const t: FormingTarget = {
+      time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+      volume: c.volume,
+    }
     if (!this.displayed || this.displayed.time !== t.time) {
       // New bar (or first seed after a repaint): snap exactly — the glide
       // must never stretch across period boundaries.
@@ -182,6 +194,23 @@ class FormingAnimator implements Glider {
     } catch {
       // Series is gone (chart removed / recreated) — stop cleanly.
       this.reset()
+      return
+    }
+    // Volume glides with the same eased progress; the color follows the
+    // TARGET direction (authoritative) so it never flickers mid-glide.
+    const vol = this.getVolRef()
+    if (!vol || vol !== this.volSeries) {
+      this.reset()
+      return
+    }
+    try {
+      this.volSeries.update({
+        time: t.time as Time,
+        value: t.volume,
+        color: t.close >= t.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
+      })
+    } catch {
+      this.reset()
     }
   }
 }
@@ -194,10 +223,12 @@ const formingAnimators = new WeakMap<ISeriesApi<'Candlestick'>, FormingAnimator>
 function getFormingAnimator(
   series: ISeriesApi<'Candlestick'>,
   getRef: () => ISeriesApi<'Candlestick'> | null,
+  volSeries: ISeriesApi<'Histogram'>,
+  getVolRef: () => ISeriesApi<'Histogram'> | null,
 ): FormingAnimator {
   let a = formingAnimators.get(series)
   if (!a) {
-    a = new FormingAnimator(series, getRef)
+    a = new FormingAnimator(series, getRef, volSeries, getVolRef)
     formingAnimators.set(series, a)
   }
   return a
@@ -227,7 +258,12 @@ function applyChartPatch(
   } else {
     let didRepaint = false
     const series = candleRef.current
-    const animator = series ? getFormingAnimator(series, () => candleRef.current) : null
+    const animator = series && volumeRef.current
+      ? getFormingAnimator(series, () => candleRef.current, volumeRef.current, () => volumeRef.current)
+      : null
+    // When the animator handles the forming bar, its volume glides along —
+    // skip that bar in the exact-volume loop below so it doesn't jump.
+    let formingTime: number | null = null
     for (const raw of patch.candleUpdates) {
       const c = normalizeCandle(raw)
       if (!isFiniteOHLCV(c)) continue
@@ -238,7 +274,8 @@ function applyChartPatch(
           animator.reset()
         } else if (arrLast && c.time === arrLast.time) {
           // Live forming-candle update (trade / mid / non-final kline): the
-          // body GLIDES toward the new price instead of teleporting.
+          // body and volume GLIDE toward the new values instead of teleporting.
+          formingTime = c.time
           animator.paint(c)
           continue
         }
@@ -260,6 +297,7 @@ function applyChartPatch(
       for (const raw of patch.volumeUpdates) {
         const v = normalizeCandle(raw)
         if (!isFinite(v.volume)) continue
+        if (formingTime !== null && v.time === formingTime) continue
         try {
           volumeRef.current?.update({
             time: v.time as Time, value: v.volume,
@@ -588,7 +626,7 @@ function useFullHistory(
         const prevLogical = sameKey && prevData.length > 0 ? ts?.getVisibleLogicalRange() ?? null : null
         // Exact data replaces everything — a pending forming-candle glide
         // must not paint stale interpolated values onto the new series.
-        getFormingAnimator(candleRef.current, () => candleRef.current).reset()
+        getFormingAnimator(candleRef.current, () => candleRef.current, volumeRef.current, () => volumeRef.current).reset()
         candleRef.current.setData(candleData)
         volumeRef.current.setData(volumeData)
         if (ts && candleData.length > 0) {
@@ -835,7 +873,7 @@ function useLazyScroll(
           onLogicalShift?.(added)
 
           const seriesAfterLoad = candleRef.current
-          if (seriesAfterLoad) getFormingAnimator(seriesAfterLoad, () => candleRef.current).reset()
+          if (seriesAfterLoad && volumeRef.current) getFormingAnimator(seriesAfterLoad, () => candleRef.current, volumeRef.current, () => volumeRef.current).reset()
           candleRef.current?.setData(candleData)
           volumeRef.current?.setData(volumeData)
 
