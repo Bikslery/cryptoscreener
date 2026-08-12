@@ -32,6 +32,28 @@ function normalizeLimit(value: unknown, fallback: number): number {
   return Math.min(parsed, MAX_CANDLE_LIMIT)
 }
 
+const TF_SECONDS: Record<string, number> = {
+  '1m': 60, '5m': 300, '15m': 900,
+  '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
+}
+
+/**
+ * The WS-backed candle cache is a latency fast-path, not an authority. A
+ * stalled kline stream (fallback poll gated by exchange throttling) leaves
+ * stale tails in it, and serving those permanently starved charts of every
+ * recent bar ("empty chart" reports). Only serve the cache when it is fresh
+ * enough for the timeframe — otherwise fall through to getHistory, which both
+ * returns live data and repopulates the cache on write-back.
+ */
+function isCacheFresh(candles: Awaited<ReturnType<typeof getHistory>>, tf: string): boolean {
+  const last = candles[candles.length - 1]
+  if (!last) return false
+  const tfSec = TF_SECONDS[tf]
+  if (!tfSec) return false
+  const stalenessSec = Date.now() / 1000 - last.time
+  return stalenessSec < Math.max(tfSec * 2, 30)
+}
+
 router.use(apiLimiter)
 
 router.get('/', (_req, res) => {
@@ -75,11 +97,13 @@ router.post('/candles-bulk', async (req, res) => {
   const result: Record<string, any[]> = {}
   const missing: string[] = []
 
-  // Check server in-memory cache first (fastest path)
+  // Check server in-memory cache first (fastest path) — but only when it is
+  // FRESH. A stalled WS stream leaves old tails that starve every grid cell;
+  // stale entries fall through to getHistory which heals the cache on write-back.
   for (const symbol of symbols) {
     const ex = exchange || getTicker(symbol)?.exchange
     const cached = getCachedCandles(symbol, tf, ex)
-    if (cached && cached.length > 0) {
+    if (cached && cached.length > 0 && isCacheFresh(cached, tf)) {
       result[symbol] = cached.slice(-limit)
     } else {
       missing.push(symbol)
@@ -164,7 +188,10 @@ router.get('/:symbol/candles', async (req, res) => {
   const cacheExchange = (exchange as any) || getTicker(symbol)?.exchange
   const cached = getCachedCandles(symbol, tf, cacheExchange)
   const minUsable = Math.min(Math.floor(limit * 0.5), 100)
-  if (cached && cached.length >= minUsable) {
+  // Freshness gate: a stale WS cache must never be served — it shows as an
+  // "empty" chart (old tail). Stale caches fall through to getHistory below,
+  // which also rewrites the cache with live candles.
+  if (cached && cached.length >= minUsable && cached.length >= Math.min(limit, 50) && isCacheFresh(cached, tf)) {
     res.setHeader('Cache-Control', 'public, max-age=5')
     send(cached.slice(-limit))
     return
