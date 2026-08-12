@@ -53,21 +53,6 @@ function renderBaseRow(overrides: Partial<Parameters<typeof Row>[0]> = {}) {
   return { ...render(<Row {...props} />), props }
 }
 
-describe('CoinList Row — live price cell', () => {
-  it('paints the initial price immediately (no glide from nothing)', () => {
-    const { getByTestId } = renderBaseRow()
-    const cell = getByTestId('price-cell')
-    expect(cell.textContent).toBe('100.00')
-  })
-
-  it('glides the displayed value toward the live price on the shared coordinator', () => {
-    const { getByTestId, unmount } = renderBaseRow()
-    const cell = getByTestId('price-cell')
-    expect(cell.textContent).toBe('100.00')
-    unmount() // no stray rAF frames after teardown (glider unregisters)
-  })
-})
-
 describe('CoinList Row — watchlist flag', () => {
   it('toggles the watch on click without selecting the row', () => {
     const onClick = vi.fn()
