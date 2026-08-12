@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { useSyncExternalStore } from 'react'
 import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, Alert as AlertType, UserSettings } from '../types.js'
 import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
+import { notifyNewAlert } from '../services/alert-notify.js'
 import api from '../services/api.js'
 import { VOLUME_HIGH_THRESHOLD, VOLUME_FILTER_DEFAULT } from '../constants/volume.js'
 
@@ -527,11 +528,14 @@ export const useAlertStore = create<AlertStore>((set) => ({
 
   init: () => {
     const unsub = wsOnType('alert', (msg) => {
+      const alert = msg.data as AlertType
       set((s) => {
-        const next = [msg.data as AlertType, ...s.alerts]
+        const next = [alert, ...s.alerts]
         // Cap at 100 to prevent unbounded growth
         return { alerts: next.slice(0, 100) }
       })
+      // Sound + native browser notification for every fired alert.
+      notifyNewAlert(alert)
     })
     return unsub
   },

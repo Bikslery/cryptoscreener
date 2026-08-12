@@ -61,6 +61,8 @@ export interface Alert {
   symbol: string
   exchange: Exchange | null
   condition: PriceAlertCondition | ImpulseAlertCondition | ListingAlertCondition
+  /** Price at trigger time (present on fired/WS alert payloads). */
+  price?: number
   active: boolean
   muted: boolean
   triggeredAt: number | null

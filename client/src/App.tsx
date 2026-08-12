@@ -13,6 +13,7 @@ const TickerSearchModalGate = lazy(() => import('./components/search/TickerSearc
 import { useCoinListStore, useAuthStore, useUIStore } from './store'
 import { useDrawingHotkeysStore } from './store/drawingHotkeys'
 import { wsConnect, wsDisconnect, ensureHealthyConnection } from './services/ws'
+import { initAlertNotifications } from './services/alert-notify'
 import { getEnglishLetterFromKeyCode } from './utils/keyboard'
 import { useDrawingHotkeys } from './hooks/useDrawingHotkeys'
 import { ToastContainer } from './components/ui/Toast'
@@ -50,6 +51,7 @@ function App() {
   useEffect(() => {
     if (isChecking || !isLoggedIn) return
     wsConnect()
+    initAlertNotifications()
     const unsub = coinListInit()
 
     // Browsers throttle/suspend background tabs, which can silently kill the
