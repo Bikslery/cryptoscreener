@@ -103,7 +103,11 @@ router.post('/candles-bulk', async (req, res) => {
   for (const symbol of symbols) {
     const ex = exchange || getTicker(symbol)?.exchange
     const cached = getCachedCandles(symbol, tf, ex)
-    if (cached && cached.length > 0 && isCacheFresh(cached, tf)) {
+    // Cache is a fast path ONLY when it can fully satisfy the depth: a
+    // shallow WS-built cache must not masquerade as the full requested
+    // series ("empty-looking" deep charts). Shallow/stale entries fall
+    // through to getHistory, which also deepens the cache on write-back.
+    if (cached && cached.length >= limit && isCacheFresh(cached, tf)) {
       result[symbol] = cached.slice(-limit)
     } else {
       missing.push(symbol)
@@ -187,11 +191,11 @@ router.get('/:symbol/candles', async (req, res) => {
 
   const cacheExchange = (exchange as any) || getTicker(symbol)?.exchange
   const cached = getCachedCandles(symbol, tf, cacheExchange)
-  const minUsable = Math.min(Math.floor(limit * 0.5), 100)
-  // Freshness gate: a stale WS cache must never be served — it shows as an
-  // "empty" chart (old tail). Stale caches fall through to getHistory below,
-  // which also rewrites the cache with live candles.
-  if (cached && cached.length >= minUsable && cached.length >= Math.min(limit, 50) && isCacheFresh(cached, tf)) {
+  // Serve the cache only when it can satisfy the REQUESTED depth — a shallow
+  // WS-built cache served for a deep request is exactly the "almost empty
+  // big chart". Deeper/stale requests fall through to getHistory, which
+  // returns full depth and re-deepens the cache on write-back.
+  if (cached && cached.length >= limit && isCacheFresh(cached, tf)) {
     res.setHeader('Cache-Control', 'public, max-age=5')
     send(cached.slice(-limit))
     return
