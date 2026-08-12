@@ -7,21 +7,30 @@ import { useDrawings } from '../useDrawings'
 import { DrawingsPrimitive } from '../drawings/primitive'
 import { useDrawingHotkeysStore } from '../../../store/drawingHotkeys'
 
-vi.mock('../../services/api', () => ({
+const { mockPost } = vi.hoisted(() => ({ mockPost: vi.fn(() => Promise.resolve({ data: {} })) }))
+
+vi.mock('../../../services/api', () => ({
   default: {
     get: vi.fn(() => Promise.resolve({ data: [] })),
-    post: vi.fn(() => Promise.resolve({ data: {} })),
+    post: mockPost,
     put: vi.fn(() => Promise.resolve({ data: {} })),
     delete: vi.fn(() => Promise.resolve({ data: {} })),
   },
 }))
 
-vi.mock('../../store', () => ({
-  useAuthStore: <T,>(selector: (s: { isLoggedIn: boolean }) => T) =>
-    selector({ isLoggedIn: false }),
-  useCoinListStore: <T,>(selector: (s: { coinMap: Map<string, { pricePrecision: number }> }) => T) =>
-    selector({ coinMap: new Map([['BTCUSDT', { pricePrecision: 2 }]]) }),
-}))
+vi.mock('../../../store', () => {
+  const coinMap = new Map<string, { pricePrecision: number; price: number; exchange: string }>([
+    ['BTCUSDT', { pricePrecision: 2, price: 110, exchange: 'binance-futures' }],
+  ])
+  const coinListStore = <T,>(selector: (s: { coinMap: typeof coinMap }) => T) =>
+    selector({ coinMap })
+  return {
+    useAuthStore: <T,>(selector: (s: { isLoggedIn: boolean }) => T) =>
+      selector({ isLoggedIn: true }),
+    // The hook also reads useCoinListStore.getState().coinMap (alert tool).
+    useCoinListStore: Object.assign(coinListStore, { getState: () => ({ coinMap }) }),
+  }
+})
 
 interface MockRefs {
   chart: IChartApi
@@ -459,5 +468,64 @@ describe('useDrawings — magnet and new tools', () => {
     const d = result.current.drawings[0]
     const data = d.data as { price: number }
     expect(data.price).toBe(100)
+  })
+})
+
+describe('useDrawings — price-alert tool', () => {
+  let refs: MockRefs
+  const candles: UnifiedCandle[] = Array.from({ length: 10 }, (_, i) => ({
+    symbol: 'BTCUSDT', exchange: 'binance-futures', timeframe: '5m',
+    time: 1700000000 + i * 300, open: 100, high: 110, low: 90, close: 100, volume: 0,
+  }))
+
+  beforeEach(() => {
+    refs = makeMockRefs()
+    localStorage.clear()
+    useDrawingHotkeysStore.getState().deactivate()
+    mockPost.mockClear()
+  })
+
+  it('places a dashed h-ray and creates a price alert on click', () => {
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
+      },
+    })
+    act(() => {
+      useDrawingHotkeysStore.getState().activateTool('alert')
+    })
+    act(() => {
+      result.current.handleClick({ clientX: 60, clientY: 120 } as MouseEvent)
+    })
+
+    expect(result.current.drawings.length).toBe(1)
+    const d = result.current.drawings[0]
+    expect(d.type).toBe('h-ray') // visual line reuses the h-ray type
+    const data = d.data as { price: number; style?: string }
+    expect(data.price).toBe(100) // mock coordinateToPrice
+    expect(data.style).toBe('dashed') // alert rays render amber/dashed
+
+    // Clicked at 100 while the coin's price is 110 → direction 'below'.
+    expect(mockPost).toHaveBeenCalledWith('/alerts', {
+      type: 'price',
+      symbol: 'BTCUSDT',
+      exchange: 'binance-futures',
+      condition: { price: 100, direction: 'below' },
+    })
+  })
+
+  it('deactivates the tool after placing (one click per alert)', () => {
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
+      },
+    })
+    act(() => {
+      useDrawingHotkeysStore.getState().activateTool('alert')
+    })
+    act(() => {
+      result.current.handleClick({ clientX: 60, clientY: 120 } as MouseEvent)
+    })
+    expect(useDrawingHotkeysStore.getState().activeTool).toBeNull()
   })
 })

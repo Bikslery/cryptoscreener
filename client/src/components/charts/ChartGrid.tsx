@@ -1618,7 +1618,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
       <div className="ml-auto flex items-center gap-2">
         {activeTool !== null && (
           <span className="text-[10px] text-[#ccc] font-mono bg-[#333] px-[6px] py-[2px] rounded-[3px] border border-[#444]">
-            {activeTool === 'h-ray' ? 'Гориз. луч' : activeTool === 't-ray' ? 'Тренд. луч' : 'Отрезок'} — клик на графике | Esc — отмена
+            {activeTool === 'h-ray' ? 'Гориз. луч' : activeTool === 't-ray' ? 'Тренд. луч' : activeTool === 'alert' ? 'Ценовой алерт' : 'Отрезок'} — клик на графике | Esc — отмена
           </span>
         )}
         <span className="text-[10px] text-[#666] font-mono">

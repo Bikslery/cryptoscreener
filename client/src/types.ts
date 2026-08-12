@@ -71,7 +71,7 @@ export interface Alert {
 
 export type DrawingType = 'level' | 'measure' | 'h-ray' | 't-ray' | 'segment' | 'rect' | 'fib' | 'circle'
 
-export type DrawingTool = 'h-ray' | 't-ray' | 'segment' | 'rect' | 'fib' | 'circle'
+export type DrawingTool = 'h-ray' | 't-ray' | 'segment' | 'rect' | 'fib' | 'circle' | 'alert'
 
 export const TWO_POINT_TOOLS: readonly DrawingTool[] = ['t-ray', 'segment', 'rect', 'fib', 'circle']
 
@@ -96,6 +96,8 @@ export interface HRayDrawing {
   price: number
   time: number
   logical?: number
+  /** Dashed (alert-level) rays render amber with a dotted pattern. */
+  style?: 'solid' | 'dashed'
 }
 
 export interface TRayDrawing {

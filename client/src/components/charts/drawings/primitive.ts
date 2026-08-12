@@ -24,6 +24,8 @@ interface HRayItem {
   x: number
   y: number
   price: number
+  /** Price-alert rays (dashed data) render amber with a dotted pattern. */
+  dashed?: boolean
 }
 
 interface TRayItem {
@@ -252,16 +254,20 @@ class DrawingsRenderer implements IPrimitivePaneRenderer {
 
       for (const item of this._items) {
         const isHovered = this._hoveredId === item.id
-        const strokeColor = isHovered ? '#7eb8ff' : '#ffffff'
+        // Price-alert rays (dashed) are amber to stand out from plain rays.
+        const baseColor = item.type === 'h-ray' && item.dashed ? '#f5c518' : '#ffffff'
+        const strokeColor = isHovered ? '#7eb8ff' : baseColor
         const lineWidth = isHovered ? 2 : 1
 
         if (item.type === 'h-ray') {
           context.strokeStyle = strokeColor
           context.lineWidth = lineWidth
+          if (item.dashed) context.setLineDash([4, 4])
           context.beginPath()
           context.moveTo(item.x, item.y)
           context.lineTo(this._cw, item.y)
           context.stroke()
+          context.setLineDash([])
 
           this.drawEndpoint(context, item.x, item.y, strokeColor)
 
@@ -641,7 +647,7 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
         const py = series.priceToCoordinate(data.price)
         const px = resolveExactX(chart, candleData, data.time as Time, data.logical)
         if (py === null || px === null) continue
-        items.push({ type: 'h-ray', id: d.id, x: px, y: py, price: data.price })
+        items.push({ type: 'h-ray', id: d.id, x: px, y: py, price: data.price, dashed: data.style === 'dashed' })
       }
 
       if (d.type === 't-ray') {

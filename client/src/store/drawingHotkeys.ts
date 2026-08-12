@@ -10,6 +10,7 @@ export const DEFAULT_DRAWING_HOTKEYS: Record<DrawingTool, string> = {
   rect: 'shift+r',
   fib: 'shift+f',
   circle: 'shift+c',
+  alert: 'shift+e',
 }
 
 export const DRAWING_TOOL_LABELS: Record<DrawingTool, string> = {
@@ -19,6 +20,7 @@ export const DRAWING_TOOL_LABELS: Record<DrawingTool, string> = {
   rect: 'Прямоугольник',
   fib: 'Фибоначчи',
   circle: 'Окружность',
+  alert: 'Ценовой алерт',
 }
 
 interface DrawingHotkeysState {

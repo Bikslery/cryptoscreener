@@ -421,6 +421,46 @@ export function useDrawings(
     const curSymbol = symbolRef.current
     const pp = pendingPointRef.current
 
+    if (tool === 'alert') {
+      // Price-alert tool: place a dashed h-ray at the clicked price AND create
+      // a price alert for that level. The line is an ordinary h-ray drawing
+      // (persisted like any other), rendered amber/dashed by primitive.ts;
+      // the alert is created server-side and fires through the alert engine.
+      pushHistory()
+      const data: HRayDrawing = { price, time, logical, style: 'dashed' }
+      const drawing: Drawing = {
+        id: `${LOCAL_ID_PREFIX}${++localCounter}`,
+        userId: '',
+        symbol: curSymbol,
+        type: 'h-ray',
+        data,
+      }
+      setDrawings(prev => {
+        const next = [...prev, drawing]
+        saveToStorage(curSymbol, next)
+        return next
+      })
+      saveDrawing(drawing)
+
+      // Direction is chosen so the alert does NOT fire instantly: clicked
+      // above the current price → 'above' (price must rise to the level),
+      // below → 'below' (price must fall).
+      const coin = useCoinListStore.getState().coinMap.get(curSymbol)
+      const currentPrice = coin?.price
+      const direction = currentPrice !== undefined && price < currentPrice ? 'below' : 'above'
+      if (isLoggedIn) {
+        api.post('/alerts', {
+          type: 'price',
+          symbol: curSymbol,
+          exchange: coin?.exchange ?? null,
+          condition: { price, direction },
+        }).catch(() => { /* alert engine covers failures silently */ })
+      }
+      setActiveTool(null)
+      clearPending()
+      return
+    }
+
     if (tool === 'h-ray') {
       pushHistory()
       const data: HRayDrawing = { price, time, logical }
