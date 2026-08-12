@@ -6,7 +6,7 @@ const EX: Exchange = 'binance_futures' as Exchange
 const SYM = 'BTCUSDT'
 const TF = '1m'
 
-function makeCandle(time: number, close: number, open = 100, high = Math.max(open, close), low = Math.min(open, close)): UnifiedCandle {
+function makeCandle(time: number, close = 100, open = 100, high = Math.max(open, close), low = Math.min(open, close)): UnifiedCandle {
   return { symbol: SYM, exchange: EX, timeframe: TF, time, open, high, low, close, volume: 1, source: 'kline' }
 }
 
