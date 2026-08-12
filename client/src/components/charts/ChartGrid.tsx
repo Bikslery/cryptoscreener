@@ -2,7 +2,7 @@ import { useEffect, useRef, memo, useState, useMemo } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { useCoinListStore, setLivePrice, useAuthStore } from '../../store'
-import { useSmoothedPrice } from '../../hooks/useSmoothedPrice'
+import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
@@ -1525,11 +1525,11 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
       low24h: c.low24h,
     }
   }))
-  // Smoothed price display: glides toward the live value instead of snapping,
-  // the scalpboard-style ticker feel. Presentation only — chart/store data
-  // stays exact; fast markets converge within a few frames.
-  const livePrice = useSmoothedPrice(symbol)
-  const price = livePrice ?? coin?.price ?? 0
+  // Smoothed price display: glides toward the live value straight in the DOM
+  // (no React re-render per frame — the shared rAF coordinator writes
+  // textContent into the span). Presentation only — chart/store data stays
+  // exact; fast markets converge within a few frames.
+  const priceRef = useSmoothedPriceRef(symbol, coin?.pricePrecision ?? 2, coin?.price, '$')
   const isUp = coin ? coin.change24h >= 0 : true
   const badge = exchangeBadge(chartExchange)
   const precision = coin?.pricePrecision ?? 2
@@ -1562,7 +1562,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
         </span>
       </div>
 
-      <span className="font-mono font-bold text-[13px] text-[#e0e0e0]">{price ? `$${formatPrice(price, precision)}` : ''}</span>
+      <span ref={priceRef} className="font-mono font-bold text-[13px] text-[#e0e0e0]" />
 
       <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
 

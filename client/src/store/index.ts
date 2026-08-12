@@ -234,7 +234,7 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
 const livePrices = new Map<string, number>()
 const livePriceListeners = new Map<string, Set<() => void>>()
 
-function subscribeLivePrice(symbol: string, listener: () => void): () => void {
+export function subscribeLivePrice(symbol: string, listener: () => void): () => void {
   let set = livePriceListeners.get(symbol)
   if (!set) { set = new Set(); livePriceListeners.set(symbol, set) }
   set.add(listener)
@@ -244,6 +244,11 @@ function subscribeLivePrice(symbol: string, listener: () => void): () => void {
     s.delete(listener)
     if (s.size === 0) livePriceListeners.delete(symbol)
   }
+}
+
+/** Current live price for a symbol (imperative read — no React re-render). */
+export function getLivePrice(symbol: string): number | undefined {
+  return livePrices.get(symbol)
 }
 
 export function setLivePrice(symbol: string, price: number) {

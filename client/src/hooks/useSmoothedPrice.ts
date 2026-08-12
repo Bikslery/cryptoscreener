@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import { useLivePrice } from '../store'
+import { useCallback, useEffect, useRef } from 'react'
+import type { RefObject } from 'react'
+import { getLivePrice, subscribeLivePrice } from '../store'
 import {
   registerGlider,
   unregisterGlider,
@@ -8,80 +9,130 @@ import {
   glideDurationFor,
   type Glider,
 } from '../services/glide'
+import { formatPrice } from '../utils/format'
 
 /**
- * Smooth price display (scalpboard-style ticker feel).
+ * Gliding price text — direct DOM updates, zero React re-renders per frame.
  *
- * The raw live price jumps discretely — once a second on quiet symbols, which
- * reads as "jerky". This hook glides the DISPLAYED value toward the live value
- * with TIME-BASED easing on the SHARED rAF coordinator (glide.ts): the same
- * frame loop that drives the forming-candle animators also drives every header
- * price, so timing is consistent and there is exactly one rAF per page, not
- * one per component.
+ * Subscribes to the symbol's live price IMPERATIVELY (no useSyncExternalStore,
+ * no setState) and glides the displayed value toward it on the SHARED rAF
+ * coordinator, writing `prefix + formatted price` straight into the attached
+ * span's textContent. The component never re-renders because of the price —
+ * the digits move purely in the DOM. This is the same mechanic as the coin
+ * list's LivePriceCell, but as a hook so any header can use it.
  *
- * The glide duration adapts to update frequency — active symbols converge in
- * ~45 ms (never lag the market), quiet symbols glide smoothly over ~160 ms.
- *
- * Presentation only: chart data and store state are never touched — only the
- * number rendered in a header.
+ * Adaptive duration (glide.ts): active symbols converge in ~45 ms (never lag
+ * the market), quiet symbols glide smoothly over ~160 ms. Presentation only —
+ * chart data and store state are never touched.
  */
-export function useSmoothedPrice(symbol: string): number | undefined {
-  const target = useLivePrice(symbol)
-  const [shown, setShown] = useState<number | undefined>(undefined)
-  const shownRef = useRef<number | undefined>(undefined)
-  const targetRef = useRef<number | undefined>(target)
-  const lastTargetAtRef = useRef(0)
-  const glideRef = useRef<ReturnType<typeof beginScalarGlide> | null>(null)
+export function useSmoothedPriceRef(
+  symbol: string,
+  precision: number,
+  initialPrice?: number,
+  prefix = '',
+): RefObject<HTMLSpanElement | null> {
+  const ref = useRef<HTMLSpanElement | null>(null)
+  const precisionRef = useRef(precision)
+  const prefixRef = useRef(prefix)
+  const initialRef = useRef(initialPrice)
+  // Glide state that survives element re-attaches and header re-renders.
+  const st = useRef({
+    symbol: null as string | null,
+    displayed: undefined as number | undefined,
+    glide: null as ReturnType<typeof beginScalarGlide> | null,
+    lastTargetAt: 0,
+  }).current
 
-  useEffect(() => {
-    if (targetRef.current !== target) {
-      targetRef.current = target
-      lastTargetAtRef.current = performance.now()
+  const paint = useCallback(() => {
+    const el = ref.current
+    if (el && st.displayed !== undefined) {
+      el.textContent = prefixRef.current + formatPrice(st.displayed, precisionRef.current)
     }
-  }, [target])
+  }, [st])
 
   useEffect(() => {
+    precisionRef.current = precision
+    prefixRef.current = prefix
+    // Re-render with a new precision/prefix should re-format what's shown.
+    paint()
+  }, [precision, prefix, paint])
+
+  // Seed from the coin's static price when it loads late (before the first
+  // live frame for this symbol arrives). Guarded by the symbol check so a
+  // symbol switch can never leak the previous symbol's price in.
+  useEffect(() => {
+    if (st.symbol === symbol && st.displayed === undefined && initialPrice !== undefined) {
+      st.displayed = initialPrice
+      st.lastTargetAt = performance.now()
+      paint()
+    }
+  }, [initialPrice, symbol, paint, st])
+
+  useEffect(() => {
+    // Symbol switched (ExpandedChart is reused across symbols): reset state.
+    if (st.symbol !== symbol) {
+      st.symbol = symbol
+      st.displayed = undefined
+      st.glide = null
+      st.lastTargetAt = 0
+    }
+
     // First known price: show it immediately — no glide from nothing.
-    if (shownRef.current === undefined && target !== undefined) {
-      shownRef.current = target
-      setShown(target)
-      return
+    const seed = getLivePrice(symbol) ?? initialRef.current
+    if (seed !== undefined && st.displayed === undefined) {
+      st.displayed = seed
+      st.lastTargetAt = performance.now()
+      paint()
     }
 
     const glider: Glider = {
       tick(dt) {
-        const t = targetRef.current
-        const s = shownRef.current
+        const el = ref.current
+        const t = getLivePrice(symbol)
+        const s = st.displayed
+        if (!el || !el.isConnected) return false
         if (t === undefined || s === undefined) return false
-        if (!glideRef.current) {
-          glideRef.current = beginScalarGlide(
-            s, t,
-            glideDurationFor(performance.now() - lastTargetAtRef.current),
-          )
-        } else if (glideRef.current.to !== t) {
-          // Retarget mid-glide: re-base from the current displayed value
-          // toward the new target (frequent updates → short duration).
-          glideRef.current = beginScalarGlide(
-            s, t,
-            glideDurationFor(performance.now() - lastTargetAtRef.current),
-          )
+        if (!st.glide) {
+          st.glide = beginScalarGlide(s, t, glideDurationFor(performance.now() - st.lastTargetAt))
+        } else if (st.glide.to !== t) {
+          // Retarget mid-glide from the current displayed value.
+          st.glide = beginScalarGlide(s, t, glideDurationFor(performance.now() - st.lastTargetAt))
         }
-        const { next, converged, glide } = advanceScalarGlide(glideRef.current, dt)
-        glideRef.current = glide
+        const { next, converged, glide } = advanceScalarGlide(st.glide, dt)
+        st.glide = glide
         if (converged) {
-          glideRef.current = null
-          shownRef.current = t
-          setShown(t)
+          st.glide = null
+          st.displayed = t
+          el.textContent = prefixRef.current + formatPrice(t, precisionRef.current)
           return false
         }
-        shownRef.current = next
-        setShown(next)
+        st.displayed = next
+        el.textContent = prefixRef.current + formatPrice(next, precisionRef.current)
         return true
       },
     }
-    registerGlider(glider)
-    return () => unregisterGlider(glider)
-  }, [target])
 
-  return shown
+    const onPrice = () => {
+      const t = getLivePrice(symbol)
+      if (t === undefined) return
+      if (st.displayed === undefined) {
+        // First known price — show it immediately, no glide from nothing.
+        st.displayed = t
+        st.lastTargetAt = performance.now()
+        paint()
+        return
+      }
+      st.lastTargetAt = performance.now()
+      if (st.glide === null) registerGlider(glider)
+    }
+
+    const unsub = subscribeLivePrice(symbol, onPrice)
+    return () => {
+      unsub()
+      unregisterGlider(glider)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, st, paint])
+
+  return ref
 }

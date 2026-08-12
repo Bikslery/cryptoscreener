@@ -80,7 +80,10 @@ let lastNow = 0
 function frame(now: number) {
   rafId = null
   // dt between frames; clamp so a backgrounded tab doesn't teleport the glide.
-  const dt = lastNow === 0 ? 16.7 : Math.min(100, now - lastNow)
+  // Baseline comes ONLY from the rAF clock — never mix it with
+  // performance.now(), whose clock can be offset from the rAF timestamp
+  // (jsdom does this), which produced a huge negative first dt.
+  const dt = lastNow === 0 ? 16.7 : Math.min(100, Math.max(0, now - lastNow))
   lastNow = now
   for (const g of [...gliders]) {
     if (!g.tick(dt)) gliders.delete(g)
@@ -92,7 +95,7 @@ function frame(now: number) {
 export function registerGlider(g: Glider): void {
   gliders.add(g)
   if (rafId === null) {
-    lastNow = performance.now()
+    lastNow = 0
     rafId = requestAnimationFrame(frame)
   }
 }
