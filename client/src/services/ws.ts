@@ -1,4 +1,5 @@
 import type { WsMessage } from '../types.js'
+import { recordFrameLatency } from './latency.js'
 
 type WsCallback = (msg: WsMessage) => void
 
@@ -70,6 +71,11 @@ function connect() {
       try {
         const text = typeof e.data === 'string' ? e.data : await decompressFrame(e.data)
         const msg = JSON.parse(text) as WsMessage
+        // Server stamps ts on ticker/price frames — arrival latency incl. the
+        // client-side queue, so it reflects what the user actually sees.
+        if (typeof msg.ts === 'number') {
+          recordFrameLatency(Date.now() - msg.ts)
+        }
         dispatch(msg)
       } catch { /* ignore malformed frame */ }
     })

@@ -119,6 +119,7 @@ export interface WsMessage {
   delta?: boolean // ticker message carries only changed entries (merge in place)
   snapshot?: boolean // ticker message carries the full array (replace state)
   token?: string // JWT token for WS auth
+  ts?: number // server timestamp (ms) — client uses it for p50/p95 latency
 }
 
 export interface ChartBlock {

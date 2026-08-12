@@ -916,9 +916,24 @@ function useWsTrade(
     })
     wsSubscribe(tradeType)
 
+    // Fast-lane price: the server broadcasts bookTicker mid changes for this
+    // symbol immediately (no 40ms batch) — header price moves on every
+    // top-of-book change, which is what makes a chart feel truly "live".
+    // Unsubscribed automatically when the chart closes.
+    const priceChannel = `price:${symbol}`
+    const unsubPrice = wsOnChannel(priceChannel, (msg) => {
+      if (destroyedRef.current) return
+      const d = msg.data as { symbol: string; price: number } | undefined
+      if (!d || typeof d.price !== 'number' || !isFinite(d.price) || d.price <= 0) return
+      setLivePrice(symbol, d.price)
+    })
+    wsSubscribe(priceChannel)
+
     return () => {
       unsub()
       wsUnsubscribe(tradeType)
+      unsubPrice()
+      wsUnsubscribe(priceChannel)
     }
   }, [symbol, exchange, tf])
 }

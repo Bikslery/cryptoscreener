@@ -52,11 +52,20 @@ const wsBatchBuffer = new Map<string, unknown>()
 
 // Outbound WS frames are deflate-raw compressed binary (same approach as
 // scalpboard) instead of plain JSON text — the browser decompresses via
-// DecompressionStream('deflate-raw'). Ticker snapshots (full arrays pushed
-// every 100ms) shrink ~10x; perMessageDeflate is disabled on the server to
-// avoid double-compressing.
-function encodePayload(data: unknown): Buffer {
-  return deflateRawSync(JSON.stringify(data))
+// DecompressionStream('deflate-raw'). Ticker snapshots shrink ~10x;
+// perMessageDeflate is disabled on the server to avoid double-compressing.
+//
+// Small frames (ticker deltas, candle/trade/price updates) go out as plain
+// JSON text instead: DecompressionStream is async, so compressing a 1-3KB
+// delta costs more latency than it saves — the client parses text frames
+// synchronously (no decompression, no extra microtask chain behind big
+// frames). Only frames above PLAIN_FRAME_MAX_BYTES get deflated.
+const PLAIN_FRAME_MAX_BYTES = 4096
+
+function encodePayload(data: unknown): Buffer | string {
+  const json = JSON.stringify(data)
+  if (json.length <= PLAIN_FRAME_MAX_BYTES) return json
+  return deflateRawSync(json)
 }
 
 function handleBackpressure(client: Client): boolean {
@@ -85,7 +94,7 @@ function flushBatchBuffer() {
   try {
     for (const [channel, data] of wsBatchBuffer) {
       const msg: WsMessage = { type: channel as any, channel, data }
-      let raw: Buffer | null = null
+      let raw: Buffer | string | null = null
       for (const client of clients.values()) {
         if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
           if (client.buffered >= MAX_BUFFERED) {
@@ -317,9 +326,9 @@ export function broadcast(msg: WsMessage) {
       const filterSource = isSnapshot ? (fullTickers || tickers) : tickers
 
       // Serialization cache: group by ticker signature
-      const sigCache = new Map<string, Buffer>()
-      let snapshotRaw: Buffer | null = null
-      let deltaRaw: Buffer | null = null
+      const sigCache = new Map<string, Buffer | string>()
+      let snapshotRaw: Buffer | string | null = null
+      let deltaRaw: Buffer | string | null = null
       let sentCount = 0
 
       for (const client of clients.values()) {
@@ -332,11 +341,11 @@ export function broadcast(msg: WsMessage) {
         if (client.tickerSymbols.size === 0) {
           // Subscribed to all tickers
           if (!globalPayload || globalPayload.length === 0) continue
-          let raw: Buffer | null = isSnapshot ? snapshotRaw : deltaRaw
+          let raw: Buffer | string | null = isSnapshot ? snapshotRaw : deltaRaw
           if (raw === null) {
             raw = encodePayload(isSnapshot
-              ? { type: 'ticker', data: globalPayload, snapshot: true }
-              : { type: 'ticker', data: globalPayload, delta: true })
+              ? { type: 'ticker', data: globalPayload, snapshot: true, ts: msg.ts }
+              : { type: 'ticker', data: globalPayload, delta: true, ts: msg.ts })
             if (isSnapshot) snapshotRaw = raw
             else deltaRaw = raw
           }
@@ -350,8 +359,8 @@ export function broadcast(msg: WsMessage) {
             const filtered = filterSource.filter(t => client.tickerSymbols.has(t.symbol))
             if (filtered.length > 0) {
               cached = encodePayload(isSnapshot
-                ? { type: 'ticker', data: filtered, snapshot: true }
-                : { type: 'ticker', data: filtered, delta: true })
+                ? { type: 'ticker', data: filtered, snapshot: true, ts: msg.ts }
+                : { type: 'ticker', data: filtered, delta: true, ts: msg.ts })
               sigCache.set(sig, cached)
             }
           }
@@ -426,6 +435,13 @@ export function startRedisListener() {
           broadcastToChannel(`trade:${trade.exchange}:${trade.symbol}`, trade)
         } else if (channel === 'alerts') {
           broadcast({ type: 'alert', data: JSON.parse(message) })
+        } else if (channel === 'price') {
+          // Fast-lane price updates (bookTicker mid for focused symbols) —
+          // forwarded immediately, same as candle/trade channels.
+          const p = JSON.parse(message)
+          if (p?.symbol && typeof p.price === 'number' && isFinite(p.price)) {
+            broadcastToChannel(`price:${p.symbol}`, p, true)
+          }
         }
       } catch (e) {
         console.warn('[Hub] Redis message parse error:', e instanceof Error ? e.message : e)

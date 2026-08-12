@@ -17,6 +17,8 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   private tickerCbs: TickerCallback[] = []
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
+  private bookTickerCbs: Array<(symbol: string, midPrice: number) => void> = []
+  private bookTickerSubs = new Set<string>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private subscribedSymbols = new Set<string>()
@@ -27,6 +29,22 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
   onDepth(cb: DepthCallback) { this.depthCbs.push(cb) }
+  onBookTicker(cb: (symbol: string, midPrice: number) => void) { this.bookTickerCbs.push(cb) }
+
+  subscribeBookTicker(symbol: string) {
+    if (this.bookTickerSubs.has(symbol)) return
+    this.bookTickerSubs.add(symbol)
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ op: 'subscribe', args: [`bookTicker.${symbol}`] }))
+    }
+  }
+
+  unsubscribeBookTicker(symbol: string) {
+    if (!this.bookTickerSubs.delete(symbol)) return
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ op: 'unsubscribe', args: [`bookTicker.${symbol}`] }))
+    }
+  }
 
   connect() {
     this.fetchInstruments()
@@ -55,6 +73,19 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
           } else if (msg.topic.startsWith('orderbook.')) {
             const depth = this.parseDepth(msg.data, msg.topic)
             if (depth) for (const cb of this.depthCbs) cb(depth)
+          } else if (msg.topic.startsWith('bookTicker.')) {
+            // Best bid/ask — fires on every top-of-book change (dozens/sec on
+            // liquid pairs), the same "live" price feed Binance bookTicker is.
+            const d = msg.data
+            const symbol = msg.topic.split('.').pop() || ''
+            if (d && symbol && d.bp !== undefined && d.ap !== undefined) {
+              const bid = parseFloat(String(d.bp))
+              const ask = parseFloat(String(d.ap))
+              if (isFinite(bid) && isFinite(ask) && bid > 0 && ask > 0) {
+                const mid = (bid + ask) / 2
+                for (const cb of this.bookTickerCbs) cb(symbol, mid)
+              }
+            }
           }
         }
       } catch {}
@@ -136,6 +167,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
     const args: string[] = []
     for (const symbol of this.precisionMap.keys()) args.push(`tickers.${symbol}`)
+    for (const symbol of this.bookTickerSubs) args.push(`bookTicker.${symbol}`)
     for (const topic of this.candleSubs.keys()) args.push(topic)
     for (let i = 0; i < args.length; i += 10) {
       this.ws.send(JSON.stringify({ op: 'subscribe', args: args.slice(i, i + 10) }))

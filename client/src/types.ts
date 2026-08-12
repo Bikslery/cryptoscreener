@@ -180,6 +180,7 @@ export interface WsMessage {
   data?: unknown
   delta?: boolean // ticker message carries only changed entries (merge in place)
   snapshot?: boolean // ticker message carries the full array (replace state)
+  ts?: number // server timestamp (ms) — used for p50/p95 latency
 }
 
 export interface ChartBlock {
