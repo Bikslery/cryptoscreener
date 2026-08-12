@@ -279,6 +279,46 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
 const livePrices = new Map<string, number>()
 const livePriceListeners = new Map<string, Set<() => void>>()
 
+// --- Live-price publisher: fixed cadence (default 500 ms). --------------
+// All realtime sources (bookTicker mid, trades, ticker deltas, forming-candle
+// livePrice) funnel into setLivePrice. Instead of forwarding EVERY change (on
+// active symbols that is dozens of times per second), the visible price is
+// sampled: the LATEST value per symbol is published at most once per interval.
+// The very first price for a symbol is published immediately so the first
+// paint is instant; everything after that within the window coalesces into a
+// single step. The stored API (getLivePrice / useLivePrice / subscribeLivePrice)
+// is unchanged, so all consumers (CoinList cells, gliding headers) automatically
+// step at the fixed cadence.
+let LIVE_PRICE_INTERVAL_MS = 500
+const pendingPrices = new Map<string, number>()
+const lastPublishAt = new Map<string, number>()
+let pendingTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Tune the cadence (min 50 ms). Tests and runtime settings can call this. */
+export function setLivePriceInterval(ms: number): void {
+  LIVE_PRICE_INTERVAL_MS = Math.max(50, Number.isFinite(ms) ? ms : 500)
+}
+
+/** Synchronously publish every pending price (tests / imperative flush). */
+export function flushLivePrices(): void {
+  if (pendingTimer !== null) { clearTimeout(pendingTimer); pendingTimer = null }
+  const now = Date.now()
+  for (const [symbol, price] of pendingPrices) {
+    lastPublishAt.set(symbol, now)
+    commitLivePrice(symbol, price)
+  }
+  pendingPrices.clear()
+}
+
+/** Wipe all live-price state incl. batching (tests only). */
+export function resetLivePriceStore(): void {
+  if (pendingTimer !== null) { clearTimeout(pendingTimer); pendingTimer = null }
+  pendingPrices.clear()
+  lastPublishAt.clear()
+  livePrices.clear()
+  livePriceListeners.clear()
+}
+
 export function subscribeLivePrice(symbol: string, listener: () => void): () => void {
   let set = livePriceListeners.get(symbol)
   if (!set) { set = new Set(); livePriceListeners.set(symbol, set) }
@@ -296,12 +336,54 @@ export function getLivePrice(symbol: string): number | undefined {
   return livePrices.get(symbol)
 }
 
-export function setLivePrice(symbol: string, price: number) {
+function commitLivePrice(symbol: string, price: number) {
   const prev = livePrices.get(symbol)
   if (prev === price) return
   livePrices.set(symbol, price)
   const set = livePriceListeners.get(symbol)
   if (set) for (const l of set) l()
+}
+
+function scheduleSweep(ms: number) {
+  if (pendingTimer !== null) return
+  pendingTimer = setTimeout(() => {
+    pendingTimer = null
+    sweepPendingPrices()
+  }, ms)
+}
+
+function sweepPendingPrices() {
+  const now = Date.now()
+  let nextIn = LIVE_PRICE_INTERVAL_MS
+  const ready: Array<[string, number]> = []
+  for (const [symbol, price] of pendingPrices) {
+    const since = now - (lastPublishAt.get(symbol) ?? 0)
+    if (since >= LIVE_PRICE_INTERVAL_MS) {
+      ready.push([symbol, price])
+      pendingPrices.delete(symbol)
+      lastPublishAt.set(symbol, now)
+    } else {
+      nextIn = Math.min(nextIn, LIVE_PRICE_INTERVAL_MS - since)
+    }
+  }
+  for (const [symbol, price] of ready) commitLivePrice(symbol, price)
+  if (pendingPrices.size > 0) scheduleSweep(Math.max(1, nextIn))
+}
+
+export function setLivePrice(symbol: string, price: number) {
+  if (!Number.isFinite(price) || price <= 0) return
+  const since = Date.now() - (lastPublishAt.get(symbol) ?? -Infinity)
+  if (since >= LIVE_PRICE_INTERVAL_MS) {
+    // Enough wall-time since this symbol's last publish (or its first price):
+    // commit NOW so the first paint is instant and updates follow the cadence.
+    lastPublishAt.set(symbol, Date.now())
+    commitLivePrice(symbol, price)
+    return
+  }
+  // Within the window — coalesce the latest value; the sweep publishes it at
+  // the cadence boundary (latest-wins, so bursts become a single step).
+  pendingPrices.set(symbol, price)
+  scheduleSweep(LIVE_PRICE_INTERVAL_MS - since)
 }
 
 export function useLivePrice(symbol: string): number | undefined {
