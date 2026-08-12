@@ -27,7 +27,7 @@ export interface UnifiedCandle {
   close: number
   volume: number
   isFinal?: boolean
-  source?: 'kline' | 'trade'
+  source?: 'kline' | 'trade' | 'mid'
 }
 
 export interface UnifiedDepth {

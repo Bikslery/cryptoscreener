@@ -42,6 +42,8 @@ export interface CandleLifecycle {
   applyOlderPage(candles: UnifiedCandle[]): CandlePatch
   applyTrade(trade: TradePayload): CandlePatch
   applyKline(kline: UnifiedCandle): CandlePatch
+  /** Best bid/ask midpoint tick — drives the forming candle between trades. */
+  applyMid(price: number): CandlePatch
   setBuffered(on: boolean): CandlePatch
   destroy(): void
 }
@@ -266,6 +268,41 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     return patchFromCandles(updatedCandles, trade.price, updatedCandles)
   }
 
+  /**
+   * Best bid/ask midpoint tick (bookTicker fast-lane). The forming candle's
+   * close/high/low follow the top-of-book continuously between trade/kline
+   * events — the scalpboard-style "live" feel. Volume is untouched (a mid is
+   * not a trade) and the next real trade/kline corrects any drift.
+   *
+   * Only updates an EXISTING forming candle (no seeding from nothing): if the
+   * market hasn't printed a trade/kline in this period, there is nothing
+   * honest to paint — the header price still moves via livePrice.
+   */
+  function applyMid(price: number): CandlePatch {
+    if (destroyed || buffered) return EMPTY_PATCH
+    if (!isFinite(price) || price <= 0) return EMPTY_PATCH
+    const current = getCurrentForming()
+    if (!current) return EMPTY_PATCH
+
+    const existing = current.candle
+    const updated: UnifiedCandle = {
+      ...existing,
+      high: Math.max(existing.high, price),
+      low: Math.min(existing.low, price),
+      close: price,
+      source: 'mid',
+    }
+    const idx = getTailIndex(existing.time)
+    if (idx >= 0) {
+      // Keep lastTradeAt/lastKlineAt ordering untouched: a later kline must
+      // still REPLACE the mid-inflated high/low with the exchange's real
+      // values (if we bumped lastTradeAt, applyKline would merge instead and
+      // keep the inflated range until the candle finalizes).
+      tail[idx] = { ...tail[idx], candle: updated }
+    }
+    return patchFromCandles([updated], price)
+  }
+
   function applyKline(kline: UnifiedCandle): CandlePatch {
     if (destroyed) return EMPTY_PATCH
     if (!isFiniteOHLCV(kline) || kline.time <= 0) return EMPTY_PATCH
@@ -410,6 +447,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     applyOlderPage,
     applyTrade,
     applyKline,
+    applyMid,
     setBuffered,
     destroy,
   }

@@ -356,4 +356,72 @@ describe('candle-lifecycle', () => {
       expect(patch.candleUpdates).toHaveLength(1)
     })
   })
+
+  describe('applyMid (bookTicker fast-lane)', () => {
+    it('moves the forming candle close/high/low without touching volume', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+      // Seed the forming candle with a trade.
+      lc.applyTrade(makeTrade(320, 108, 2))
+
+      const patch = lc.applyMid(107.5)
+      expect(patch.candleUpdates).toHaveLength(1)
+      const c = patch.candleUpdates[0]
+      expect(c.time).toBe(300)
+      expect(c.close).toBe(107.5)
+      expect(c.high).toBe(110)   // mid below the existing high
+      expect(c.low).toBe(95)     // mid above the existing low
+      expect(c.volume).toBe(52)  // unchanged — a mid is not a trade
+      expect(c.source).toBe('mid')
+      expect(patch.livePrice).toBe(107.5)
+    })
+
+    it('extends high/low when mid moves beyond the trade range', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+      lc.applyTrade(makeTrade(320, 108, 2))
+
+      const patch = lc.applyMid(112)
+      const c = patch.candleUpdates[0]
+      expect(c.close).toBe(112)
+      expect(c.high).toBe(112)
+      expect(c.low).toBe(95)
+    })
+
+    it('updates the tail candle even without a fresh trade — last history candle is the in-progress period', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      // REST history from Binance includes the in-progress period as the last
+      // row, so applyMid treats it as the forming candle — same as applyTrade.
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      const patch = lc.applyMid(106)
+      expect(patch.candleUpdates).toHaveLength(1)
+      const c = patch.candleUpdates[0]
+      expect(c.time).toBe(300)
+      expect(c.close).toBe(106)
+      expect(c.high).toBe(110)
+      expect(c.low).toBe(95)
+      expect(c.source).toBe('mid')
+    })
+
+    it('does not mark the candle as trade-newer — a later kline still replaces the mid range', () => {
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+      lc.applyTrade(makeTrade(320, 108, 2))
+
+      // A kline arrives (no mid yet) — after this, kline is newer than trade.
+      lc.applyKline(makeCandle(300, 100, 109, 96, 106, 45))
+
+      // Mid tries to inflate the high beyond the real market.
+      lc.applyMid(112)
+
+      // Next kline: because mid did NOT bump lastTradeAt, the kline is still
+      // newer → applyKline replaces with real values instead of merging (which
+      // would keep the inflated 112 high until finalization).
+      const patch = lc.applyKline(makeCandle(300, 100, 107, 97, 105, 46))
+      const c = patch.candleUpdates[0]
+      expect(c.high).toBe(107)
+      expect(c.close).toBe(105)
+    })
+  })
 })

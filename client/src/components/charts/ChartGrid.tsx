@@ -1,7 +1,8 @@
 import { useEffect, useRef, memo, useState, useMemo } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
-import { useCoinListStore, useLivePrice, setLivePrice, useAuthStore } from '../../store'
+import { useCoinListStore, setLivePrice, useAuthStore } from '../../store'
+import { useSmoothedPrice } from '../../hooks/useSmoothedPrice'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
@@ -920,12 +921,26 @@ function useWsTrade(
     // symbol immediately (no 40ms batch) — header price moves on every
     // top-of-book change, which is what makes a chart feel truly "live".
     // Unsubscribed automatically when the chart closes.
+    //
+    // Exchange filter: the channel is keyed by symbol only, and mid comes from
+    // bookTicker (binance-futures / bybit-futures). A spot chart must not be
+    // driven by a futures mid (the two markets decohere during sharp moves) —
+    // only the matching exchange's mid reaches this chart's candle and header.
     const priceChannel = `price:${symbol}`
     const unsubPrice = wsOnChannel(priceChannel, (msg) => {
       if (destroyedRef.current) return
-      const d = msg.data as { symbol: string; price: number } | undefined
+      const d = msg.data as { symbol: string; exchange?: string; price: number } | undefined
       if (!d || typeof d.price !== 'number' || !isFinite(d.price) || d.price <= 0) return
+      if (exchange && d.exchange && d.exchange !== exchange) return
       setLivePrice(symbol, d.price)
+      // Mid drives the forming candle between trades — continuous, scalpboard-
+      // style motion. Volume untouched; the next trade/kline corrects drift.
+      const lc = lifecycleRef.current
+      if (!lc || adjustingRef?.current) return
+      const patch = lc.applyMid(d.price)
+      if (patch.candleUpdates.length > 0) {
+        applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
+      }
     })
     wsSubscribe(priceChannel)
 
@@ -1299,7 +1314,10 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
       low24h: c.low24h,
     }
   }))
-  const livePrice = useLivePrice(symbol)
+  // Smoothed price display: glides toward the live value instead of snapping,
+  // the scalpboard-style ticker feel. Presentation only — chart/store data
+  // stays exact; fast markets converge within a few frames.
+  const livePrice = useSmoothedPrice(symbol)
   const price = livePrice ?? coin?.price ?? 0
   const isUp = coin ? coin.change24h >= 0 : true
   const badge = exchangeBadge(chartExchange)
