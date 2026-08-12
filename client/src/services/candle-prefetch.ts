@@ -204,13 +204,20 @@ export function getOrFetchHistory(
   limit: number = PREFETCH_LIMIT,
   exchange?: Exchange,
 ): Promise<UnifiedCandle[]> {
-  const k = inflightKey(symbol, tf, undefined, exchange)
+  // Limit-aware key: a 300-bar mini-chart fetch and a 3000-bar expanded-chart
+  // fetch are different needs — the big chart must not be served the small
+  // one's partial result just because both are in flight.
+  const k = `${exchange ?? 'auto'}:${symbol}:${tf}:${limit}`
   const existing = inflightMap.get(k)
   if (existing) return existing
 
   if (exchange) {
     const cached = candleCache.getCandles(exchange, symbol, tf)
-    if (cached && cached.length > 0) {
+    // A cache hit is only valid when it covers the FULL requested window. The
+    // mini charts seed the cache with 300 bars; treating that as a hit for the
+    // expanded chart's 3000-bar request made it render a partially-zoomed-out
+    // chart that never fetched the rest ("zoom-out doesn't work").
+    if (cached && cached.length >= limit) {
       return Promise.resolve(cached.slice(-limit))
     }
   }
@@ -240,9 +247,13 @@ export function getOrFetchHistory(
         const ex: Exchange = (data[0]?.exchange as Exchange) || (exchange as Exchange)
         if (ex) {
           candleCache.setCandles(ex, symbol, tf, data)
-          return candleCache.getCandles(ex, symbol, tf) || data
+          // Slice to the requested window: the cache may hold MORE than this
+          // call asked for (e.g. a 3000-bar fetch filled it and a concurrent
+          // 300-bar request reuses it) — the caller must get its limit, not
+          // the whole cache.
+          return (candleCache.getCandles(ex, symbol, tf) || data).slice(-limit)
         }
-        return data
+        return data.slice(-limit)
       }
       return []
     } catch {

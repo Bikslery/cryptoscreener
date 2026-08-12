@@ -676,9 +676,12 @@ function useFullHistory(
       // wiped by setData below (the flicker when loading history). renderCandles
       // ends the buffering and replays the events on the loaded history.
       lifecycleRef?.current?.setBuffered(true)
-      // Fast path: check client cache
+      // Fast path: check client cache. Only a cache that covers the whole
+      // requested window counts — a 300-bar mini-chart cache must not satisfy
+      // the expanded chart's 3000-bar request, or the big chart would render
+      // partially zoomed out and never fetch the rest.
       const cached = candleCache.getCandles(exchange, symbol, tf)
-      if (cached && cached.length > 0) {
+      if (cached && cached.length >= limit) {
         if (!cancelled.value && !destroyedRef.current) {
           renderCandles(cached)
           setIsInitialLoading(false)

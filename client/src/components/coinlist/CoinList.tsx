@@ -191,7 +191,12 @@ export function CoinList() {
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const watchSet = useMemo(() => new Set(watchlist), [watchlist])
 
-  const onPrefetch = useCallback((symbol: string) => getOrFetchHistory(symbol, tf), [tf])
+  const coinMap = useCoinListStore(s => s.coinMap)
+  const onPrefetch = useCallback((symbol: string) => {
+    // Pass the exchange so the prefetch and the chart's own loader share one
+    // cache key and don't fire duplicate requests.
+    getOrFetchHistory(symbol, tf, undefined, coinMap.get(symbol)?.exchange)
+  }, [tf, coinMap])
 
   const pageSet = useMemo(() => new Set(topChartSymbols), [topChartSymbols])
   const highlightActive = expandedSymbol === null
