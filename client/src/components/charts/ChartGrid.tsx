@@ -14,6 +14,7 @@ import { expandCompactCandles, type CompactCandle } from '../../services/candle-
 import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
 import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload, type GapBackfill } from '../../services/candle-lifecycle'
 import { isFiniteOHLCV, validateCandle, normalizeCandle } from '../../services/candle-utils'
+import { applyCandleUpdates } from '../../services/candle-merge'
 import { computeCursorAnchoredZoomRange } from '../../services/chart-zoom'
 import { useDrawings } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
@@ -60,6 +61,33 @@ function applyCursorAnchoredZoom(
   ts.setVisibleLogicalRange(next)
 }
 
+function repaintSeries(
+  chartRef: React.RefObject<IChartApi | null> | undefined,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  candles: UnifiedCandle[],
+) {
+  if (!candleRef.current || !volumeRef.current || candles.length === 0) return
+  const valid = candles.filter(validateCandle).map(normalizeCandle)
+  if (valid.length === 0) return
+  // Capture the view BEFORE setData — LWC recomputes the scale from the new
+  // data, and restoring the same logical window keeps the viewport put.
+  const ts = chartRef?.current?.timeScale()
+  const prevLogical = ts ? ts.getVisibleLogicalRange() : null
+  try {
+    candleRef.current.setData(valid.map(c => ({
+      time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+    })))
+    volumeRef.current.setData(valid.map(c => ({
+      time: c.time as Time, value: c.volume,
+      color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
+    })))
+    if (ts && prevLogical) {
+      ts.setVisibleLogicalRange(prevLogical)
+    }
+  } catch {}
+}
+
 function applyChartPatch(
   patch: CandlePatch,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
@@ -68,39 +96,60 @@ function applyChartPatch(
   exchange: Exchange | undefined,
   tf: Timeframe,
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
+  chartRef?: React.RefObject<IChartApi | null>,
 ) {
-  for (const raw of patch.candleUpdates) {
-    const c = normalizeCandle(raw)
-    if (!isFiniteOHLCV(c)) continue
-    candleRef.current?.update({
-      time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
-    })
+  const arr = candlesDataRef?.current
+  // Sync the backing array (sorted upsert) and detect out-of-order updates.
+  // lightweight-charts' series.update() THROWS for any bar older than the
+  // series' last bar, so a patch containing older candles (gap-backfill after
+  // a WS skip during sharp action, delayed klines) must be painted with a
+  // full setData repaint — otherwise the candle is silently dropped and the
+  // hole in history stays open forever.
+  const needsRepaint = arr ? applyCandleUpdates(arr, patch.candleUpdates) : false
+
+  if (needsRepaint && arr) {
+    repaintSeries(chartRef, candleRef, volumeRef, arr)
+  } else {
+    let didRepaint = false
+    for (const raw of patch.candleUpdates) {
+      const c = normalizeCandle(raw)
+      if (!isFiniteOHLCV(c)) continue
+      try {
+        candleRef.current?.update({
+          time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+        })
+      } catch {
+        // The series rejected the update (e.g. useFormingCandle painted a bar
+        // ahead of candlesDataRef, making this one "old"). Repaint everything
+        // from the backing array so the candle is never lost.
+        didRepaint = true
+        if (arr) repaintSeries(chartRef, candleRef, volumeRef, arr)
+        break
+      }
+    }
+    if (!didRepaint) {
+      for (const raw of patch.volumeUpdates) {
+        const v = normalizeCandle(raw)
+        if (!isFinite(v.volume)) continue
+        try {
+          volumeRef.current?.update({
+            time: v.time as Time, value: v.volume,
+            color: v.close >= v.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
+          })
+        } catch {
+          if (arr) repaintSeries(chartRef, candleRef, volumeRef, arr)
+          break
+        }
+      }
+    }
   }
-  for (const raw of patch.volumeUpdates) {
-    const v = normalizeCandle(raw)
-    if (!isFinite(v.volume)) continue
-    volumeRef.current?.update({
-      time: v.time as Time, value: v.volume,
-      color: v.close >= v.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-    })
-  }
+
   if (patch.livePrice != null) {
     setLivePrice(symbol, patch.livePrice)
   }
   if (patch.cacheWrites && exchange) {
     for (const c of patch.cacheWrites) {
       candleCache.updateCandle(exchange, symbol, tf, normalizeCandle(c))
-    }
-  }
-  if (candlesDataRef?.current && patch.candleUpdates.length > 0) {
-    const arr = candlesDataRef.current
-    for (const c of patch.candleUpdates) {
-      const last = arr[arr.length - 1]
-      if (last && last.time === c.time) {
-        arr[arr.length - 1] = c
-      } else if (!last || c.time > last.time) {
-        arr.push(c)
-      }
     }
   }
   const lastCandle = patch.candleUpdates[patch.candleUpdates.length - 1]
@@ -137,6 +186,7 @@ function backfillGap(
   lifecycleRef: React.RefObject<CandleLifecycle | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]> | undefined,
+  chartRef?: React.RefObject<IChartApi | null>,
 ) {
   if (!exchange) return
   if (destroyedRef.current) return
@@ -170,7 +220,7 @@ function backfillGap(
       if (inWindow.length === 0) return
       // Apply through the lifecycle so tail state stays consistent, then paint.
       const patch = lc.applyOlderPage(inWindow)
-      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
+      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
     })
     .catch(() => {
       // Network/server error — the gap remains visible but we don't crash.
@@ -364,7 +414,7 @@ function useFullHistory(
         }
         const flushPatch = lifecycleRef.current?.setBuffered(false)
         if (flushPatch && flushPatch.candleUpdates.length > 0) {
-          applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
+          applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
         }
       }
     }
@@ -581,7 +631,7 @@ function useLazyScroll(
           lifecycleRef?.current?.applyHistory(merged)
           const flushPatch = lifecycleRef?.current?.setBuffered(false)
           if (flushPatch && flushPatch.candleUpdates.length > 0) {
-            applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
+            applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
           }
 
           // Restore by LOGICAL range shifted by `added` — prepending bars
@@ -634,7 +684,7 @@ function useLazyScroll(
             // fetch onto the current chart.
             const flush = lifecycleRef?.current?.setBuffered(false)
             if (flush && flush.candleUpdates.length > 0) {
-              applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef)
+              applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef, chartRef)
             }
             return
           }
@@ -666,7 +716,7 @@ function useLazyScroll(
           // End reconciliation: replay buffered live events onto the chart.
           const flush = lifecycleRef?.current?.setBuffered(false)
           if (flush && flush.candleUpdates.length > 0) {
-            applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef)
+            applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef, chartRef)
           }
         })
     }
@@ -771,6 +821,7 @@ function useWsCandle(
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
   adjustingRef?: React.RefObject<boolean>,
   lastUpdateRef?: React.RefObject<number>,
+  chartRef?: React.RefObject<IChartApi | null>,
 ) {
   useEffect(() => {
     if (!exchange) return
@@ -793,9 +844,9 @@ function useWsCandle(
       const patch = lc.applyKline(c)
       if (adjustingRef?.current) return
 
-      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
+      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
       if (patch.gapBackfill) {
-        backfillGap(patch.gapBackfill, symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef)
+        backfillGap(patch.gapBackfill, symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, chartRef)
       }
     })
     wsSubscribe(channel)
@@ -817,6 +868,7 @@ function useWsTrade(
   candlesDataRef?: React.RefObject<UnifiedCandle[]>,
   adjustingRef?: React.RefObject<boolean>,
   lastUpdateRef?: React.RefObject<number>,
+  chartRef?: React.RefObject<IChartApi | null>,
 ) {
   useEffect(() => {
     if (!exchange) return
@@ -857,9 +909,9 @@ function useWsTrade(
       const patch = lc.applyTrade(payload)
       if (adjustingRef?.current) return
 
-      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef)
+      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef)
       if (patch.gapBackfill) {
-        backfillGap(patch.gapBackfill, symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef)
+        backfillGap(patch.gapBackfill, symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, chartRef)
       }
     })
     wsSubscribe(tradeType)
@@ -1056,8 +1108,8 @@ const MiniChart = memo(function MiniChart({
     CLICK_THRESHOLD,
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
 
-  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, lifecycleRef, shiftLogicalOffset)
 
   useEffect(() => {
@@ -1430,8 +1482,8 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
 
-  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, lifecycleRef, shiftLogicalOffset)
 
 

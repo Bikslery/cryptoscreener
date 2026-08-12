@@ -27,14 +27,14 @@ function dispatch(msg: WsMessage) {
   const t = msg.type as string | undefined
   if (t) {
     const set = typeCallbacks.get(t)
-    if (set) for (const cb of set) cb(msg)
+    if (set) for (const cb of set) { try { cb(msg) } catch (e) { console.error('[WS] subscriber error', e) } }
   }
   if (msg.channel) {
     const set = channelCallbacks.get(msg.channel)
-    if (set) for (const cb of set) cb(msg)
+    if (set) for (const cb of set) { try { cb(msg) } catch (e) { console.error('[WS] subscriber error', e) } }
   }
   if (wildcardCallbacks.size) {
-    for (const cb of wildcardCallbacks) cb(msg)
+    for (const cb of wildcardCallbacks) { try { cb(msg) } catch (e) { console.error('[WS] subscriber error', e) } }
   }
 }
 
