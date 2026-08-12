@@ -299,6 +299,12 @@ export function setLivePriceInterval(ms: number): void {
   LIVE_PRICE_INTERVAL_MS = Math.max(50, Number.isFinite(ms) ? ms : 500)
 }
 
+/** Current live-price cadence (ms). The chart's forming-candle paint gate uses
+ *  it directly so BOTH surfaces (numeric price + canvas) step in phase. */
+export function getLivePriceIntervalMs(): number {
+  return LIVE_PRICE_INTERVAL_MS
+}
+
 /** Synchronously publish every pending price (tests / imperative flush). */
 export function flushLivePrices(): void {
   if (pendingTimer !== null) { clearTimeout(pendingTimer); pendingTimer = null }

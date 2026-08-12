@@ -1,7 +1,7 @@
 import { useEffect, useRef, memo, useState, useMemo } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
-import { useCoinListStore, setLivePrice } from '../../store'
+import { useCoinListStore, setLivePrice, getLivePriceIntervalMs } from '../../store'
 import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
@@ -75,6 +75,7 @@ function repaintSeries(
   if (!candleRef.current || !volumeRef.current || candles.length === 0) return
   // A repaint paints exact data — any pending forming-candle glide must stop
   // so it can't overwrite the exact values on the next frame.
+  cancelFormingGate(candleRef.current)
   getFormingAnimator(candleRef.current, () => candleRef.current, volumeRef.current, () => volumeRef.current).reset()
   const valid = candles.filter(validateCandle).map(normalizeCandle)
   if (valid.length === 0) return
@@ -236,6 +237,55 @@ function getFormingAnimator(
   return a
 }
 
+// --- Forming-candle CANVAS cadence gate ----------------------------------
+// The store throttles the NUMERIC live price to the shared cadence, but the
+// chart's own live price (forming-candle body, price line, last-value label)
+// is painted straight from candle patches and stayed on every trade/mid/kline.
+// This gate BUFFERS the visual forming-candle updates (latest-wins) and paints
+// them at the same cadence, so the canvas steps together with the numbers.
+// The backing array stays exact & real-time; final candles, history loads and
+// gap backfills always paint immediately (never gated).
+const formingPaintGates = new WeakMap<ISeriesApi<'Candlestick'>, {
+  pending: UnifiedCandle | null
+  lastPaintAt: number
+  timer: ReturnType<typeof setTimeout> | null
+}>()
+
+function cancelFormingGate(series: ISeriesApi<'Candlestick'> | null | undefined) {
+  if (!series) return
+  const g = formingPaintGates.get(series)
+  if (!g) return
+  if (g.timer !== null) { clearTimeout(g.timer); g.timer = null }
+  g.pending = null
+}
+
+function queueFormingGate(
+  series: ISeriesApi<'Candlestick'>,
+  c: UnifiedCandle,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+) {
+  let g = formingPaintGates.get(series)
+  if (!g) {
+    g = { pending: null, lastPaintAt: -Infinity, timer: null }
+    formingPaintGates.set(series, g)
+  }
+  g.pending = c
+  if (g.timer !== null) return
+  const interval = getLivePriceIntervalMs()
+  const delay = Math.max(0, interval - (Date.now() - g.lastPaintAt))
+  g.timer = setTimeout(() => {
+    g!.timer = null
+    const p = g!.pending
+    if (!p) return
+    g!.pending = null
+    g!.lastPaintAt = Date.now()
+    // Series swapped (pricePrecision recreate) → drop; the new series re-seeds.
+    if (candleRef.current !== series || !volumeRef.current) return
+    getFormingAnimator(series, () => candleRef.current, volumeRef.current, () => volumeRef.current).paint(p)
+  }, delay)
+}
+
 function applyChartPatch(
   patch: CandlePatch,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
@@ -275,15 +325,19 @@ function applyChartPatch(
       // reached the patch without passing the array gate.
       c = sanitizeCandle(c, arr ? contextWindow(arr, -1) : [], via ?? 'paint')
       const arrLast = arr && arr.length > 0 ? arr[arr.length - 1] : null
-      if (animator) {
+      if (animator && series) {
         if (c.isFinal) {
-          // Period closed — paint exact values, stop any pending glide.
+          // Period closed — paint exact values immediately, stop any pending
+          // glide, and drop a gated forming paint so nothing stale overwrites
+          // the finalized bar.
+          cancelFormingGate(series)
           animator.reset()
         } else if (arrLast && c.time === arrLast.time) {
-          // Live forming-candle update (trade / mid / non-final kline): the
-          // body and volume GLIDE toward the new values instead of teleporting.
+          // Live forming-candle update (trade / mid / non-final kline): NOW
+          // CADENCE-GATED — buffered (latest-wins) and painted at the shared
+          // 500ms interval, so the chart's live price steps with the numbers.
           formingTime = c.time
-          animator.paint(c)
+          queueFormingGate(series, c, candleRef, volumeRef)
           continue
         }
       }
@@ -749,6 +803,7 @@ function useFullHistory(
         const prevLogical = sameKey && prevData.length > 0 ? ts?.getVisibleLogicalRange() ?? null : null
         // Exact data replaces everything — a pending forming-candle glide
         // must not paint stale interpolated values onto the new series.
+        cancelFormingGate(candleRef.current)
         getFormingAnimator(candleRef.current, () => candleRef.current, volumeRef.current, () => volumeRef.current).reset()
         candleRef.current.setData(candleData)
         volumeRef.current.setData(volumeData)
@@ -1009,7 +1064,10 @@ function useLazyScroll(
           onLogicalShift?.(added)
 
           const seriesAfterLoad = candleRef.current
-          if (seriesAfterLoad && volumeRef.current) getFormingAnimator(seriesAfterLoad, () => candleRef.current, volumeRef.current, () => volumeRef.current).reset()
+          if (seriesAfterLoad && volumeRef.current) {
+            cancelFormingGate(seriesAfterLoad)
+            getFormingAnimator(seriesAfterLoad, () => candleRef.current, volumeRef.current, () => volumeRef.current).reset()
+          }
           candleRef.current?.setData(candleData)
           volumeRef.current?.setData(volumeData)
 
