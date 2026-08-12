@@ -62,4 +62,23 @@ describe('applyCandleUpdates — sorted upsert + out-of-order detection', () => 
     expect(applyCandleUpdates(arr, [])).toBe(false)
     expect(arr).toHaveLength(1)
   })
+
+  it('skips invalid candles — they never become phantom bars in the backing array', () => {
+    const arr = [makeCandle(100), makeCandle(200)]
+    const bad = {
+      symbol: SYM, exchange: EX, timeframe: TF, time: 150,
+      open: NaN, high: Infinity, low: -1, close: 100, volume: 1, source: 'kline' as const,
+    }
+    const outOfOrder = applyCandleUpdates(arr, [bad, makeCandle(300)])
+    expect(outOfOrder).toBe(false)
+    expect(arr.map(c => c.time)).toEqual([100, 200, 300])
+  })
+
+  it('ignores non-positive timestamps', () => {
+    const arr = [makeCandle(100)]
+    const bad = { ...makeCandle(0), time: 0 }
+    const outOfOrder = applyCandleUpdates(arr, [bad])
+    expect(outOfOrder).toBe(false)
+    expect(arr).toHaveLength(1)
+  })
 })

@@ -1,4 +1,4 @@
-import { normalizeCandle } from './candle-utils'
+import { normalizeCandle, isFiniteOHLCV } from './candle-utils'
 import type { UnifiedCandle } from '../types'
 
 /**
@@ -20,8 +20,14 @@ export function applyCandleUpdates(arr: UnifiedCandle[], updates: UnifiedCandle[
   const last = arr[arr.length - 1]
   const lastTime = last ? last.time : null
 
+  // Track only the candles that actually land in the array: invalid OHLC must
+  // never become a phantom bar (it would skew logical indexes on prepends and
+  // linger in the backing array even though the incremental paint path skips it).
+  const applied: UnifiedCandle[] = []
   for (const raw of updates) {
     const c = normalizeCandle(raw)
+    if (!isFiniteOHLCV(c) || !(c.time > 0)) continue
+    applied.push(c)
     const tail = arr[arr.length - 1]
     if (tail && tail.time === c.time) {
       arr[arr.length - 1] = c
@@ -34,5 +40,5 @@ export function applyCandleUpdates(arr: UnifiedCandle[], updates: UnifiedCandle[
     }
   }
 
-  return lastTime != null && updates.some(c => c.time < lastTime)
+  return lastTime != null && applied.some(c => c.time < lastTime)
 }

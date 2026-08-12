@@ -154,11 +154,83 @@ function applyChartPatch(
     }
   }
   const lastCandle = patch.candleUpdates[patch.candleUpdates.length - 1]
-  if (lastCandle) {
-    candleRef.current?.applyOptions({
-      priceLineColor: lastCandle.close >= lastCandle.open ? UP_COLOR() : DOWN_COLOR(),
-    })
+  if (lastCandle && candleRef.current) {
+    // applyOptions triggers a style recalc — with bookTicker-mid updates
+    // arriving dozens of times per second, only touch it when the color
+    // actually flips (up ↔ down), not on every tick.
+    const color = lastCandle.close >= lastCandle.open ? UP_COLOR() : DOWN_COLOR()
+    if (lastPriceLineColor.get(candleRef.current) !== color) {
+      lastPriceLineColor.set(candleRef.current, color)
+      candleRef.current.applyOptions({ priceLineColor: color })
+    }
   }
+}
+
+// Per-series cache of the last applied price-line color (avoids a style recalc
+// on every live tick — the color only flips when a bar closes up vs down).
+const lastPriceLineColor = new WeakMap<object, string>()
+
+/**
+ * Self-healing consistency check (the "no silent holes" insurance).
+ *
+ * Every paint path keeps the backing array (candlesDataRef) authoritative and
+ * syncs LWC incrementally — but a series can still drift silently (an update
+ * LWC rejected, a canvas/series recreate mid-stream, a dropped frame). This
+ * hook periodically compares the series' last bar with the array's last entry
+ * and force-repaints (with visible-range preservation) when they diverge, so a
+ * lost candle is restored automatically instead of leaving a permanent hole.
+ */
+const SERIES_SELF_HEAL_INTERVAL_MS = 2500
+
+function useSeriesSelfHeal(
+  chartRef: React.RefObject<IChartApi | null>,
+  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  destroyedRef: React.RefObject<boolean>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  adjustingRef?: React.RefObject<boolean>,
+) {
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (destroyedRef.current) return
+      if (adjustingRef?.current) return
+      const series = candleRef.current
+      const volSeries = volumeRef.current
+      const arr = candlesDataRef.current
+      if (!series || !volSeries || !arr || arr.length === 0) return
+
+      let lwcLast: { time: number; close: number; volume: number } | null = null
+      try {
+        const data = series.data()
+        const last = data[data.length - 1] as { time: unknown; close: number } | undefined
+        const volData = volSeries.data()
+        const volLast = volData[volData.length - 1] as { value: number } | undefined
+        if (last && volLast) {
+          lwcLast = { time: last.time as number, close: last.close, volume: volLast.value }
+        }
+      } catch {
+        return
+      }
+
+      const arrLast = arr[arr.length - 1]
+      if (!arrLast) return
+
+      const diverged = !lwcLast
+        || lwcLast.time !== arrLast.time
+        || Math.abs(lwcLast.close - arrLast.close) > 1e-12
+        || Math.abs(lwcLast.volume - (arrLast.volume || 0)) > 1e-9
+
+      if (diverged) {
+        console.warn('[ChartGrid] Series drifted from backing array — self-heal repaint', {
+          symbol: arrLast.symbol,
+          lwc: lwcLast,
+          arr: { time: arrLast.time, close: arrLast.close, volume: arrLast.volume },
+        })
+        repaintSeries(chartRef, candleRef, volumeRef, arr)
+      }
+    }, SERIES_SELF_HEAL_INTERVAL_MS)
+    return () => clearInterval(timer)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 }
 
 /**
@@ -1141,6 +1213,7 @@ const MiniChart = memo(function MiniChart({
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, lifecycleRef, shiftLogicalOffset)
+  useSeriesSelfHeal(chartRef, candleRef, volumeRef, destroyedRef, candlesDataRef, adjustingRef)
 
   useEffect(() => {
     const container = containerRef.current
@@ -1518,6 +1591,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, lifecycleRef, shiftLogicalOffset)
+  useSeriesSelfHeal(chartRef, candleRef, volumeRef, destroyedRef, candlesDataRef, adjustingRef)
 
 
 
