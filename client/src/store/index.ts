@@ -4,6 +4,7 @@ import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, Alert as AlertType
 import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
 import { notifyNewAlert } from '../services/alert-notify.js'
 import { emitAlertRemoved } from '../services/alert-drawing-sync.js'
+import { getOrFetchHistory, EXPANDED_CANDLE_LIMIT } from '../services/candle-prefetch.js'
 import api from '../services/api.js'
 import { VOLUME_HIGH_THRESHOLD, VOLUME_FILTER_DEFAULT } from '../constants/volume.js'
 
@@ -356,7 +357,18 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
 
   selectCoin: (symbol) => set({ selectedSymbol: symbol }),
 
-  expandChart: (symbol) => set({ expandedSymbol: symbol, selectedSymbol: symbol }),
+  expandChart: (symbol) => {
+    // Warm the history cache the moment the chart opens (grid click or search
+    // pick) so the first paint — and the fit-to-history zoom — is instant
+    // instead of waiting for a network round-trip after mount. The chart's own
+    // loader reuses the same in-flight request (deduped by symbol/tf).
+    if (symbol) {
+      const s = get()
+      const coin = s.coinMap.get(symbol)
+      getOrFetchHistory(symbol, s.activeTimeframe, EXPANDED_CANDLE_LIMIT, coin?.exchange)
+    }
+    set({ expandedSymbol: symbol, selectedSymbol: symbol })
+  },
 
   setTimeframe: (tf) => set({ activeTimeframe: tf }),
 

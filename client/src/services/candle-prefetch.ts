@@ -3,7 +3,14 @@ import * as candleCache from './candle-cache'
 import { expandCompactCandles, type CompactCandle } from './candle-compact'
 import type { UnifiedCandle, Exchange } from '../types'
 
-const PREFETCH_LIMIT = 1000
+const PREFETCH_LIMIT = 3000
+
+/**
+ * How many candles the expanded (big) chart loads in one go so the open
+ * view is maximally zoomed out with the left side already covered by
+ * history (server MAX_CANDLE_LIMIT allows this in a single request).
+ */
+export const EXPANDED_CANDLE_LIMIT = 3000
 
 /**
  * How long a per-symbol history request will wait for the in-flight bulk

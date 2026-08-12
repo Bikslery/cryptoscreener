@@ -1,6 +1,6 @@
 import type { UnifiedCandle, Exchange } from '../../types.js'
 
-const MAX_CANDLES_PER_KEY = 2000
+const MAX_CANDLES_PER_KEY = 4000
 const MAX_TOTAL_CANDLES = 1_500_000
 
 class LRU {

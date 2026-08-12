@@ -1,7 +1,7 @@
 import { useEffect, useRef, memo, useState, useMemo } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
-import { useCoinListStore, setLivePrice, useAuthStore } from '../../store'
+import { useCoinListStore, setLivePrice } from '../../store'
 import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
@@ -10,7 +10,7 @@ import type { Timeframe, UnifiedCandle, Exchange, DrawingTool } from '../../type
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
-import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT } from '../../services/candle-prefetch'
+import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT, EXPANDED_CANDLE_LIMIT } from '../../services/candle-prefetch'
 import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
 import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
 import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload, type GapBackfill } from '../../services/candle-lifecycle'
@@ -1648,10 +1648,6 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   const [chartVersion, setChartVersion] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const lastUpdateRef = useRef<number>(Date.now())
-  // Initial zoom when opening: by default the expanded chart opens maximally
-  // zoomed out (fitContent). If the user set a custom value in profile
-  // (chartVisibleBars), that explicit choice wins over the default.
-  const chartVisibleBars = useAuthStore(s => s.settings?.chartVisibleBars)
   const lifecycleRef = useRef<CandleLifecycle | null>(null)
 
   useEffect(() => {
@@ -1745,7 +1741,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000, visibleBars: chartVisibleBars ?? 450, fitOnOpen: chartVisibleBars == null }, lastUpdateRef, lifecycleRef, chartVersion)
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: EXPANDED_CANDLE_LIMIT, fitOnOpen: true }, lastUpdateRef, lifecycleRef, chartVersion)
 
   const {
     activeTool,

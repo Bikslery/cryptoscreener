@@ -19,7 +19,7 @@ const apiLimiter = rateLimit({
 const router = Router()
 const SUPPORTED_TIMEFRAMES = new Set(['1m', '5m', '15m', '1h', '4h', '1d', '1w'])
 const SUPPORTED_EXCHANGES = new Set<Exchange>(['binance-spot', 'binance-futures', 'bybit-futures', 'okx-spot', 'okx-futures'])
-const MAX_CANDLE_LIMIT = 1000
+const MAX_CANDLE_LIMIT = 3000
 
 function normalizeExchange(value: unknown): Exchange | undefined {
   if (typeof value !== 'string') return undefined
