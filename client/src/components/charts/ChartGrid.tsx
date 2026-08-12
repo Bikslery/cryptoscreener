@@ -577,7 +577,7 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  options?: { limit?: number; visibleBars?: number },
+  options?: { limit?: number; visibleBars?: number; fitOnOpen?: boolean },
   lastUpdateRef?: React.RefObject<number>,
   lifecycleRef?: React.RefObject<CandleLifecycle | null>,
   chartVersion?: number,
@@ -637,6 +637,10 @@ function useFullHistory(
             // snapped the right edge onto the last candle whenever the view
             // extended past it (e.g. default rightOffset or zoomed-out view).
             ts.setVisibleLogicalRange(prevLogical)
+          } else if (options?.fitOnOpen) {
+            // Expanded chart: open maximally zoomed out — the whole loaded
+            // history fits on screen. The user can zoom in from there.
+            ts.fitContent()
           } else {
             const lastBar = candleData.length - 1
             // Initial scale when opening a chart with no saved view: how many
@@ -1644,10 +1648,10 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   const [chartVersion, setChartVersion] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const lastUpdateRef = useRef<number>(Date.now())
-  // Initial scale when opening a chart comes from user settings (profile →
-  // slider), defaulting to 450 bars; mini charts keep 150.
+  // Initial zoom when opening: by default the expanded chart opens maximally
+  // zoomed out (fitContent). If the user set a custom value in profile
+  // (chartVisibleBars), that explicit choice wins over the default.
   const chartVisibleBars = useAuthStore(s => s.settings?.chartVisibleBars)
-
   const lifecycleRef = useRef<CandleLifecycle | null>(null)
 
   useEffect(() => {
@@ -1741,7 +1745,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000, visibleBars: chartVisibleBars ?? 450 }, lastUpdateRef, lifecycleRef, chartVersion)
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: 1000, visibleBars: chartVisibleBars ?? 450, fitOnOpen: chartVisibleBars == null }, lastUpdateRef, lifecycleRef, chartVersion)
 
   const {
     activeTool,
