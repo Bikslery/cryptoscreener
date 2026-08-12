@@ -345,14 +345,15 @@ describe('candle-lifecycle', () => {
       expect(patch.gapBackfill).toBeUndefined()
     })
 
-    it('is undefined for very large gaps (deferred to reconnect logic)', () => {
+    it('is reported even for large gaps (backfill cap lifted)', () => {
       const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
       lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
 
-      // 300 → 300 + 20*60 = 1500 → 19 missing periods (> MAX_BACKFILL_PERIODS=10).
+      // 300 → 300 + 20*60 = 1500 → 19 missing periods. Previously capped at
+      // MAX_BACKFILL_PERIODS=10 (gap left open forever); now backfilled.
       const patch = lc.applyKline(makeCandle(1500, 200, 210, 195, 205, 30))
-      expect(patch.gapBackfill).toBeUndefined()
-      // The candle itself is still created (we don't drop it, just skip backfill).
+      expect(patch.gapBackfill).toEqual({ fromTime: 360, toTime: 1440 })
+      // The candle itself is still created.
       expect(patch.candleUpdates).toHaveLength(1)
     })
   })

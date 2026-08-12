@@ -25,10 +25,12 @@ export interface CandlePatch {
 
 /**
  * Cap on how many missing periods a single detected gap may request via
- * REST backfill. Larger gaps (e.g. long WS outages) are left to the
- * reconnect/refresh path rather than firing a heavy request burst here.
+ * REST backfill. Was 10 — gaps larger than that were left open forever after
+ * a WS outage. Now effectively unbounded for sane windows: the server caps a
+ * single klines request at 1000, so a very large gap is filled across
+ * successive detections rather than one giant burst.
  */
-const MAX_BACKFILL_PERIODS = 10
+const MAX_BACKFILL_PERIODS = 1000
 
 export interface TradePayload {
   symbol: string
@@ -158,10 +160,16 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     return tail[tail.length - 1]
   }
 
+  // Tail length = how many recent periods the lifecycle tracks precisely.
+  // Larger = late FINAL klines (delivered after the fast aggTrade lane already
+  // advanced several periods during a burst) still find their period and
+  // replace the mid-flight values instead of being dropped as "stale".
+  const MAX_TAIL = 8
+
   function pushTail(entry: TailEntry) {
     tail.push(entry)
-    if (tail.length > 3) {
-      tail = tail.slice(tail.length - 3)
+    if (tail.length > MAX_TAIL) {
+      tail = tail.slice(tail.length - MAX_TAIL)
     }
   }
 
@@ -195,7 +203,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     if (valid.length === 0) return emptyPatch()
 
     tail = []
-    const start = Math.max(0, valid.length - 3)
+    const start = Math.max(0, valid.length - MAX_TAIL)
     for (let i = start; i < valid.length; i++) {
       tail.push({
         candle: { ...valid[i], source: valid[i].source || 'kline' },
@@ -242,7 +250,7 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     const candleTime = Math.floor(tradeSec / tfSeconds) * tfSeconds
 
     const current = getCurrentForming()
-    let updatedCandles: UnifiedCandle[] = []
+    let updatedCandles: UnifiedCandle[]
 
     if (!current) {
       const open = trade.price

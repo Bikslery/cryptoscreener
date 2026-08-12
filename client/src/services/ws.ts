@@ -39,6 +39,13 @@ const subscriptions = new Map<string, number>()
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let intentionalDisconnect = false
 let reconnectAttempt = 0
+// Reconnect epoch: incremented on EVERY socket open (initial + reconnects).
+// Charts use it to re-pull history after a reconnect, so periods that fell
+// through the dead-window land back on the chart.
+let wsOpenCount = 0
+export function getWsOpenCount(): number {
+  return wsOpenCount
+}
 const MAX_BACKOFF = 30000
 const BASE_DELAY = 1000
 
@@ -85,6 +92,7 @@ function connect() {
 
   ws.onopen = () => {
     reconnectAttempt = 0
+    wsOpenCount++
     lastMessageAt = Date.now()
     dispatch({ type: 'open' })
     for (const ch of subscriptions.keys()) {

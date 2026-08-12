@@ -5,7 +5,7 @@ import { useCoinListStore, setLivePrice } from '../../store'
 import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
-import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe } from '../../services/ws'
+import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount } from '../../services/ws'
 import type { Timeframe, UnifiedCandle, Exchange, DrawingTool } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft } from 'lucide-react'
@@ -349,10 +349,13 @@ const lastPriceLineColor = new WeakMap<object, string>()
  */
 const SERIES_SELF_HEAL_INTERVAL_MS = 2500
 
-// DIAG: per-series persistence tracker for backing-array holes. A hole seen on
-// 2+ consecutive checks (~5s apart) is a permanent gap, not a transient one
-// waiting for a late kline/backfill — logged as 'persistent_holes'.
-const diagHoleHistory = new WeakMap<ISeriesApi<'Candlestick'>, { key: string; count: number }>()
+// DIAG + SELF-REPAIR: per-series persistence tracker for backing-array holes.
+// A hole seen on 2+ consecutive checks (~5s apart) is a permanent gap, not a
+// transient one waiting for a late kline/backfill. It is logged as
+// 'persistent_holes' AND auto-repaired via the same REST backfill path as the
+// WS gap detection — with a cooldown so a failed repair isn't spammed.
+const diagHoleHistory = new WeakMap<ISeriesApi<'Candlestick'>, { key: string; count: number; lastRepairAt?: number }>()
+const HOLE_REPAIR_COOLDOWN_MS = 30000
 
 function useSeriesSelfHeal(
   chartRef: React.RefObject<IChartApi | null>,
@@ -361,6 +364,7 @@ function useSeriesSelfHeal(
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   adjustingRef?: React.RefObject<boolean>,
+  lifecycleRef?: React.RefObject<CandleLifecycle | null>,
 ) {
   useEffect(() => {
     const timer = setInterval(() => {
@@ -427,20 +431,45 @@ function useSeriesSelfHeal(
         const prev = diagHoleHistory.get(series)
         if (prev && prev.key === key) {
           prev.count++
-          if (prev.count === 2) {
+          if (prev.count >= 2) {
             const totalPeriods = holes.reduce((a, h) => a + h.periods, 0)
-            console.warn('[Diag][SelfHeal] Persistent holes in backing array', {
-              symbol: arrLast.symbol,
-              tf: arrLast.timeframe,
-              holes: holes.slice(0, 5),
-              totalPeriods,
-            })
-            recordDiag('persistent_holes', {
-              symbol: arrLast.symbol,
-              tf: arrLast.timeframe,
-              periods: totalPeriods,
-              detail: JSON.stringify(holes.slice(0, 5)),
-            })
+            if (prev.count === 2) {
+              console.warn('[Diag][SelfHeal] Persistent holes in backing array', {
+                symbol: arrLast.symbol,
+                tf: arrLast.timeframe,
+                holes: holes.slice(0, 5),
+                totalPeriods,
+              })
+              recordDiag('persistent_holes', {
+                symbol: arrLast.symbol,
+                tf: arrLast.timeframe,
+                periods: totalPeriods,
+                detail: JSON.stringify(holes.slice(0, 5)),
+              })
+            }
+            // SELF-REPAIR: the hole survived the backfill triggered by WS gap
+            // detection (it existed before the gap / the gap detector never
+            // fired because no new-period event landed). Restore it from REST,
+            // throttled per series-holeset so a failing backend isn't hammered.
+            const now = Date.now()
+            if (lifecycleRef && now - (prev.lastRepairAt || 0) >= HOLE_REPAIR_COOLDOWN_MS) {
+              prev.lastRepairAt = now
+              prev.count = 0 // re-arm: need 2 more consecutive checks to fire again
+              console.warn('[SelfHeal] Repairing holes from REST', {
+                symbol: arrLast.symbol,
+                tf: arrLast.timeframe,
+                holes: holes.slice(0, 5),
+              })
+              for (const h of holes) {
+                backfillGap(
+                  { fromTime: h.from, toTime: h.to },
+                  arrLast.symbol,
+                  arrLast.exchange,
+                  arrLast.timeframe as Timeframe,
+                  candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, chartRef,
+                )
+              }
+            }
           }
         } else {
           diagHoleHistory.set(series, { key, count: 1 })
@@ -645,12 +674,14 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  options?: { limit?: number; visibleBars?: number; fitOnOpen?: boolean },
+  options?: { limit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServer?: boolean; wsEpoch?: number },
   lastUpdateRef?: React.RefObject<number>,
   lifecycleRef?: React.RefObject<CandleLifecycle | null>,
   chartVersion?: number,
 ): { isInitialLoading: boolean; status: 'loading' | 'ready' | 'empty' | 'error'; dataVersion: number } {
   const limit = options?.limit ?? 1000
+  const forceServer = options?.forceServer ?? false
+  const wsEpoch = options?.wsEpoch ?? 0
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading')
   const [dataVersion, setDataVersion] = useState(0)
@@ -664,7 +695,11 @@ function useFullHistory(
   useEffect(() => {
     if (!exchange) return
     const cancelled = { value: false }
-    setIsInitialLoading(true)
+    // A reconnect-triggered refetch of the same chart must not blank it to the
+    // loading spinner — the current bars stay visible until the fresh history
+    // replaces them.
+    const sameKeyReload = forceServer && lastPaintedKeyRef.current === `${exchange}:${symbol}:${tf}`
+    if (!sameKeyReload) setIsInitialLoading(true)
     setStatus('loading')
 
     const renderCandles = (candles: UnifiedCandle[]) => {
@@ -749,7 +784,7 @@ function useFullHistory(
       // the expanded chart's 3000-bar request, or the big chart would render
       // partially zoomed out and never fetch the rest.
       const cached = candleCache.getCandles(exchange, symbol, tf)
-      if (cached && cached.length >= limit) {
+      if (!forceServer && cached && cached.length >= limit) {
         if (!cancelled.value && !destroyedRef.current) {
           renderCandles(cached)
           setIsInitialLoading(false)
@@ -762,9 +797,12 @@ function useFullHistory(
         return
       }
 
-      // Fallback: individual fetch (server does seamless stitching)
+      // Fallback: individual fetch (server does seamless stitching). forceServer
+      // skips the client-cache fast path inside getOrFetchHistory too, so a
+      // post-reconnect reload pulls fresh history and the cache's union fill
+      // heals any gaps that landed during the dead window.
       try {
-        const fetched = await getOrFetchHistory(symbol, tf, limit, exchange)
+        const fetched = await getOrFetchHistory(symbol, tf, limit, exchange, forceServer)
         if (cancelled.value || destroyedRef.current) {
           // This run lost the race to a newer (symbol/exchange/tf) effect;
           // release reconciliation so live events are never stranded.
@@ -804,7 +842,9 @@ function useFullHistory(
     // show the live forming candle until the next symbol/TF change, because
     // symbol/exchange/tf haven't changed. Without this, a recreated chart
     // showed "just the last candle" until a kline arrived.
-  }, [symbol, exchange, tf, chartVersion])
+    // `wsEpoch` re-paints history after a WS reconnect so periods that fell
+    // through the disconnected/dead window are restored from the server.
+  }, [symbol, exchange, tf, chartVersion, wsEpoch])
 
   return { isInitialLoading, status, dataVersion }
 }
@@ -1443,7 +1483,18 @@ const MiniChart = memo(function MiniChart({
     // chart destroy/recreate. This makes TF switching near-instant on warm cache.
   }, [symbol, pricePrecision])
 
-  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: GRID_CANDLE_LIMIT }, lastUpdateRef, lifecycleRef, chartVersion)
+  const [wsCount, setWsCount] = useState(getWsOpenCount)
+  const mountWsCountRef = useRef(getWsOpenCount())
+  useEffect(() => {
+    const un = wsOnType('open', () => setWsCount(getWsOpenCount()))
+    return un
+  }, [])
+
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
+    limit: GRID_CANDLE_LIMIT,
+    forceServer: wsCount > mountWsCountRef.current,
+    wsEpoch: wsCount,
+  }, lastUpdateRef, lifecycleRef, chartVersion)
 
   const adjustingRef = useRef(false)
 
@@ -1464,7 +1515,7 @@ const MiniChart = memo(function MiniChart({
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, lifecycleRef, shiftLogicalOffset)
-  useSeriesSelfHeal(chartRef, candleRef, volumeRef, destroyedRef, candlesDataRef, adjustingRef)
+  useSeriesSelfHeal(chartRef, candleRef, volumeRef, destroyedRef, candlesDataRef, adjustingRef, lifecycleRef)
 
   useEffect(() => {
     const container = containerRef.current
@@ -1812,7 +1863,19 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     }
   }, [symbol, tf, pricePrecision])
 
-  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, { limit: EXPANDED_CANDLE_LIMIT, fitOnOpen: true }, lastUpdateRef, lifecycleRef, chartVersion)
+  const [wsCount, setWsCount] = useState(getWsOpenCount)
+  const mountWsCountRef = useRef(getWsOpenCount())
+  useEffect(() => {
+    const un = wsOnType('open', () => setWsCount(getWsOpenCount()))
+    return un
+  }, [])
+
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
+    limit: EXPANDED_CANDLE_LIMIT,
+    fitOnOpen: true,
+    forceServer: wsCount > mountWsCountRef.current,
+    wsEpoch: wsCount,
+  }, lastUpdateRef, lifecycleRef, chartVersion)
 
   const {
     activeTool,
@@ -1838,7 +1901,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, lifecycleRef, shiftLogicalOffset)
-  useSeriesSelfHeal(chartRef, candleRef, volumeRef, destroyedRef, candlesDataRef, adjustingRef)
+  useSeriesSelfHeal(chartRef, candleRef, volumeRef, destroyedRef, candlesDataRef, adjustingRef, lifecycleRef)
 
 
 

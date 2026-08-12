@@ -203,6 +203,7 @@ export function getOrFetchHistory(
   tf: string,
   limit: number = PREFETCH_LIMIT,
   exchange?: Exchange,
+  force = false,
 ): Promise<UnifiedCandle[]> {
   // Limit-aware key: a 300-bar mini-chart fetch and a 3000-bar expanded-chart
   // fetch are different needs — the big chart must not be served the small
@@ -211,7 +212,7 @@ export function getOrFetchHistory(
   const existing = inflightMap.get(k)
   if (existing) return existing
 
-  if (exchange) {
+  if (exchange && !force) {
     const cached = candleCache.getCandles(exchange, symbol, tf)
     // A cache hit is only valid when it covers the FULL requested window. The
     // mini charts seed the cache with 300 bars; treating that as a hit for the
