@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { getCacheStats, getCachedCandles, fillGaps, getSyntheticFillCount } from '../services/candles/candle-cache.js'
+import { getCacheStats, getCacheKeys, getCachedCandles, fillGaps, getSyntheticFillCount } from '../services/candles/candle-cache.js'
 import { getCandleManagerStats, getCandleDiagStats } from '../services/candles/manager.js'
 import { getPreloadStats } from '../services/candles/preload.js'
 import { getHubStats } from '../ws/hub.js'
@@ -120,8 +120,11 @@ router.get('/history-check', async (req, res) => {
 })
 
 router.get('/candle-stats', (_req, res) => {
+  const allKeys = getCacheKeys()
   res.json({
     cache: getCacheStats(),
+    cacheKeysSample: allKeys.slice(-25),
+    cacheDogeKeys: allKeys.filter(k => k.includes('DOGEUSDT')),
     subscriptions: getCandleManagerStats(),
     preload: getPreloadStats(),
     // DIAGNOSTICS
