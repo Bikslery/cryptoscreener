@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import rateLimit from 'express-rate-limit'
 import { fetchCandles, fetchDepth, getAllTickers, getTickers, getTicker } from '../services/aggregator/index.js'
-import { getCachedCandles, setCachedCandlesFromRest } from '../services/candles/candle-cache.js'
+import { getCachedCandles, setCachedCandlesFromRest, fillGaps } from '../services/candles/candle-cache.js'
 import { getHistory } from '../services/candles/history.js'
 import { compactCandles } from '../services/candles/compact.js'
 import type { Exchange } from '../types.js'
@@ -111,13 +111,22 @@ router.post('/candles-bulk', async (req, res) => {
     const data: Record<string, { exchange: string | null; candles: ReturnType<typeof compactCandles> }> = {}
     for (const [symbol, candles] of Object.entries(result)) {
       const ex = candles[0]?.exchange || exchange || getTicker(symbol)?.exchange || null
-      data[symbol] = { exchange: ex, candles: compactCandles(candles) }
+      // Guarantee: never serve a hole — any missing period is bridged with a
+      // flat candle here, so the client cannot paint an empty spot.
+      const gapless = fillGaps(candles, symbol, ex ?? 'binance-futures', tf)
+      data[symbol] = { exchange: ex, candles: compactCandles(gapless) }
     }
     res.json({ format: 'compact', data })
     return
   }
 
-  res.json(result)
+  // Legacy (non-compact) array — apply the same hole-guarantee for safety.
+  const legacyResult: Record<string, any[]> = {}
+  for (const [symbol, candles] of Object.entries(result)) {
+    const ex = candles[0]?.exchange || exchange || getTicker(symbol)?.exchange || null
+    legacyResult[symbol] = fillGaps(candles, symbol, ex ?? 'binance-futures', tf)
+  }
+  res.json(legacyResult)
 })
 
 router.get('/:symbol/candles', async (req, res) => {
@@ -129,11 +138,15 @@ router.get('/:symbol/candles', async (req, res) => {
   const compact = req.query.compact === '1' || req.query.compact === 'true'
 
   const send = (candles: Awaited<ReturnType<typeof getHistory>>) => {
+    // Hole guarantee: bridge missing periods with flat candles before the
+    // response leaves the server, whatever the source (cache fast-path,
+    // Redis chunk, exchange fetch).
+    const ex: Exchange | null = candles[0]?.exchange || exchange || getTicker(symbol)?.exchange || null
+    const gapless = fillGaps(candles, symbol, ex ?? 'binance-futures', tf)
     if (compact) {
-      const ex = candles[0]?.exchange || exchange || getTicker(symbol)?.exchange || null
-      res.json({ format: 'compact', exchange: ex, candles: compactCandles(candles) })
+      res.json({ format: 'compact', exchange: ex, candles: compactCandles(gapless) })
     } else {
-      res.json(candles)
+      res.json(gapless)
     }
   }
 

@@ -3,6 +3,77 @@ import type { UnifiedCandle, Exchange } from '../../types.js'
 const MAX_CANDLES_PER_KEY = 4000
 const MAX_TOTAL_CANDLES = 1_500_000
 
+const TF_SECONDS: Record<string, number> = {
+  '1m': 60, '5m': 300, '15m': 900,
+  '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
+}
+
+/**
+ * How many missing periods a single gap event may be patched with synthetic
+ * flat candles (open=high=low=close=prevClose, volume 0). Bounded so a
+ * multi-day WS outage can't balloon the cache into thousands of filler rows —
+ * big gaps are left as-is for the serve-time fill + async repair to handle.
+ */
+const MAX_FILL_WINDOW = 120
+
+let syntheticFilledTotal = 0
+
+export function getSyntheticFillCount(): number {
+  return syntheticFilledTotal
+}
+
+/** A flat "no-activity" candle anchored to the previous close (TradingView-style
+ *  continuity). volume is 0 and OHLC are all the previous close — these are
+ *  placeholders until the async cache repair replaces them with real rows. */
+function flatCandle(anchor: { symbol: string; exchange: Exchange; timeframe: string }, time: number, prevClose: number): UnifiedCandle {
+  return {
+    symbol: anchor.symbol,
+    exchange: anchor.exchange,
+    timeframe: anchor.timeframe,
+    time,
+    open: prevClose,
+    high: prevClose,
+    low: prevClose,
+    close: prevClose,
+    volume: 0,
+    isFinal: true,
+  }
+}
+
+/**
+ * Insert flat candles for every missing period so the returned series is
+ * CONTIGUOUS — a client must never paint a hole regardless of where it came
+ * from (memory cache, Redis chunk, exchange). Cheap O(n) single pass; returns
+ * the input unchanged when there is nothing to fill. Assumes sorted input.
+ */
+export function fillGaps(candles: UnifiedCandle[], symbol: string, exchange: Exchange, tf: string): UnifiedCandle[] {
+  const tfSec = TF_SECONDS[tf]
+  if (!tfSec || candles.length < 2) return candles
+  let prev: UnifiedCandle | null = null
+  let output: UnifiedCandle[] | null = null
+  for (const c of candles) {
+    if (prev && c.time > prev.time) {
+      const diff = c.time - prev.time
+      const periods = Math.round(diff / tfSec)
+      if (periods > 1) {
+        const missing = Math.min(periods - 1, MAX_FILL_WINDOW)
+        if (missing > 0) {
+          if (!output) output = candles.slice(0, candles.indexOf(c))
+          for (let i = 1; i <= missing; i++) {
+            output.push(flatCandle(c, prev.time + i * tfSec, prev.close))
+            syntheticFilledTotal++
+          }
+          output.push(c)
+          continue
+        }
+      }
+    }
+    if (output) output.push(c)
+    prev = c
+  }
+  return output || candles
+}
+
 class LRU {
 private map = new Map<string, { prev: string | null; next: string | null }>()
 private head: string | null = null
@@ -154,8 +225,27 @@ export function updateCachedCandle(candle: UnifiedCandle): void {
     return
   }
   if (lastIdx >= 0 && candle.time > arr[lastIdx].time) {
+    // The stream skipped one or more periods (Binance hiccup, WS reconnect,
+    // backpressure). Fill the skipped buckets with flat candles NOW so the
+    // cache never holds a permanent hole — a real row replaces the filler
+    // later via the async repair or the next cache write.
+    let added = 1
+    const tfSec = TF_SECONDS[candle.timeframe]
+    if (tfSec) {
+      const diff = candle.time - arr[lastIdx].time
+      const periods = Math.round(diff / tfSec)
+      const missing = Math.min(periods - 1, MAX_FILL_WINDOW)
+      if (missing > 0) {
+        const prevClose = arr[lastIdx].close
+        for (let i = 1; i <= missing; i++) {
+          arr.push(flatCandle(candle, arr[lastIdx].time + i * tfSec, prevClose))
+          syntheticFilledTotal++
+        }
+        added += missing
+      }
+    }
     arr.push(candle)
-    totalCandleCount++
+    totalCandleCount += added
     if (arr.length > MAX_CANDLES_PER_KEY + 200) {
       const excess = arr.length - MAX_CANDLES_PER_KEY
       arr.splice(0, excess)

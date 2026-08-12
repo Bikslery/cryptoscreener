@@ -90,4 +90,17 @@ export const rateLimit418Counter = new client.Counter({
   registers: [register]
 })
 
+// --- Candle cache continuity / repair ---
+export const candleCacheHolesGauge = new client.Gauge({
+  name: 'cs_candle_cache_holes',
+  help: 'Holes (missing periods) found in the candle cache by the latest repair audit',
+  registers: [register]
+})
+
+export const candleCacheRepairsTotal = new client.Counter({
+  name: 'cs_candle_cache_repairs_total',
+  help: 'Candle-cache hole repairs performed',
+  registers: [register]
+})
+
 export { register }

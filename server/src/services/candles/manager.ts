@@ -4,6 +4,7 @@ import { getTicker } from '../aggregator/index.js'
 import type { UnifiedCandle, Exchange } from '../../types.js'
 import { subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
+import { repairCacheWindow } from './repair.js'
 
 // Exchanges are honest, independent sources: the client picks the source
 // explicitly (binance-spot / binance-futures / bybit-futures) and candles are
@@ -51,20 +52,20 @@ const candleDiagState = {
 }
 const MAX_RECENT_GAPS = 50
 
-function recordInboundCandle(candle: UnifiedCandle) {
+function recordInboundCandle(candle: UnifiedCandle): GapEvent | null {
   candleDiagState.candlesReceived++
   const key = `${candle.exchange}:${candle.symbol}:${candle.timeframe}`
   const prev = candleDiagState.lastSeen.get(key)
   candleDiagState.lastSeen.set(key, candle.time)
-  if (prev == null) return
-  if (candle.time === prev) return // normal repeat update of the same period
+  if (prev == null) return null
+  if (candle.time === prev) return null // normal repeat update of the same period
   if (candle.time < prev) {
     candleDiagState.lateCandles++
-    return
+    return null
   }
   const tfSec = TF_SECONDS[candle.timeframe] || 60
   const periods = Math.round((candle.time - prev) / tfSec)
-  if (periods <= 1) return
+  if (periods <= 1) return null
   const missing = periods - 1
   candleDiagState.gapsDetected++
   const ev: GapEvent = {
@@ -82,6 +83,7 @@ function recordInboundCandle(candle: UnifiedCandle) {
       `[Diag][Manager] Candle gap on server input ${key}: missing ${missing} periods [${ev.from}..${ev.to}]`
     )
   }
+  return ev
 }
 
 export function getCandleDiagStats(): CandleDiagStats {
@@ -144,8 +146,20 @@ function getBestAdapter(symbol: string, adapters: ExchangeAdapter[], preferredEx
 export function createCandleManager(adapters: ExchangeAdapter[]) {
   const candleCallback: CandleCallback = (candle: UnifiedCandle) => {
     const channel = `candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`
-    recordInboundCandle(candle)
+    const gap = recordInboundCandle(candle)
     broadcastToChannel(channel, candle, true)
+    if (gap) {
+      // INSTANT REPAIR: the stream skipped periods → the cache just got flat
+      // placeholders for them. Replace them with real exchange rows right away
+      // (deduped in-flight, rate-limit aware inside getHistory).
+      repairCacheWindow(candle.symbol, candle.timeframe, candle.exchange)
+        .then(ev => {
+          if (ev && DIAG_LOG) {
+            console.warn(`[Diag][Manager] cache repaired after inbound gap ${ev.key}: filled=${ev.filledReal}/${ev.periodsMissing}`)
+          }
+        })
+        .catch(() => {})
+    }
   }
 
   const depthCallback = (depth: any) => {

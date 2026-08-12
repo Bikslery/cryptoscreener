@@ -12,6 +12,7 @@ import { startTelegramPolling } from './services/telegram/bot.js'
 import { createCandleManager, createRemoteCandleManager } from './services/candles/manager.js'
 import { startPreload } from './services/candles/preload.js'
 import { flushHistoryChunkCache } from './services/candles/history.js'
+import { startCacheRepairWatchdog } from './services/candles/repair.js'
 import authRoutes from './routes/auth.js'
 import coinRoutes from './routes/coins.js'
 import watchlistRoutes from './routes/watchlists.js'
@@ -112,6 +113,9 @@ async function main() {
     const candleManager = createCandleManager(adapters)
     setCandleManager(candleManager)
     startPreload(adapters, candleManager)
+    // Guarantee "no holes ever": periodic audit+repair of the candle cache
+    // (plus instant repair on inbound WS gap detection in the manager).
+    startCacheRepairWatchdog()
     startAlertEngine()
     startTelegramPolling()
     // Broadcast nodes forward client candle/depth subscriptions here via Redis.
