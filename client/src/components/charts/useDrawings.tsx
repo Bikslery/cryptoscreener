@@ -89,7 +89,10 @@ function computeUpdatedDrawingData(
   candleData: ReadonlyArray<UnifiedCandle> | null,
 ): HRayDrawing | TwoPointDrawing {
   if (drawing.type === 'h-ray') {
-    return { price, time, logical }
+    // Keep the style through a drag — an alert ray (dashed) must not turn
+    // into a plain solid line when moved.
+    const data = drawing.data as HRayDrawing
+    return { price, time, logical, ...(data.style ? { style: data.style } : {}) }
   }
 
   if (isTwoPointTool(drawing.type as DrawingTool)) {

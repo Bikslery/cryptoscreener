@@ -532,4 +532,35 @@ describe('useDrawings — price-alert tool', () => {
     })
     expect(useDrawingHotkeysStore.getState().activeTool).toBeNull()
   })
+
+  it('keeps the dashed style when the alert ray is dragged', () => {
+    const { result } = renderHook((p: HookProps) => useDrawingsHarness(p), {
+      initialProps: {
+        symbol: 'BTCUSDT', tf: '5m', chartVersion: 1, isInitialLoading: false, refs, candlesData: candles,
+      },
+    })
+    act(() => {
+      useDrawingHotkeysStore.getState().activateTool('alert')
+    })
+    act(() => {
+      result.current.handleClick({ clientX: 60, clientY: 120 } as MouseEvent)
+    })
+    expect(result.current.drawings.length).toBe(1)
+    expect((result.current.drawings[0].data as { style?: string }).style).toBe('dashed')
+
+    // Drag the line: the mock places it at y = priceToCoordinate(price) = 200.
+    act(() => {
+      result.current.handleMouseDown({ clientX: 60, clientY: 200 } as MouseEvent)
+    })
+    act(() => {
+      result.current.handleMouseMove({ clientX: 80, clientY: 250 } as MouseEvent)
+    })
+    act(() => {
+      result.current.handleMouseUp({ clientX: 80, clientY: 250 } as MouseEvent)
+    })
+
+    // The drag must not strip the dashed marker — it stays an alert ray.
+    expect(result.current.drawings.length).toBe(1)
+    expect((result.current.drawings[0].data as { style?: string }).style).toBe('dashed')
+  })
 })
