@@ -1,9 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
-import type { Drawing, DrawingTool, HRayDrawing, TwoPointDrawing, UnifiedCandle } from '../../types'
+import type { Drawing, DrawingTool, HRayDrawing, TwoPointDrawing, UnifiedCandle, Alert } from '../../types'
 import { isTwoPointTool } from '../../types'
 import api from '../../services/api'
-import { useAuthStore, useCoinListStore } from '../../store'
+import { useAuthStore, useCoinListStore, useAlertStore } from '../../store'
 import { useDrawingHotkeysStore, isInputFocused } from '../../store/drawingHotkeys'
 import { DrawingsPrimitive, resolveExactX, logicalToTime, findBarByTime } from './drawings/primitive'
 
@@ -454,7 +454,12 @@ export function useDrawings(
           symbol: curSymbol,
           exchange: coin?.exchange ?? null,
           condition: { price, direction },
-        }).catch(() => { /* alert engine covers failures silently */ })
+        })
+          .then((res) => {
+            // Show the created alert in the Уведомления list right away.
+            useAlertStore.getState().addCreated(res.data as Alert)
+          })
+          .catch(() => { /* alert engine covers failures silently */ })
       }
       setActiveTool(null)
       clearPending()

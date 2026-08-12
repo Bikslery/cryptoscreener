@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useAlertStore, useAuthStore, useCoinListStore } from '../../store'
+import type { Alert } from '../../types'
 import api from '../../services/api'
 import { formatPrice, extractBaseAsset } from '../../utils/format'
 import { Bell, TrendingUp, List, BellOff, X, Plus } from 'lucide-react'
@@ -25,7 +26,9 @@ function CreateAlertForm({ onClose }: { onClose: () => void }) {
       ? { price: parseFloat(price), direction }
       : { percent: parseFloat(percent), within: '5m' }
 
-    await api.post('/alerts', { type, symbol: symbol.toUpperCase() || 'ANY', condition })
+    const res = await api.post('/alerts', { type, symbol: symbol.toUpperCase() || 'ANY', condition })
+    // Show the created alert in the list right away — not only when it fires.
+    useAlertStore.getState().addCreated(res.data as Alert)
     onClose()
   }
 
@@ -158,7 +161,13 @@ export function AlertStack() {
                 </div>
                 <div className="text-[11px] text-[#888]">
                   {alert.type === 'price' && (
-                    <span>Цена: <span className="text-[#e5e5e5]">${formatPrice(alert.price, coinMap.get(alert.symbol)?.pricePrecision ?? 2)}</span></span>
+                    <span>
+                      <span className="text-[#666]">{!alert.price ? 'Уровень: ' : 'Цена: '}</span>
+                      <span className="text-[#e5e5e5]">${formatPrice(alert.price ?? (alert.condition as any)?.price, coinMap.get(alert.symbol)?.pricePrecision ?? 2)}</span>
+                      {(alert.condition as any)?.direction && (
+                        <span className="ml-1 text-[#666]">{(alert.condition as any).direction === 'above' ? 'выше' : 'ниже'}</span>
+                      )}
+                    </span>
                   )}
                   {alert.type === 'impulse' && (
                     <span className={style.text}>{alert.condition?.percent}% движение</span>

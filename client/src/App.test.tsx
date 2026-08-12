@@ -53,10 +53,19 @@ vi.mock('./store', () => {
     checkSession: vi.fn(),
   })
 
+  const alertStore = makeStore({
+    alerts: [],
+    init: () => vi.fn(),
+    addCreated: vi.fn(),
+    dismissAlert: vi.fn(),
+    muteAlert: vi.fn(),
+  })
+
   return {
     useUIStore: buildHook(uiStore),
     useCoinListStore: buildHook(coinListStore),
     useAuthStore: buildHook(authStore),
+    useAlertStore: buildHook(alertStore),
   }
 })
 

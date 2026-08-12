@@ -519,6 +519,8 @@ export const useChartStore = create<ChartStore>((set) => ({
 interface AlertStore {
   alerts: AlertType[]
   init: () => () => void
+  /** Show an alert the user just created (from the form or the chart bell tool). */
+  addCreated: (alert: AlertType) => void
   dismissAlert: (id: string) => void
   muteAlert: (id: string) => void
 }
@@ -530,6 +532,13 @@ export const useAlertStore = create<AlertStore>((set) => ({
     const unsub = wsOnType('alert', (msg) => {
       const alert = msg.data as AlertType
       set((s) => {
+        // The same alert id is usually already in the list as a CREATED entry
+        // (added right when the user made it) — upgrade it to the fired event
+        // (price + triggeredAt) instead of showing a duplicate card.
+        const existing = s.alerts.find(a => a.id === alert.id)
+        if (existing) {
+          return { alerts: s.alerts.map(a => a.id === alert.id ? { ...a, ...alert, active: false } : a) }
+        }
         const next = [alert, ...s.alerts]
         // Cap at 100 to prevent unbounded growth
         return { alerts: next.slice(0, 100) }
@@ -539,6 +548,11 @@ export const useAlertStore = create<AlertStore>((set) => ({
     })
     return unsub
   },
+
+  addCreated: (alert) => set((s) => {
+    if (s.alerts.some(a => a.id === alert.id)) return s
+    return { alerts: [alert, ...s.alerts].slice(0, 100) }
+  }),
 
   dismissAlert: (id) => set((s) => ({
     alerts: s.alerts.filter(a => a.id !== id),

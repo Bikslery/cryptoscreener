@@ -10,7 +10,7 @@ const AuthModal = lazy(() => import('./components/auth/AuthModal'))
 const ProfileModalGate = lazy(() => import('./components/auth/ProfileModal').then(m => ({ default: m.ProfileModalGate })))
 const ExchangeModalGate = lazy(() => import('./components/exchange/ExchangeModal').then(m => ({ default: m.ExchangeModalGate })))
 const TickerSearchModalGate = lazy(() => import('./components/search/TickerSearchModal').then(m => ({ default: m.TickerSearchModalGate })))
-import { useCoinListStore, useAuthStore, useUIStore } from './store'
+import { useCoinListStore, useAuthStore, useUIStore, useAlertStore } from './store'
 import { useDrawingHotkeysStore } from './store/drawingHotkeys'
 import { wsConnect, wsDisconnect, ensureHealthyConnection } from './services/ws'
 import { initAlertNotifications } from './services/alert-notify'
@@ -31,6 +31,7 @@ const TIMEFRAME_HOTKEYS: Record<string, Timeframe> = {
 
 function App() {
   const coinListInit = useCoinListStore(s => s.init)
+  const alertInit = useAlertStore(s => s.init)
   const checkSession = useAuthStore(s => s.checkSession)
   const isChecking = useAuthStore(s => s.isChecking)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
@@ -53,6 +54,9 @@ function App() {
     wsConnect()
     initAlertNotifications()
     const unsub = coinListInit()
+    // Fired alerts must reach the page (cards + sound + native notifications) —
+    // without this WS listener they only ever arrive in Telegram.
+    const unsubAlerts = alertInit()
 
     // Browsers throttle/suspend background tabs, which can silently kill the
     // WebSocket. Re-validate the connection the instant the user comes back or
@@ -77,10 +81,11 @@ function App() {
       window.removeEventListener('focus', revive)
       window.removeEventListener('online', revive)
       window.removeEventListener('pageshow', revive)
+      unsubAlerts()
       unsub()
       wsDisconnect()
     }
-  }, [coinListInit, isChecking, isLoggedIn])
+  }, [coinListInit, alertInit, isChecking, isLoggedIn])
 
   // Пробел — перейти к следующей странице мини-графиков (на последней останавливается).
   // Любая буква — открыть модалку поиска тикера и ввести её в поле.

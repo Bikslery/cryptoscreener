@@ -29,6 +29,10 @@ vi.mock('../../../store', () => {
       selector({ isLoggedIn: true }),
     // The hook also reads useCoinListStore.getState().coinMap (alert tool).
     useCoinListStore: Object.assign(coinListStore, { getState: () => ({ coinMap }) }),
+    useAlertStore: Object.assign(
+      (selector: (s: { alerts: unknown[] }) => unknown) => selector({ alerts: [] }),
+      { getState: () => ({ alerts: [], addCreated: vi.fn() }) },
+    ),
   }
 })
 
