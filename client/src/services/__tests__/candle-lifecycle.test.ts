@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createCandleLifecycle, type TradePayload } from '../candle-lifecycle'
 import type { UnifiedCandle, Exchange } from '../../types'
 
@@ -358,11 +358,17 @@ describe('candle-lifecycle', () => {
   })
 
   describe('applyMid (bookTicker fast-lane)', () => {
+    afterEach(() => { vi.useRealTimers() })
+
     it('moves the forming candle close/high/low without touching volume', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(1_000_000_000_000))
       const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
       lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
       // Seed the forming candle with a trade.
       lc.applyTrade(makeTrade(320, 108, 2))
+      // Pause window elapses → mid is fully trusted (weight = 1).
+      vi.advanceTimersByTime(2500)
 
       const patch = lc.applyMid(107.5)
       expect(patch.candleUpdates).toHaveLength(1)
@@ -377,9 +383,12 @@ describe('candle-lifecycle', () => {
     })
 
     it('extends high/low when mid moves beyond the trade range', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(1_000_000_000_000))
       const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
       lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
       lc.applyTrade(makeTrade(320, 108, 2))
+      vi.advanceTimersByTime(2500)
 
       const patch = lc.applyMid(112)
       const c = patch.candleUpdates[0]
@@ -405,9 +414,12 @@ describe('candle-lifecycle', () => {
     })
 
     it('keeps the wick monotonic — a lagged kline snapshot can never pull the extremes back', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(1_000_000_000_000))
       const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
       lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
       lc.applyTrade(makeTrade(320, 108, 2))
+      vi.advanceTimersByTime(2500)
 
       // First kline: trade is newer → merge, high stays 110 / low stays 95.
       lc.applyKline(makeCandle(300, 100, 109, 96, 106, 45))
@@ -496,6 +508,75 @@ describe('candle-lifecycle', () => {
       const c = patch.candleUpdates[0]
       expect(c.open).toBe(110)
       expect(c.isFinal).toBe(true)
+    })
+  })
+
+  describe('mid is weighted to the last trade (motion in pauses, no yanking)', () => {
+    afterEach(() => { vi.useRealTimers() })
+
+    it('keeps the close at the real print right after a trade', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(1_000_000_000_000))
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+      lc.applyTrade(makeTrade(320, 108, 2)) // close = 108 (real print)
+
+      vi.advanceTimersByTime(100) // 100ms after the trade → w = 0.05
+      const patch = lc.applyMid(110) // mid 2 points above the print
+      const c = patch.candleUpdates[0]
+      expect(c.close).toBeCloseTo(108 + (110 - 108) * 0.05, 3)
+    })
+
+    it('blends partially halfway through the pause', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(1_000_000_000_000))
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+      lc.applyTrade(makeTrade(320, 108, 2))
+
+      vi.advanceTimersByTime(1000) // w = 0.5
+      const patch = lc.applyMid(110)
+      expect(patch.candleUpdates[0].close).toBeCloseTo(109, 3)
+    })
+
+    it('fully follows the mid after the pause window', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(1_000_000_000_000))
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+      lc.applyTrade(makeTrade(320, 108, 2))
+
+      vi.advanceTimersByTime(2500) // w = 1
+      const patch = lc.applyMid(110)
+      const c = patch.candleUpdates[0]
+      expect(c.close).toBe(110)
+      expect(c.high).toBe(110) // wick covers the blended close
+    })
+
+    it('a new trade re-anchors the close immediately', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(1_000_000_000_000))
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+      lc.applyTrade(makeTrade(320, 108, 2))
+
+      vi.advanceTimersByTime(2500)
+      lc.applyMid(110) // close drifts to 110 (mid)
+
+      vi.advanceTimersByTime(100)
+      const patch = lc.applyTrade(makeTrade(322, 106, 5)) // new real print at 106
+      const c = patch.candleUpdates[0]
+      expect(c.close).toBe(106)
+    })
+
+    it('follows the mid directly when no trade has been seen yet', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date(1_000_000_000_000))
+      const lc = createCandleLifecycle({ symbol: SYM, exchange: EX, tf: TF, tfSeconds: TF_SEC })
+      lc.applyHistory([makeCandle(300, 100, 110, 95, 105, 50)])
+
+      const patch = lc.applyMid(107)
+      expect(patch.candleUpdates[0].close).toBe(107)
     })
   })
 })

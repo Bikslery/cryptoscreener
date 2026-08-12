@@ -59,7 +59,19 @@ interface TailEntry {
   candle: UnifiedCandle
   lastTradeAt: number
   lastKlineAt: number
+  /** Wall-clock of the last trade on this candle — anchor for mid weighting. */
+  lastTradeWallAt: number
+  /** Price of the last trade on this candle — mid blends toward/away from it. */
+  lastTradePrice: number
 }
+
+/**
+ * How long after a trade the mid is still suppressed (weighted price).
+ * Right after a trade the close stays at the REAL print; the mid only gains
+ * influence as this pause elapses, so the candle breathes with the book in
+ * quiet stretches instead of being yanked toward every quote.
+ */
+const MID_WEIGHT_PAUSE_MS = 2000
 
 /**
  * Buffered realtime event (scalpboard/cryptoscreener-style reconciliation):
@@ -137,10 +149,13 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
 
   function updateTailEntry(index: number, candle: UnifiedCandle, source: 'trade' | 'kline') {
     const existing = tail[index]
+    const isTrade = source === 'trade'
     tail[index] = {
       candle,
-      lastTradeAt: source === 'trade' ? nextSeq() : existing.lastTradeAt,
+      lastTradeAt: isTrade ? nextSeq() : existing.lastTradeAt,
       lastKlineAt: source === 'kline' ? nextSeq() : existing.lastKlineAt,
+      lastTradeWallAt: isTrade ? Date.now() : existing.lastTradeWallAt,
+      lastTradePrice: isTrade ? candle.close : existing.lastTradePrice,
     }
   }
 
@@ -168,6 +183,8 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
         candle: { ...valid[i], source: valid[i].source || 'kline' },
         lastTradeAt: 0,
         lastKlineAt: valid[i].source === 'kline' ? nextSeq() : 0,
+        lastTradeWallAt: 0,
+        lastTradePrice: 0,
       })
     }
 
@@ -226,6 +243,8 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
         candle: newCandle,
         lastTradeAt: nextSeq(),
         lastKlineAt: 0,
+        lastTradeWallAt: Date.now(),
+        lastTradePrice: trade.price,
       })
       updatedCandles = [newCandle]
     } else if (candleTime === current.candle.time || tradeSec === current.candle.time) {
@@ -260,6 +279,8 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
         candle: newCandle,
         lastTradeAt: nextSeq(),
         lastKlineAt: 0,
+        lastTradeWallAt: Date.now(),
+        lastTradePrice: trade.price,
       })
       updatedCandles = [newCandle]
       return patchFromCandles(updatedCandles, trade.price, updatedCandles, gap)
@@ -285,22 +306,33 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
     if (!current) return EMPTY_PATCH
 
     const existing = current.candle
+    // WEIGHTED PRICE (last trade > mid). The close is anchored to the last
+    // real print and the mid only gains influence as time passes without a
+    // trade: right after a trade the candle stays at the print (no yanking
+    // toward every quote), after MID_WEIGHT_PAUSE_MS of silence it breathes
+    // fully with the book. Trades still snap the close to the real price.
+    let close = price
+    if (current.lastTradePrice > 0) {
+      const sinceTrade = Date.now() - current.lastTradeWallAt
+      const w = Math.min(1, Math.max(0, sinceTrade / MID_WEIGHT_PAUSE_MS))
+      close = current.lastTradePrice + (price - current.lastTradePrice) * w
+    }
     const updated: UnifiedCandle = {
       ...existing,
-      high: Math.max(existing.high, price),
-      low: Math.min(existing.low, price),
-      close: price,
+      high: Math.max(existing.high, close),
+      low: Math.min(existing.low, close),
+      close,
       source: 'mid',
     }
     const idx = getTailIndex(existing.time)
     if (idx >= 0) {
       // Keep lastTradeAt/lastKlineAt ordering untouched: a later kline must
-      // still REPLACE the mid-inflated high/low with the exchange's real
+      // still replace the mid-inflated high/low with the exchange's real
       // values (if we bumped lastTradeAt, applyKline would merge instead and
       // keep the inflated range until the candle finalizes).
       tail[idx] = { ...tail[idx], candle: updated }
     }
-    return patchFromCandles([updated], price)
+    return patchFromCandles([updated], close)
   }
 
   function applyKline(kline: UnifiedCandle): CandlePatch {
@@ -335,6 +367,8 @@ export function createCandleLifecycle(opts: CandleLifecycleOpts): CandleLifecycl
           candle: newCandle,
           lastTradeAt: 0,
           lastKlineAt: nextSeq(),
+          lastTradeWallAt: 0,
+          lastTradePrice: 0,
         })
         return patchFromCandles([newCandle], kline.close, [newCandle], gap)
       }
