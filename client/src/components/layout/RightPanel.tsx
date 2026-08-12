@@ -12,7 +12,7 @@ export const RightPanel = memo(function RightPanel() {
   const [tab, setTab] = useState<Tab>('charts')
 
   return (
-    <div className="w-[400px] h-full flex flex-col bg-[#0a0a0a]">
+    <div className="w-[480px] h-full flex flex-col bg-[#0a0a0a]">
       {/* Tabs */}
       <div className="flex items-center h-[36px] bg-[#0e0e0e] border-b border-[#1f1f1f] flex-shrink-0 select-none">
         <button

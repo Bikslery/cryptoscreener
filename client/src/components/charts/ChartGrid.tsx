@@ -16,7 +16,8 @@ import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BOR
 import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload, type GapBackfill } from '../../services/candle-lifecycle'
 import { isFiniteOHLCV, validateCandle, normalizeCandle } from '../../services/candle-utils'
 import { applyCandleUpdates } from '../../services/candle-merge'
-import { stepFormingAnimation, type FormingTarget } from '../../services/candle-anim'
+import { beginFormingGlide, advanceFormingGlide, type FormingTarget, type FormingGlide } from '../../services/candle-anim'
+import { registerGlider, unregisterGlider, glideDurationFor, type Glider } from '../../services/glide'
 import { computeCursorAnchoredZoomRange } from '../../services/chart-zoom'
 import { useDrawings } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
@@ -98,17 +99,18 @@ function repaintSeries(
  *
  * The backing array stays authoritative and exact; this animator only
  * interpolates what gets PAINTED on the last (forming) bar. Each live update
- * (trade / bookTicker mid / non-final kline) sets a new target; a rAF loop
- * glides the displayed OHLC toward it with exponential smoothing and stops
- * when converged (~100ms). Final candles, history loads and repaints always
- * paint exact values — the animation never touches data.
+ * (trade / bookTicker mid / non-final kline) sets a new target; a shared
+ * rAF coordinator glides the displayed OHLC toward it with TIME-BASED easing
+ * (easeOutCubic) and an ADAPTIVE duration — active pairs (updates every few
+ * ms) converge almost instantly, quiet symbols glide long and smooth. Final
+ * candles, history loads and repaints always paint exact values — the
+ * animation never touches data.
  */
-const FORMING_GLIDE_K = 0.45
-
-class FormingAnimator {
+class FormingAnimator implements Glider {
   private displayed: FormingTarget | null = null
   private target: FormingTarget | null = null
-  private rafId: number | null = null
+  private glide: FormingGlide | null = null
+  private lastTargetAt = 0
   private readonly series: ISeriesApi<'Candlestick'>
   private readonly getRef: () => ISeriesApi<'Candlestick'> | null
 
@@ -118,7 +120,7 @@ class FormingAnimator {
   }
 
   get isAnimating(): boolean {
-    return this.rafId !== null
+    return this.glide !== null
   }
 
   /** Route a live forming-candle update through the animator. Returns true when handled. */
@@ -127,42 +129,45 @@ class FormingAnimator {
     if (!this.displayed || this.displayed.time !== t.time) {
       // New bar (or first seed after a repaint): snap exactly — the glide
       // must never stretch across period boundaries.
+      this.glide = null
+      unregisterGlider(this)
       this.target = t
       this.displayed = { ...t }
       this.paintSeries(this.displayed)
       return true
     }
     this.target = t
-    this.ensureLoop()
+    // Adaptive duration from how long it's been since the last live update.
+    const now = performance.now()
+    const interval = this.lastTargetAt === 0 ? 0 : now - this.lastTargetAt
+    this.lastTargetAt = now
+    this.glide = beginFormingGlide({ ...this.displayed }, t, glideDurationFor(interval))
+    registerGlider(this)
+    return true
+  }
+
+  /** Advance one frame (driven by the shared rAF coordinator). */
+  tick(dt: number): boolean {
+    if (this.getRef() !== this.series || !this.target || !this.displayed || !this.glide) return false
+    const { next, converged, glide } = advanceFormingGlide(this.glide, dt)
+    this.glide = glide
+    if (converged) {
+      this.glide = null
+      this.displayed = { ...this.target }
+      this.paintSeries(this.displayed)
+      return false
+    }
+    this.displayed = next
+    this.paintSeries(next)
     return true
   }
 
   /** A final kline (or any repaint) must show exact values — stop the glide. */
   reset() {
-    if (this.rafId !== null) {
-      cancelAnimationFrame(this.rafId)
-      this.rafId = null
-    }
+    this.glide = null
+    unregisterGlider(this)
     this.displayed = null
     this.target = null
-  }
-
-  private ensureLoop() {
-    if (this.rafId !== null) return
-    const tick = () => {
-      this.rafId = null
-      if (this.getRef() !== this.series || !this.target || !this.displayed) return
-      const { next, converged } = stepFormingAnimation(this.displayed, this.target, FORMING_GLIDE_K)
-      if (converged) {
-        this.displayed = { ...this.target }
-        this.paintSeries(this.displayed)
-        return
-      }
-      this.displayed = next
-      this.paintSeries(next)
-      this.rafId = requestAnimationFrame(tick)
-    }
-    this.rafId = requestAnimationFrame(tick)
   }
 
   private paintSeries(t: FormingTarget) {

@@ -36,6 +36,39 @@ function renderRow(quoteVolume24h: number) {
   return getByTestId('vol-cell')
 }
 
+describe('CoinList Row — live price cell', () => {
+  it('paints the initial price immediately (no glide from nothing)', () => {
+    const { getByTestId } = render(
+      <Row
+        coin={makeCoin(1000)}
+        isSelected={false}
+        isOnPage={false}
+        isNextOnPage={false}
+        onClick={vi.fn()}
+        onPrefetch={vi.fn()}
+      />,
+    )
+    const cell = getByTestId('price-cell')
+    expect(cell.textContent).toBe('100.00')
+  })
+
+  it('glides the displayed value toward the live price on the shared coordinator', () => {
+    const { getByTestId, unmount } = render(
+      <Row
+        coin={makeCoin(1000)}
+        isSelected={false}
+        isOnPage={false}
+        isNextOnPage={false}
+        onClick={vi.fn()}
+        onPrefetch={vi.fn()}
+      />,
+    )
+    const cell = getByTestId('price-cell')
+    expect(cell.textContent).toBe('100.00')
+    unmount() // no stray rAF frames after teardown (glider unregisters)
+  })
+})
+
 describe('CoinList Row — volume highlight', () => {
   it('renders high volume (>= threshold) in bright white', () => {
     const cell = renderRow(VOLUME_HIGH_THRESHOLD)

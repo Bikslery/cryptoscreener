@@ -1,9 +1,10 @@
 import { memo, useCallback, useMemo, useRef, useEffect } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
-import { useCoinListStore } from '../../store'
+import { useCoinListStore, useLivePrice } from '../../store'
 import type { UnifiedTicker } from '../../types'
-import { formatCompact, extractBaseAsset } from '../../utils/format'
+import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { getOrFetchHistory } from '../../services/candle-prefetch'
+import { registerGlider, unregisterGlider, beginScalarGlide, advanceScalarGlide, glideDurationFor, type Glider } from '../../services/glide'
 import { VOLUME_HIGH_THRESHOLD } from '../../constants/volume'
 
 type ColKey = keyof UnifiedTicker
@@ -17,11 +18,14 @@ interface ColumnDef {
 
 const COLS: ColumnDef[] = [
   { key: 'symbol', header: 'Тикер', subheader: '', width: '80px' },
+  { key: 'price', header: 'ЦЕНА', subheader: '', width: '88px' },
   { key: 'change24h', header: 'ИЗМ', subheader: '24ч', width: '72px' },
   { key: 'range1m', header: 'РЕНЖ', subheader: '1м/5', width: '72px' },
   { key: 'natr5m', header: 'NATR', subheader: '5м/14', width: '72px' },
   { key: 'quoteVolume24h', header: 'ОБЪЁМ', subheader: '24ч', width: '80px' },
 ]
+
+const ROW_COLS = '80px 88px 72px 72px 72px 80px'
 
 function ArrowFlag() {
   return (
@@ -52,6 +56,68 @@ interface RowProps {
   onPrefetch: (symbol: string) => void
 }
 
+/**
+ * Live price cell: glides the DISPLAYED price toward the live value on the
+ * shared rAF coordinator and writes straight to the DOM node — no React
+ * re-render per frame. Re-renders only when ITS symbol's live price changes
+ * (useLivePrice is a per-symbol subscription), so a page of rows costs ~zero
+ * renders during a frame storm while the whole ticker glides smoothly.
+ */
+const LivePriceCell = memo(function LivePriceCell({ symbol, initialPrice, precision }: { symbol: string; initialPrice: number; precision: number }) {
+  const target = useLivePrice(symbol)
+  const spanRef = useRef<HTMLSpanElement>(null)
+  const shownRef = useRef(initialPrice)
+  const targetRef = useRef(target ?? initialPrice)
+  const lastTargetAtRef = useRef(performance.now())
+  const glideRef = useRef<ReturnType<typeof beginScalarGlide> | null>(null)
+  const precisionRef = useRef(precision)
+
+  useEffect(() => {
+    precisionRef.current = precision
+  }, [precision])
+
+  useEffect(() => {
+    const t = target ?? initialPrice
+    if (t !== targetRef.current) {
+      targetRef.current = t
+      lastTargetAtRef.current = performance.now()
+    }
+  }, [target, initialPrice])
+
+  useEffect(() => {
+    const el = spanRef.current
+    if (!el) return
+    el.textContent = formatPrice(shownRef.current, precisionRef.current)
+    const glider: Glider = {
+      tick(dt) {
+        if (!el.isConnected) return false
+        const t = targetRef.current
+        const s = shownRef.current
+        if (!glideRef.current) {
+          glideRef.current = beginScalarGlide(s, t, glideDurationFor(performance.now() - lastTargetAtRef.current))
+        } else if (glideRef.current.to !== t) {
+          glideRef.current = beginScalarGlide(s, t, glideDurationFor(performance.now() - lastTargetAtRef.current))
+        }
+        const { next, converged, glide } = advanceScalarGlide(glideRef.current, dt)
+        glideRef.current = glide
+        if (converged) {
+          glideRef.current = null
+          shownRef.current = t
+          el.textContent = formatPrice(t, precisionRef.current)
+          return false
+        }
+        shownRef.current = next
+        el.textContent = formatPrice(next, precisionRef.current)
+        return true
+      },
+    }
+    registerGlider(glider)
+    return () => unregisterGlider(glider)
+  }, [initialPrice])
+
+  return <span data-testid="price-cell" ref={spanRef} />
+})
+
 export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage, onClick, onPrefetch }: RowProps) {
   const isUp = coin.change24h >= 0
   const bg = isSelected
@@ -68,13 +134,16 @@ export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage,
   return (
     <div
       className={`grid cursor-pointer transition-colors duration-100 ${bg} ${borderL} ${borderB}`}
-      style={{ gridTemplateColumns: '80px 72px 72px 72px 80px', height: '32px', fontFamily: "'JetBrains Mono', monospace" }}
+      style={{ gridTemplateColumns: ROW_COLS, height: '32px', fontFamily: "'JetBrains Mono', monospace" }}
       onMouseDown={() => onPrefetch(coin.symbol)}
       onClick={() => onClick(coin.symbol)}
     >
       <div className={`flex items-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
         <ArrowFlag />
         {formatVal('symbol', coin)}
+      </div>
+      <div className={`flex items-center justify-end px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+        <LivePriceCell symbol={coin.symbol} initialPrice={coin.price} precision={coin.pricePrecision} />
       </div>
       <div className={`flex items-center justify-end px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
         {formatVal('change24h', coin)}%
@@ -134,10 +203,10 @@ export function CoinList() {
   }, [sortedCoins, selectedSymbol, expandChart, pageSet, highlightActive, onPrefetch])
 
   return (
-    <div className="w-[400px] h-full flex flex-col bg-[#0a0a0a]">
+    <div className="w-[480px] h-full flex flex-col bg-[#0a0a0a]">
       <div
         className="grid border-b border-[#1f1f1f] bg-[#0e0e0e] text-[11px] select-none flex-shrink-0"
-        style={{ gridTemplateColumns: '80px 72px 72px 72px 80px', fontFamily: "'JetBrains Mono', monospace" }}
+        style={{ gridTemplateColumns: ROW_COLS, fontFamily: "'JetBrains Mono', monospace" }}
       >
         {COLS.map((col, i) => (
           <div

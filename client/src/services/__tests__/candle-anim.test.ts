@@ -1,52 +1,59 @@
 import { describe, it, expect } from 'vitest'
-import { stepFormingAnimation } from '../candle-anim'
+import { beginFormingGlide, advanceFormingGlide, type FormingGlide } from '../candle-anim'
+import { easeOutCubic } from '../glide'
 
-describe('stepFormingAnimation — smooth forming-candle glide', () => {
-  it('moves close halfway toward the target with k=0.5 and does not converge', () => {
-    const displayed = { time: 300, open: 100, high: 110, low: 95, close: 100 }
-    const target = { time: 300, open: 100, high: 110, low: 95, close: 110 }
-    const { next, converged } = stepFormingAnimation(displayed, target, 0.5)
-    expect(next.close).toBe(105)
-    expect(converged).toBe(false)
+const displayed = { time: 300, open: 100, high: 110, low: 95, close: 100 }
+const target = { time: 300, open: 100, high: 110, low: 95, close: 110 }
+
+describe('forming-candle glide — time-based easing', () => {
+  it('moves close with eased progress at half duration and does not converge', () => {
+    const r = advanceFormingGlide(beginFormingGlide(displayed, target, 200), 100)
+    // easeOutCubic(0.5) = 0.875 → close = 100 + 10·0.875
+    expect(r.next.close).toBeCloseTo(108.75)
+    expect(r.converged).toBe(false)
   })
 
-  it('extends high/low toward the target', () => {
-    const displayed = { time: 300, open: 100, high: 100, low: 100, close: 100 }
-    const target = { time: 300, open: 100, high: 112, low: 96, close: 108 }
-    const { next } = stepFormingAnimation(displayed, target, 0.5)
-    expect(next.high).toBe(106)
-    expect(next.low).toBe(98)
+  it('extends high/low toward the target with the same eased progress', () => {
+    const t = { time: 300, open: 100, high: 112, low: 96, close: 108 }
+    const r = advanceFormingGlide(beginFormingGlide(displayed, t, 100), 50)
+    const p = easeOutCubic(0.5)
+    expect(r.next.high).toBeCloseTo(110 + 2 * p) // high: 110 → 112
+    expect(r.next.low).toBeCloseTo(95 + 1 * p) // low: 95 → 96
   })
 
-  it('converges exactly with k=1 (snap)', () => {
-    const displayed = { time: 300, open: 100, high: 110, low: 95, close: 100 }
-    const target = { time: 300, open: 100, high: 110, low: 95, close: 108 }
-    const { next, converged } = stepFormingAnimation(displayed, target, 1)
-    expect(next.close).toBe(108)
-    expect(converged).toBe(true)
+  it('converges exactly once elapsed passes the duration', () => {
+    let g: FormingGlide = beginFormingGlide(displayed, target, 90)
+    let r = advanceFormingGlide(g, 90)
+    g = r.glide
+    expect(r.converged).toBe(true)
+    expect(r.next.close).toBe(110)
+    // Further frames keep the exact target — no drift past convergence.
+    r = advanceFormingGlide(g, 16)
+    expect(r.converged).toBe(true)
+    expect(r.next.close).toBe(110)
   })
 
   it('keeps the bar time pinned to the target (never glides across periods)', () => {
-    const displayed = { time: 300, open: 100, high: 110, low: 95, close: 100 }
-    const target = { time: 360, open: 102, high: 103, low: 101, close: 102 }
-    const { next } = stepFormingAnimation(displayed, target, 0.5)
-    expect(next.time).toBe(360)
+    const t = { time: 360, open: 102, high: 103, low: 101, close: 102 }
+    const r = advanceFormingGlide(beginFormingGlide(displayed, t, 100), 50)
+    expect(r.next.time).toBe(360)
   })
 
   it('is monotonic toward the target — the body never overshoots', () => {
-    const displayed = { time: 300, open: 100, high: 110, low: 95, close: 100 }
-    const target = { time: 300, open: 100, high: 110, low: 95, close: 110 }
+    let g = beginFormingGlide(displayed, target, 160)
     let cur = displayed
     let prevClose = cur.close
-    for (let i = 0; i < 30; i++) {
-      const { next, converged } = stepFormingAnimation(cur, target, 0.4)
-      expect(next.close).toBeGreaterThanOrEqual(prevClose)
-      expect(next.close).toBeLessThanOrEqual(target.close)
-      prevClose = next.close
-      // Mirror the FormingAnimator: snap to the exact target on convergence.
-      cur = converged ? { ...target } : next
-      if (converged) break
+    let converged = false
+    for (let i = 0; i < 30 && !converged; i++) {
+      const r = advanceFormingGlide(g, 16)
+      g = r.glide
+      cur = r.converged ? { ...target } : r.next
+      converged = r.converged
+      expect(cur.close).toBeGreaterThanOrEqual(prevClose)
+      expect(cur.close).toBeLessThanOrEqual(target.close)
+      prevClose = cur.close
     }
+    expect(converged).toBe(true)
     expect(cur.close).toBe(target.close)
   })
 })
