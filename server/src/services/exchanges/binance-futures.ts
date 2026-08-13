@@ -88,6 +88,10 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private statsTimer: ReturnType<typeof setInterval> | null = null
   private priceTimer: ReturnType<typeof setInterval> | null = null
   private usingRestFallback = false
+  /** True after the first successful REST 24hr stats poll — the authoritative
+   *  source for the 24h volume fields (the WS miniTicker can report wildly
+   *  inflated volumes, so they are only trusted once REST has confirmed). */
+  private hasRestStats = false
   private lastFullTickers = new Map<string, UnifiedTicker>()
   private candleSubs = new Map<string, CandleCallback>()
   private depthSubs = new Map<string, DepthCallback>()
@@ -273,10 +277,15 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       this.tickerWsReconnectDelay = TICKER_WS_RECONNECT_BASE
       if (this.usingRestFallback) {
         this.usingRestFallback = false
-        if (this.statsTimer) { clearInterval(this.statsTimer); this.statsTimer = null }
+        // Price comes back from the WS stream; the 24h STATS poll keeps
+        // running (REST is the only trustworthy volume source).
         if (this.priceTimer) { clearInterval(this.priceTimer); this.priceTimer = null }
         console.log(`[${this.name}] Switched from REST fallback back to WS`)
       }
+      // Keep polling REST 24hr stats even in WS mode: the WS miniTicker's
+      // volume fields are unreliable (fstream can report inflated 24h
+      // volumes), so the REST stats are the authoritative volume source.
+      this.ensureStatsPoll()
       this.tickerWsPingTimer = setInterval(() => {
         if (this.tickerWs?.readyState === WebSocket.OPEN) {
           this.tickerWs.ping()
@@ -300,7 +309,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       try {
         const arr = JSON.parse(raw.toString())
         if (!Array.isArray(arr)) return
-        this.processTickerArray(arr)
+        this.processTickerArray(arr, true)
       } catch (e) {
         console.error(`[${this.name}] Ticker WS parse error:`, e instanceof Error ? e.message : e)
       }
@@ -329,21 +338,45 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     })
   }
 
+  /** Run the REST 24hr stats poll immediately and on an interval (once).
+   *  The volumes it produces are the authoritative 24h numbers — used both
+   *  in fallback mode and to guard the WS miniTicker's volume fields. */
+  private ensureStatsPoll() {
+    if (this.statsTimer) return
+    this.pollTickerStats()
+    this.statsTimer = setInterval(() => this.pollTickerStats(), TICKER_STATS_POLL_INTERVAL)
+  }
+
   private startRestFallback() {
     if (this.usingRestFallback) return
     this.usingRestFallback = true
-    this.pollTickerStats()
+    this.ensureStatsPoll()
     this.pollTickerPrices()
-    this.statsTimer = setInterval(() => this.pollTickerStats(), TICKER_STATS_POLL_INTERVAL)
     this.priceTimer = setInterval(() => this.pollTickerPrices(), TICKER_PRICE_POLL_INTERVAL)
   }
 
-  private processTickerArray(arr: any[]) {
+  private processTickerArray(arr: any[], fromWs = false) {
     for (const t of arr) {
       const symbol = t.s || t.symbol
       if (!symbol?.endsWith('USDT')) continue
       if (this.exchangeInfoLoaded && !this.cryptoSymbols.has(symbol)) continue
       const ticker = this.parseTicker(t)
+      if (fromWs) {
+        // WS miniTicker is a PRICE snapshot — its 24h volume fields are not
+        // trustworthy (fstream can inflate them by an order of magnitude).
+        // Keep the last REST-confirmed 24h stats; before the first REST poll
+        // lands, zero the volumes so bogus numbers never reach the screen.
+        const prev = this.lastFullTickers.get(ticker.symbol)
+        if (this.hasRestStats && prev) {
+          ticker.volume24h = prev.volume24h
+          ticker.quoteVolume24h = prev.quoteVolume24h
+          ticker.trades24h = prev.trades24h
+        } else {
+          ticker.volume24h = 0
+          ticker.quoteVolume24h = 0
+          ticker.trades24h = 0
+        }
+      }
       // Remember the last full ticker so the fast REST price poll can merge
       // its fresh price into the last-known 24h stats without another heavy call.
       this.lastFullTickers.set(ticker.symbol, ticker)
@@ -370,6 +403,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
         return
       }
       this.rateLimiter.recordSuccess()
+      this.hasRestStats = true
       this.processTickerArray(arr)
     } catch (e) {
       this.rateLimiter.recordError()
