@@ -52,7 +52,7 @@ export interface ChartScaleMargins { top: number; bottom: number }
 export function buildChartOptions(s: ChartSettings, scaleMargins: ChartScaleMargins): DeepPartial<ChartOptions> {
   return {
     timeScale: {
-      secondsVisible: false,
+      secondsVisible: secondsVisibleFor(s.interval),
       minBarSpacing: 0.1,
       borderColor: At('--border', '#242424'),
       timeVisible: timeVisibleFor(s.interval),
@@ -172,4 +172,8 @@ export function volumePaneTop(volumesHeight: number): number {
 
 export function timeVisibleFor(tf: string): boolean {
   return tf !== '1d' && tf !== '1w'
+}
+
+export function secondsVisibleFor(tf: string): boolean {
+  return timeVisibleFor(tf) && windowSeconds(tf) < 60
 }

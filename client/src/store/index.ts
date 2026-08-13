@@ -279,17 +279,19 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
 const livePrices = new Map<string, number>()
 const livePriceListeners = new Map<string, Set<() => void>>()
 
-// --- Live-price publisher: fixed cadence (default 500 ms). --------------
+// --- Live-price publisher: fixed cadence (default 50 ms). ----------------
 // All realtime sources (bookTicker mid, trades, ticker deltas, forming-candle
 // livePrice) funnel into setLivePrice. Instead of forwarding EVERY change (on
 // active symbols that is dozens of times per second), the visible price is
 // sampled: the LATEST value per symbol is published at most once per interval.
+// 50 ms matches scalpboard's live-price flush so the numeric price and the
+// chart's forming candle step in phase on second timeframes.
 // The very first price for a symbol is published immediately so the first
 // paint is instant; everything after that within the window coalesces into a
 // single step. The stored API (getLivePrice / useLivePrice / subscribeLivePrice)
 // is unchanged, so all consumers (CoinList cells, gliding headers) automatically
 // step at the fixed cadence.
-let LIVE_PRICE_INTERVAL_MS = 1000
+let LIVE_PRICE_INTERVAL_MS = 50
 const pendingPrices = new Map<string, number>()
 const lastPublishAt = new Map<string, number>()
 let pendingTimer: ReturnType<typeof setTimeout> | null = null

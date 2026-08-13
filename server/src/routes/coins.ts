@@ -17,7 +17,7 @@ const apiLimiter = rateLimit({
 })
 
 const router = Router()
-const SUPPORTED_TIMEFRAMES = new Set(['1m', '5m', '15m', '1h', '4h', '1d', '1w'])
+const SUPPORTED_TIMEFRAMES = new Set(['1s', '5s', '15s', '1m', '5m', '15m', '1h', '4h', '1d', '1w'])
 const SUPPORTED_EXCHANGES = new Set<Exchange>(['binance-spot', 'binance-futures', 'bybit-futures', 'okx-spot', 'okx-futures'])
 const MAX_CANDLE_LIMIT = 3000
 
@@ -33,6 +33,7 @@ function normalizeLimit(value: unknown, fallback: number): number {
 }
 
 const TF_SECONDS: Record<string, number> = {
+  '1s': 1, '5s': 5, '15s': 15,
   '1m': 60, '5m': 300, '15m': 900,
   '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
 }

@@ -214,7 +214,7 @@ export interface UserSettings {
   cascades?: Partial<CascadesConfig>
 }
 
-export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
+export type Timeframe = '1s' | '5s' | '15s' | '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
 
 export interface WsMessage {
   type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'alert' | 'listing' | 'initial-candles' | 'open'

@@ -14,7 +14,7 @@ const WS_SILENCE_TIMEOUT = 30_000
 const MAX_KLINES_LIMIT = 1000
 
 const TF_MAP: Record<string, string> = {
-  '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d', '1w': '1w',
+  '1s': '1s', '5s': '5s', '15s': '15s', '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d', '1w': '1w',
 }
 
 const STABLECOIN_BASES = new Set([

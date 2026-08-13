@@ -470,7 +470,11 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   }
 
   subscribeCandle(symbol: string, tf: string, cb: CandleCallback) {
-    const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
+    const interval = TF_MAP[tf]
+    // Unknown timeframe (e.g. 1s): futures has no second klines — refusing
+    // beats silently subscribing to a 1m stream under a 1s label.
+    if (!interval) return
+    const stream = `${symbol.toLowerCase()}@kline_${interval}`
     this.candleSubs.set(stream, cb)
     this.candleSubInfo.set(stream, { symbol, tf })
     this.candlePool.addStream(stream)
@@ -483,7 +487,9 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   }
 
   unsubscribeCandle(symbol: string, tf: string) {
-    const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
+    const interval = TF_MAP[tf]
+    if (!interval) return
+    const stream = `${symbol.toLowerCase()}@kline_${interval}`
     this.candleSubs.delete(stream)
     this.candleSubInfo.delete(stream)
     this.candlePool.removeStream(stream)
@@ -630,7 +636,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   }
 
   async fetchCandles(symbol: string, tf: string, limit: number, startTime?: number, endTime?: number, options?: import('./types.js').FetchCandlesOptions): Promise<UnifiedCandle[]> {
-    const interval = TF_MAP[tf] || '1m'
+    const interval = TF_MAP[tf]
+    if (!interval) return []
     const safeLimit = Math.max(1, Math.min(limit, MAX_KLINES_LIMIT))
     const params = new URLSearchParams({ symbol, interval, limit: String(safeLimit) })
     if (startTime !== undefined) params.set('startTime', String(startTime))

@@ -9,6 +9,9 @@ import './TopBar.css'
 const SCANNER_URL = (import.meta.env.VITE_SCANNER_URL as string | undefined) ?? 'http://localhost:5174'
 
 const TF_OPTIONS: { value: Timeframe; label: string }[] = [
+  { value: '1s', label: '1С' },
+  { value: '5s', label: '5С' },
+  { value: '15s', label: '15С' },
   { value: '1m', label: '1М' },
   { value: '5m', label: '5М' },
   { value: '15m', label: '15М' },

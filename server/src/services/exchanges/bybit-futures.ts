@@ -190,7 +190,10 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   }
 
   subscribeCandle(symbol: string, tf: string, cb: CandleCallback) {
-    const interval = TF_MAP[tf] || '5'
+    const interval = TF_MAP[tf]
+    // Bybit futures has no second klines — refusing beats silently
+    // subscribing to a 5-minute stream under a 1s label.
+    if (!interval) return
     const topic = `kline.${interval}.${symbol}`
     this.candleSubs.set(topic, cb)
     if (this.ws?.readyState === WebSocket.OPEN) {
@@ -199,7 +202,8 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   }
 
   unsubscribeCandle(symbol: string, tf: string) {
-    const interval = TF_MAP[tf] || '5'
+    const interval = TF_MAP[tf]
+    if (!interval) return
     const topic = `kline.${interval}.${symbol}`
     this.candleSubs.delete(topic)
     if (this.ws?.readyState === WebSocket.OPEN) {
@@ -225,7 +229,8 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   async fetchCandles(symbol: string, tf: string, limit: number): Promise<UnifiedCandle[]> {
     const category = 'linear'
     const bybitTfMap: Record<string, string> = { '1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1d': 'D', '1w': 'W' }
-    const interval = bybitTfMap[tf] || tf
+    const interval = bybitTfMap[tf]
+    if (!interval) return []
     const url = `https://api.bybit.com/v5/market/kline?category=${category}&symbol=${symbol}&interval=${interval}&limit=${limit}`
     const res = await fetchWithTimeout(url)
     const json = await res.json()
