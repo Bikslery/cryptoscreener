@@ -3,6 +3,8 @@ import { createChart, CandlestickSeries, BarSeries, LineSeries, HistogramSeries,
 import type { IChartApi, ISeriesApi, Time, SeriesType, DeepPartial, CandlestickSeriesOptions, BarSeriesOptions, LineSeriesOptions } from 'lightweight-charts'
 import { useCoinListStore, setLivePrice } from '../../store'
 import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
+import { registerGlider, unregisterGlider, type Glider } from '../../services/glide'
+import { stepFormingAnimation, formingGlideK, type FormingTarget } from '../../services/candle-anim'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount } from '../../services/ws'
@@ -58,6 +60,126 @@ function upsertBar(candlesDataRef: React.RefObject<UnifiedCandle[]>, bar: Unifie
   // Older than the tail is dropped by the events layer — nothing to do.
 }
 
+/**
+ * Smooth forming-candle renderer (scalpboard-style glide).
+ *
+ * The backing array stays authoritative and exact; this animator only
+ * interpolates what gets PAINTED on the last (forming) bar. Each live update
+ * (price tick / kline snapshot for the current period) sets a new target; the
+ * SHARED rAF coordinator (glide.ts) advances it with frame-rate-independent
+ * exponential smoothing and stops when converged (~100ms). Final candles,
+ * history loads and repaints always paint exact values — the animation never
+ * touches data.
+ */
+class FormingAnimator implements Glider {
+  private displayed: FormingTarget | null = null
+  private target: FormingTarget | null = null
+  private running = false
+  private readonly series: ISeriesApi<SeriesType>
+  private readonly getRef: () => ISeriesApi<SeriesType> | null
+
+  constructor(series: ISeriesApi<SeriesType>, getRef: () => ISeriesApi<SeriesType> | null) {
+    this.series = series
+    this.getRef = getRef
+  }
+
+  get isAnimating(): boolean {
+    return this.running
+  }
+
+  /** Route a live forming-candle update through the animator. Returns true when handled. */
+  paint(c: UnifiedCandle): boolean {
+    const t: FormingTarget = { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }
+    if (!this.displayed || this.displayed.time !== t.time) {
+      // New bar (or first seed after a repaint): snap exactly — the glide
+      // must never stretch across period boundaries.
+      this.target = t
+      this.displayed = { ...t }
+      this.paintSeries(this.displayed)
+      return true
+    }
+    this.target = t
+    this.ensureLoop()
+    return true
+  }
+
+  /** A final kline (or any repaint) must show exact values — stop the glide. */
+  reset() {
+    if (this.running) {
+      unregisterGlider(this)
+      this.running = false
+    }
+    this.displayed = null
+    this.target = null
+  }
+
+  /** Shared-coordinator entry: advance one frame, false = converged/stop. */
+  tick(dt: number): boolean {
+    if (this.getRef() !== this.series || !this.target || !this.displayed) return false
+    const { next, converged } = stepFormingAnimation(this.displayed, this.target, formingGlideK(dt))
+    if (converged) {
+      this.displayed = { ...this.target }
+      this.paintSeries(this.displayed)
+      this.running = false
+      return false
+    }
+    this.displayed = next
+    this.paintSeries(next)
+    return true
+  }
+
+  private ensureLoop() {
+    if (this.running) return
+    this.running = true
+    registerGlider(this)
+  }
+
+  private paintSeries(t: FormingTarget) {
+    try {
+      this.series.update({
+        time: toChartTime(t.time) as Time,
+        open: t.open,
+        high: t.high,
+        low: t.low,
+        close: t.close,
+      })
+    } catch {
+      // Series is gone (chart removed / recreated) — stop cleanly.
+      this.reset()
+    }
+  }
+}
+
+// One animator per candle series (chart instance). WeakMap → GC'd with the
+// series; the loop self-stops when the ref no longer points at this series
+// (unmount, or a series recreate like the candlesType flip).
+const formingAnimators = new WeakMap<ISeriesApi<SeriesType>, FormingAnimator>()
+
+function getFormingAnimator(
+  series: ISeriesApi<SeriesType>,
+  getRef: () => ISeriesApi<SeriesType> | null,
+): FormingAnimator {
+  let a = formingAnimators.get(series)
+  if (!a) {
+    a = new FormingAnimator(series, getRef)
+    formingAnimators.set(series, a)
+  }
+  return a
+}
+
+/** Exact-data paths (setData) must stop any pending forming-candle glide. */
+function stopFormingGlide(candleRef: React.RefObject<ISeriesApi<SeriesType> | null>): void {
+  const s = candleRef.current
+  if (s) getFormingAnimator(s, () => candleRef.current).reset()
+}
+
+/** True when the update targets the current forming (last) bar. */
+function isFormingBar(bar: UnifiedCandle, candlesDataRef: React.RefObject<UnifiedCandle[]>): boolean {
+  const arr = candlesDataRef.current
+  const last = arr && arr.length > 0 ? arr[arr.length - 1] : null
+  return !!last && bar.time === last.time
+}
+
 function applyChartPatch(
   patch: ChartEventPatch,
   candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
@@ -68,13 +190,24 @@ function applyChartPatch(
   tf: Timeframe,
 ) {
   const candlesType = useChartSettings.getState().candlesType
+  const series = candleRef.current
+  // Only OHLC series can glide — a line series paints { time, value } only.
+  const animator = series && candlesType !== 'line' ? getFormingAnimator(series, () => candleRef.current) : null
   for (const u of patch.updates) {
     const bar = u.bar
     const t = toChartTime(bar.time) as Time
     try {
       if (candlesType === 'line') {
         candleRef.current?.update({ time: t, value: bar.close })
+      } else if (animator && isFormingBar(bar, candlesDataRef)) {
+        // Live forming-candle update (price tick / current-period kline):
+        // the body GLIDES toward the new price instead of teleporting. The
+        // array keeps the exact authoritative bar (upsertBar below).
+        animator.paint(bar)
       } else {
+        // New period / full snapshot: paint exact values, stop any pending
+        // glide so it can't overwrite them on the next frame.
+        if (animator) animator.reset()
         candleRef.current?.update({ time: t, open: bar.open, high: bar.high, low: bar.low, close: bar.close })
       }
       if (u.paintVolume) {
@@ -267,6 +400,9 @@ function useFullHistory(
         if (leavingKey && leavingKey === key) {
           saveViewport(leavingKey, captureViewport(chartRef.current))
         }
+        // Exact data replaces everything — a pending forming-candle glide
+        // must not paint stale interpolated values onto the new series.
+        stopFormingGlide(candleRef)
         candleRef.current.setData(candleData)
         volumeRef.current.setData(volumeData)
       } catch { /* benign: setData may throw on a fresh/empty series */ }
@@ -455,6 +591,9 @@ function useLazyScroll(
         adjustingRef.current = true
         try {
           candlesDataRef.current = merged
+          // Prepend replaces everything — stop any pending forming-candle
+          // glide so it can't paint stale interpolated values.
+          stopFormingGlide(candleRef)
           const lineMode = useChartSettings.getState().candlesType === 'line'
           const candleData = lineMode
             ? merged.map(c => ({ time: toChartTime(c.time) as Time, value: c.close }))
