@@ -10,6 +10,14 @@ const TF_SECONDS: Record<string, number> = {
 }
 const MAX_REPAIR_WINDOW = 1000
 
+/**
+ * Cache auto-repair is DISABLED by default (scalpboard.io parity): the client
+ * must render exactly what the server received, holes included. Set
+ * CACHE_REPAIR_ENABLED=1 to restore the "no holes ever" watchdog + instant
+ * repair (backfills real rows from the exchange over WS-skip gaps).
+ */
+const CACHE_REPAIR_ENABLED = process.env.CACHE_REPAIR_ENABLED === '1'
+
 export interface CacheRepairEvent {
   ts: number
   key: string
@@ -67,6 +75,7 @@ export async function repairCacheWindow(
   tf: string,
   exchange?: Exchange,
 ): Promise<CacheRepairEvent | null> {
+  if (!CACHE_REPAIR_ENABLED) return null
   const tfSec = TF_SECONDS[tf]
   if (!tfSec) return null
   const cached = getCachedCandles(symbol, tf, exchange)
@@ -138,6 +147,10 @@ let watchdogTimer: ReturnType<typeof setInterval> | null = null
  * per-cycle fan-out).
  */
 export function startCacheRepairWatchdog(): void {
+  if (!CACHE_REPAIR_ENABLED) {
+    console.log('[CacheRepair] Disabled (CACHE_REPAIR_ENABLED unset — scalpboard parity, holes stay visible)')
+    return
+  }
   if (watchdogTimer) return
   runCacheRepairCycle()
   watchdogTimer = setInterval(runCacheRepairCycle, WATCHDOG_INTERVAL_MS)

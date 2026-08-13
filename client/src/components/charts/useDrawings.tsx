@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
+import type { IChartApi, ISeriesApi, Time, SeriesType } from 'lightweight-charts'
 import type { Drawing, DrawingTool, HRayDrawing, TwoPointDrawing, UnifiedCandle, Alert } from '../../types'
 import { isTwoPointTool } from '../../types'
 import api from '../../services/api'
@@ -86,7 +86,7 @@ function computeUpdatedDrawingData(
   logical: number | undefined,
   dragState: DragState,
   chart: IChartApi,
-  series: ISeriesApi<'Candlestick'>,
+  series: ISeriesApi<SeriesType>,
   candleData: ReadonlyArray<UnifiedCandle> | null,
 ): HRayDrawing | TwoPointDrawing {
   if (drawing.type === 'h-ray') {
@@ -143,7 +143,7 @@ export function useDrawings(
   symbol: string,
   tf: string,
   chartRef: React.RefObject<IChartApi | null>,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
   containerRef: React.RefObject<HTMLDivElement | null>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   chartVersion: number,

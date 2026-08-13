@@ -15,9 +15,9 @@
   --text-muted: #a0a0a0;
   --text-faint: #555555;
 
-  /* Акценты (TZ) */
-  --color-up: #26a65b;
-  --color-down: #e74c3c;
+  /* Акценты (TZ) — scalpboard.io values */
+  --color-up: #4bd24b;
+  --color-down: #d24b4b;
   --color-accent: #f9b600;
 
   /* Границы (TZ) */
@@ -55,14 +55,46 @@
   --fg-25: #55555566;
   --fg-10: #5555551a;
   --fg-alt: #333333;
-  --border: #1f1f1f;
+  --border: #242424;
   --scrollbar: #666666;
-  --candle-up: #26a65b;
-  --candle-down: #e74c3c;
-  --grid: #1a1a1a;
+  --candle-up: #4bd24b;
+  --candle-down: #d24b4b;
+  --grid: #1f1f1f;
   --crosshair: #4d4d4d;
   --price-label: #666666;
   --volume: #4d4d4d;
+
+  /* Scalpboard.io dark palette (chart parity) — live values from scalpboard.io */
+  --chart--candle-up: #4bd24b;
+  --chart--candle-down: #d24b4b;
+  --chart--candle-border-up: #4bd24b;
+  --chart--candle-border-down: #d24b4b;
+  --chart--grid: #1f1f1f;
+  --chart--crosshair: #4d4d4d;
+  --chart--peak: #4d4d4d;
+  --chart--price: #b3b3b3;
+  --chart--volumes: #4d4d4d;
+  --chart--density-up: #c74343;
+  --chart--density-down: #43c743;
+  --chart--measure-up: #43c74333;
+  --chart--measure-down: #c7434333;
+  --chart--fire: #c74343;
+  --chart--indicator-fire: #c7434333;
+  --background: #0f0f0f;
+  --foreground-full: #f2f2f2;
+  --foreground-full-alt: #0d0d0d;
+  --foreground: #cccccc;
+  --foreground-75: #ccccccbf;
+  --foreground-60: #cccccc99;
+  --foreground-50: #cccccc80;
+  --foreground-25: #cccccc40;
+  --foreground-20: #cccccc33;
+  --foreground-10: #cccccc1a;
+  --foreground-alt: #333333;
+  --map--top: #c74343;
+  --map--bottom: #43c743;
+  --map--density-s: 50;
+  --map--density-l: 50;
 }
 
 *,

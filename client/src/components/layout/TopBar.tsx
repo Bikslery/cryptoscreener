@@ -3,6 +3,7 @@ import type { Timeframe } from '../../types'
 import { LogIn, User, ChevronFirst, ChevronLeft, ChevronRight, RefreshCw, ArrowLeftRight, Layers } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { VolumeSlider } from './VolumeSlider'
+import { useChartSettings } from '../../services/chart-settings'
 import './TopBar.css'
 
 const SCANNER_URL = (import.meta.env.VITE_SCANNER_URL as string | undefined) ?? 'http://localhost:5174'
@@ -56,7 +57,7 @@ export function TopBar() {
               className={`clinic-btn clinic-btn-sm text-[12px] leading-none ${
                 activeTf === opt.value ? 'clinic-btn-active' : 'clinic-btn-secondary'
               }`}
-              onClick={() => setTimeframe(opt.value)}
+              onClick={() => { setTimeframe(opt.value); useChartSettings.getState().setSetting('interval', opt.value) }}
             >
               {opt.label}
             </button>

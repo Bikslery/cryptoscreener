@@ -11,6 +11,7 @@ import type {
   DrawingUtils,
   Time,
   Logical,
+  SeriesType,
 } from 'lightweight-charts'
 import type { Drawing, HRayDrawing, TRayDrawing, SegmentDrawing, RectDrawing, FibDrawing, CircleDrawing, UnifiedCandle } from '../../../types'
 
@@ -435,7 +436,7 @@ class DrawingsView implements IPrimitivePaneView {
 export class DrawingsPrimitive implements ISeriesPrimitive {
   private _drawings: Drawing[] = []
   private _chart: IChartApi | null = null
-  private _series: ISeriesApi<'Candlestick'> | null = null
+  private _series: ISeriesApi<SeriesType> | null = null
   private _candleData: ReadonlyArray<UnifiedCandle> | null = null
   private _pricePrecision = 2
   private _onRemove: ((id: string) => void) | null = null
@@ -457,7 +458,7 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
   setDrawings(
     drawings: Drawing[],
     chart: IChartApi | null,
-    series: ISeriesApi<'Candlestick'> | null,
+    series: ISeriesApi<SeriesType> | null,
     cw: number,
     ch: number,
     pricePrecision: number,
@@ -568,7 +569,7 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
 
   attached?(param: SeriesAttachedParameter<Time, 'Candlestick'>) {
     this._chart = param.chart as IChartApi
-    this._series = param.series as ISeriesApi<'Candlestick'>
+    this._series = param.series as ISeriesApi<SeriesType>
     this._requestUpdate = param.requestUpdate
     this._disposed = false
   }

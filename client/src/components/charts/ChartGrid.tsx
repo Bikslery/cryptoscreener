@@ -1,6 +1,6 @@
 import { useEffect, useRef, memo, useState, useMemo } from 'react'
-import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
-import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
+import { createChart, CandlestickSeries, BarSeries, LineSeries, HistogramSeries, PriceScaleMode } from 'lightweight-charts'
+import type { IChartApi, ISeriesApi, Time, SeriesType, DeepPartial, CandlestickSeriesOptions, BarSeriesOptions, LineSeriesOptions } from 'lightweight-charts'
 import { useCoinListStore, setLivePrice } from '../../store'
 import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
 import type { ChartExchange } from '../../store'
@@ -8,16 +8,21 @@ import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount } from '../../services/ws'
 import type { Timeframe, UnifiedCandle, Exchange, DrawingTool } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
-import { ArrowLeft } from 'lucide-react'
+import { ArrowLeft, Settings2 } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
 import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT, EXPANDED_CANDLE_LIMIT } from '../../services/candle-prefetch'
 import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
-import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
 import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatch, type TickPayload } from '../../services/candle-events'
 import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
 import { isFiniteOHLCV, validateCandle } from '../../services/candle-utils'
 import { useDrawings } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
+import { useChartOverlays } from './overlays/useChartOverlays'
+import { useChartSettings, resetChartSettings, type WatermarkPlace } from '../../services/chart-settings'
+import {
+  buildChartOptions, candleSeriesOptions, volumeSeriesOptions,
+  applyWatermark, volumePaneTop, timeVisibleFor,
+} from '../../services/chart-config'
 
 
 const TF_SECONDS: Record<string, number> = {
@@ -50,23 +55,25 @@ function upsertBar(candlesDataRef: React.RefObject<UnifiedCandle[]>, bar: Unifie
 
 function applyChartPatch(
   patch: ChartEventPatch,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   symbol: string,
   exchange: Exchange | undefined,
   tf: Timeframe,
 ) {
+  const candlesType = useChartSettings.getState().candlesType
   for (const u of patch.updates) {
     const bar = u.bar
     const t = toChartTime(bar.time) as Time
     try {
-      candleRef.current?.update({ time: t, open: bar.open, high: bar.high, low: bar.low, close: bar.close })
+      if (candlesType === 'line') {
+        candleRef.current?.update({ time: t, value: bar.close })
+      } else {
+        candleRef.current?.update({ time: t, open: bar.open, high: bar.high, low: bar.low, close: bar.close })
+      }
       if (u.paintVolume) {
-        volumeRef.current?.update({
-          time: t, value: bar.volume,
-          color: bar.close >= bar.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-        })
+        volumeRef.current?.update({ time: t, value: bar.volume })
       }
     } catch {
       // Series was recreated mid-paint (pricePrecision flip) — the next
@@ -191,7 +198,7 @@ function useFullHistory(
   symbol: string,
   exchange: Exchange | undefined,
   tf: Timeframe,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
@@ -239,12 +246,14 @@ function useFullHistory(
 
       const valid = candles.filter(validateCandle)
       candlesDataRef.current = valid
-      const candleData = valid.map(c => ({
-        time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close,
-      }))
+      const lineMode = useChartSettings.getState().candlesType === 'line'
+      const candleData = lineMode
+        ? valid.map(c => ({ time: toChartTime(c.time) as Time, value: c.close }))
+        : valid.map(c => ({
+            time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+          }))
       const volumeData = valid.map(c => ({
         time: toChartTime(c.time) as Time, value: c.volume,
-        color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
       }))
       try {
         // Capture BEFORE setData — setData resets the whole time scale.
@@ -347,7 +356,7 @@ function useLazyScroll(
   symbol: string,
   exchange: Exchange | undefined,
   tf: Timeframe,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
@@ -427,12 +436,14 @@ function useLazyScroll(
         adjustingRef.current = true
         try {
           candlesDataRef.current = merged
-          const candleData = merged.map(c => ({
-            time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close,
-          }))
+          const lineMode = useChartSettings.getState().candlesType === 'line'
+          const candleData = lineMode
+            ? merged.map(c => ({ time: toChartTime(c.time) as Time, value: c.close }))
+            : merged.map(c => ({
+                time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+              }))
           const volumeData = merged.map(c => ({
             time: toChartTime(c.time) as Time, value: c.volume,
-            color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
           }))
           onLogicalShiftRef.current?.(added)
           candleRef.current?.setData(candleData)
@@ -611,7 +622,7 @@ function useWsCandle(
   symbol: string,
   exchange: Exchange | undefined,
   tf: Timeframe,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
   eventsRef: React.RefObject<CandleEvents | null>,
   destroyedRef: React.RefObject<boolean>,
@@ -655,7 +666,7 @@ function useWsTrade(
   symbol: string,
   exchange: Exchange | undefined,
   tf: Timeframe,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
   eventsRef: React.RefObject<CandleEvents | null>,
   destroyedRef: React.RefObject<boolean>,
@@ -791,7 +802,7 @@ const MiniChart = memo(function MiniChart({
 }: { symbol: string; chartExchange: ChartExchange }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
-  const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const candleRef = useRef<ISeriesApi<SeriesType> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
@@ -816,40 +827,37 @@ const MiniChart = memo(function MiniChart({
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
 
+  const baseSettings = useChartSettings()
+  const settingsRef = useRef(baseSettings)
+  settingsRef.current = baseSettings
+
   useEffect(() => {
     destroyedRef.current = false
     if (!containerRef.current) return
+    const s = settingsRef.current
 
+    const base = buildChartOptions(s, { top: 0.1, bottom: 0.25 })
     const chart = createChart(containerRef.current, {
-      layout: { background: { type: ColorType.Solid, color: '#0e0e0e' }, textColor: '#666666', fontSize: 9, fontFamily: "'JetBrains Mono', monospace" },
-      grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
-      crosshair: { mode: CrosshairMode.Normal, vertLine: { visible: true, color: '#4d4d4d' }, horzLine: { visible: true, color: '#4d4d4d' } },
-      rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.1, bottom: 0.25 }, textColor: '#666666' },
-      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6, rightOffset: 12, fixLeftEdge: false, fixRightEdge: false },
+      ...base,
       handleScroll: true,
-      handleScale: {
-        axisPressedMouseMove: { time: true, price: true },
-        pinch: true,
-        mouseWheel: true,
-      },
       kineticScroll: { touch: false, mouse: false },
     })
 
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: UP_COLOR(), downColor: DOWN_COLOR(),
-      borderUpColor: UP_BORDER(), borderDownColor: DOWN_BORDER(),
-      wickUpColor: UP_COLOR(), wickDownColor: DOWN_COLOR(),
-      priceLineVisible: true,
-      lastValueVisible: true,
-      priceLineColor: UP_COLOR(),
+    const seriesOpts = candleSeriesOptions(s)
+    const candleSeries = s.candlesType === 'line'
+      ? chart.addSeries(LineSeries, seriesOpts as DeepPartial<LineSeriesOptions>)
+      : s.candlesType === 'bars'
+        ? chart.addSeries(BarSeries, seriesOpts as DeepPartial<BarSeriesOptions>)
+        : chart.addSeries(CandlestickSeries, seriesOpts as DeepPartial<CandlestickSeriesOptions>)
+    candleSeries.applyOptions({
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
         minMove: Math.pow(10, -pricePrecision),
       },
     })
-    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', priceLineVisible: false, lastValueVisible: false })
-    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, textColor: '#666666' })
+    const volumeSeries = chart.addSeries(HistogramSeries, { ...volumeSeriesOptions(), priceScaleId: '' })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: volumePaneTop(s.volumesHeight), bottom: 0 }, textColor: '#666666' })
 
     chartRef.current = chart
     candleRef.current = candleSeries
@@ -882,8 +890,21 @@ const MiniChart = memo(function MiniChart({
     }
     // NB: `tf` is deliberately NOT a dependency — a timeframe switch only
     // needs new data (useFullHistory handles setData + visible range), not a
-    // full chart destroy/recreate.
-  }, [symbol, pricePrecision])
+    // full chart destroy/recreate. `candlesType` DOES trigger a recreate —
+    // the series construction differs per style.
+  }, [symbol, pricePrecision, baseSettings.candlesType])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    const s = useChartSettings.getState()
+    chart.applyOptions({
+      rightPriceScale: { mode: s.priceScaleMode === 'log' ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal },
+      grid: { vertLines: { visible: s.vertGrid }, horzLines: { visible: s.horzGrid } },
+      timeScale: { timeVisible: timeVisibleFor(s.interval), barSpacing: s.barSpace, rightOffset: s.rightOffset },
+    })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: volumePaneTop(s.volumesHeight), bottom: 0 } })
+  }, [baseSettings.priceScaleMode, baseSettings.vertGrid, baseSettings.horzGrid, baseSettings.interval, baseSettings.barSpace, baseSettings.rightOffset, baseSettings.volumesHeight])
 
   const [wsCount, setWsCount] = useState(getWsOpenCount)
   const [mountWsCount] = useState(() => getWsOpenCount())
@@ -913,6 +934,8 @@ const MiniChart = memo(function MiniChart({
     shiftLogicalOffset,
     CLICK_THRESHOLD,
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
+
+  useChartOverlays(candleRef, candlesDataRef, dataVersion, chartVersion, pricePrecision)
 
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
@@ -1079,7 +1102,187 @@ function formatDuration(sec: number): string {
   return h % 24 ? `${d}d ${h % 24}h` : `${d}d`
 }
 
+const TF_SETTINGS: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w']
+
+const WM_PLACE_OPTIONS: { value: WatermarkPlace; label: string }[] = [
+  { value: 'center-center', label: 'Центр' },
+  { value: 'center-top', label: 'Сверху' },
+  { value: 'center-bottom', label: 'Снизу' },
+  { value: 'left-center', label: 'Слева' },
+  { value: 'right-center', label: 'Справа' },
+]
+
+function SettingsRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-[5px]">
+      <span className="text-[11px] text-[#aaa] shrink-0 min-w-[90px]">{label}</span>
+      <div className="flex items-center gap-1 flex-1 justify-end">{children}</div>
+    </div>
+  )
+}
+
+function SettingsSlider({ value, min, max, step, onChange }: { value: number; min: number; max: number; step: number; onChange: (v: number) => void }) {
+  return (
+    <div className="flex items-center gap-2 flex-1">
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="flex-1 accent-[#f9b600]"
+      />
+      <span className="text-[10px] text-[#888] font-mono w-[34px] text-right tabular-nums">{value}</span>
+    </div>
+  )
+}
+
+function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <button
+      onClick={() => onChange(!checked)}
+      className={`px-[8px] py-[2px] rounded-[3px] border text-[11px] leading-none transition-colors ${
+        checked ? 'border-[#f9b600]/60 bg-[#f9b600]/10 text-[#f9b600]' : 'border-[#333] bg-[#1a1a1a] text-[#888]'
+      }`}
+    >
+      {label}
+    </button>
+  )
+}
+
+function ChartSettingsPanel() {
+  const s = useChartSettings()
+  const setSetting = useChartSettings(st => st.setSetting)
+  const setTimeframe = useCoinListStore(st => st.setTimeframe)
+
+  const changeInterval = (tf: Timeframe) => {
+    setSetting('interval', tf)
+    setTimeframe(tf)
+  }
+
+  return (
+    <div className="fixed right-[12px] top-[100px] z-40 w-[320px] max-h-[70vh] overflow-y-auto rounded-[6px] border border-[#2a2a2a] bg-[#141414] shadow-[0_20px_50px_rgba(0,0,0,0.6)] p-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[12px] font-bold text-[#e0e0e0]">Вид</span>
+        <button
+          className="text-[10px] text-[#888] hover:text-[#ccc] px-[6px] py-[2px] rounded-[3px] border border-[#2a2a2a]"
+          onClick={resetChartSettings}
+        >
+          Сбросить
+        </button>
+      </div>
+
+      <SettingsRow label="Интервал">
+        <div className="flex gap-[2px]">
+          {TF_SETTINGS.map(tf => (
+            <button
+              key={tf}
+              className={`px-[6px] py-[2px] rounded-[3px] text-[10px] leading-none ${
+                s.interval === tf ? 'bg-[#f9b600]/15 text-[#f9b600] border border-[#f9b600]/50' : 'text-[#999] border border-[#2a2a2a] hover:border-[#444]'
+              }`}
+              onClick={() => changeInterval(tf)}
+            >
+              {tf}
+            </button>
+          ))}
+        </div>
+      </SettingsRow>
+
+      <SettingsRow label="Свечи">
+        <div className="flex gap-[2px]">
+          {(['default', 'hollow', 'bars', 'line'] as const).map(t => (
+            <Toggle
+              key={t}
+              checked={s.candlesType === t}
+              onChange={() => setSetting('candlesType', t)}
+              label={t === 'default' ? 'Свечи' : t === 'hollow' ? 'Полые' : t === 'bars' ? 'Бары' : 'Линия'}
+            />
+          ))}
+        </div>
+      </SettingsRow>
+
+      <SettingsRow label="Объём">
+        <SettingsSlider value={s.volumesHeight} min={3} max={50} step={1} onChange={v => setSetting('volumesHeight', v)} />
+      </SettingsRow>
+
+      <SettingsRow label="Отступ">
+        <SettingsSlider value={s.rightOffset} min={0} max={100} step={1} onChange={v => setSetting('rightOffset', v)} />
+      </SettingsRow>
+
+      <SettingsRow label="Плотность">
+        <SettingsSlider value={s.barSpace} min={0.5} max={10} step={0.1} onChange={v => setSetting('barSpace', v)} />
+      </SettingsRow>
+
+      <SettingsRow label="Шкала">
+        <div className="flex gap-[2px]">
+          <Toggle checked={s.priceScaleMode === 'default'} onChange={() => setSetting('priceScaleMode', 'default')} label="Обычная" />
+          <Toggle checked={s.priceScaleMode === 'log'} onChange={() => setSetting('priceScaleMode', 'log')} label="Log" />
+        </div>
+      </SettingsRow>
+
+      <SettingsRow label="Сетка">
+        <>
+          <Toggle checked={s.vertGrid} onChange={v => setSetting('vertGrid', v)} label="Вер" />
+          <Toggle checked={s.horzGrid} onChange={v => setSetting('horzGrid', v)} label="Гор" />
+        </>
+      </SettingsRow>
+
+      <div className="my-2 border-t border-[#222]" />
+
+      <SettingsRow label="Знак">
+        <SettingsSlider value={s.watermark} min={0} max={1} step={0.05} onChange={v => setSetting('watermark', v)} />
+      </SettingsRow>
+
+      <SettingsRow label="Размер">
+        <SettingsSlider value={s.watermarkSize} min={12} max={96} step={1} onChange={v => setSetting('watermarkSize', v)} />
+      </SettingsRow>
+
+      <SettingsRow label="Позиция">
+        <select
+          value={s.watermarkPlace}
+          onChange={e => setSetting('watermarkPlace', e.target.value as WatermarkPlace)}
+          className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-[3px] text-[11px] text-[#ccc] px-[6px] py-[2px]"
+        >
+          {WM_PLACE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </SettingsRow>
+
+      <SettingsRow label="Текст">
+        <input
+          value={s.watermarkPattern}
+          onChange={e => setSetting('watermarkPattern', e.target.value)}
+          className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-[3px] text-[11px] text-[#ccc] px-[6px] py-[2px] w-[150px] text-right font-mono"
+        />
+      </SettingsRow>
+
+      <div className="mt-2 border-t border-[#222] pt-2">
+        <SettingsRow label="Каскады">
+          <Toggle checked={s.showCascades} onChange={v => setSetting('showCascades', v)} label="Каскады" />
+          <Toggle checked={s.showDensities} onChange={v => setSetting('showDensities', v)} label="Карта" />
+        </SettingsRow>
+        {s.showCascades && (
+          <>
+            <SettingsRow label="Уровней">
+              <SettingsSlider value={s.cascadesMinPeaks} min={1} max={5} step={1} onChange={v => setSetting('cascadesMinPeaks', v)} />
+            </SettingsRow>
+            <SettingsRow label="Шаг, %">
+              <SettingsSlider value={s.cascadesMaxDistance} min={0.1} max={1} step={0.05} onChange={v => setSetting('cascadesMaxDistance', v)} />
+            </SettingsRow>
+          </>
+        )}
+      </div>
+      <div className="mt-2 flex items-center gap-3">
+        <Toggle checked={s.showTriggeredAlerts} onChange={v => setSetting('showTriggeredAlerts', v)} label="Алерты" />
+      </div>
+
+      <div className="mt-1 text-[10px] text-[#666]">{'{ticker}'} — тикер в тексте знака</div>
+    </div>
+  )
+}
+
 const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, activeTool, chartExchange }: { symbol: string; onBack: () => void; activeTool: DrawingTool | null; chartExchange: ChartExchange }) {
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const coin = useCoinListStore(useShallow(s => {
     const c = s.coinMap.get(symbol)
     if (!c) return null
@@ -1143,6 +1346,20 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
       </div>
 
       <div className="ml-auto flex items-center gap-2">
+        <button
+          className={`clinic-btn clinic-btn-sm flex items-center gap-1 text-[11px] ${settingsOpen ? 'clinic-btn-active' : 'clinic-btn-secondary'}`}
+          onClick={() => setSettingsOpen(o => !o)}
+          title="Настройки вида"
+        >
+          <Settings2 size={13} />
+          <span>Вид</span>
+        </button>
+        {settingsOpen && (
+          <>
+            <div className="fixed inset-0 z-30" onClick={() => setSettingsOpen(false)} />
+            <ChartSettingsPanel />
+          </>
+        )}
         {activeTool !== null && (
           <span className="text-[10px] text-[#ccc] font-mono bg-[#333] px-[6px] py-[2px] rounded-[3px] border border-[#444]">
             {activeTool === 'h-ray' ? 'Гориз. луч' : activeTool === 't-ray' ? 'Тренд. луч' : activeTool === 'alert' ? 'Ценовой алерт' : 'Отрезок'} — клик на графике | Esc — отмена
@@ -1159,19 +1376,23 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
 function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBack: () => void; chartExchange: ChartExchange }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
-  const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const candleRef = useRef<ISeriesApi<SeriesType> | null>(null)
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const adjustingRef = useRef(false)
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
+  const baseSettings = useChartSettings()
+  const settingsRef = useRef(baseSettings)
+  settingsRef.current = baseSettings
   const exchange: Exchange | undefined = chartExchange
   const [selection, setSelection] = useState<RangeSelection | null>(null)
   const [chartVersion, setChartVersion] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const lastUpdateRef = useRef(0)
   const eventsRef = useRef<CandleEvents | null>(null)
+  const watermarkRef = useRef<ReturnType<typeof applyWatermark>>(null)
 
   useEffect(() => {
     if (exchange) {
@@ -1186,37 +1407,31 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   useEffect(() => {
     destroyedRef.current = false
     if (!containerRef.current) return
+    const s = settingsRef.current
 
+    const base = buildChartOptions(s, { top: 0.05, bottom: 0.15 })
     const chart = createChart(containerRef.current, {
-      layout: { background: { type: ColorType.Solid, color: '#0e0e0e' }, textColor: '#b3b3b3', fontSize: 11, fontFamily: "'JetBrains Mono', monospace" },
-      grid: { vertLines: { color: '#1a1a1a' }, horzLines: { color: '#1a1a1a' } },
-      crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' }, horzLine: { color: '#4d4d4d', labelBackgroundColor: '#4d4d4d' } },
-      rightPriceScale: { borderColor: '#1f1f1f', scaleMargins: { top: 0.05, bottom: 0.15 }, textColor: '#666666' },
-      timeScale: { borderColor: '#1f1f1f', timeVisible: true, visible: true, barSpacing: 6, rightOffset: 12, fixLeftEdge: false, fixRightEdge: false },
+      ...base,
       handleScroll: true,
-      handleScale: {
-        axisPressedMouseMove: { time: true, price: true },
-        pinch: true,
-        mouseWheel: true,
-      },
       kineticScroll: { touch: false, mouse: false },
     })
 
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: UP_COLOR(), downColor: DOWN_COLOR(),
-      borderUpColor: UP_BORDER(), borderDownColor: DOWN_BORDER(),
-      wickUpColor: UP_COLOR(), wickDownColor: DOWN_COLOR(),
-      priceLineVisible: true,
-      lastValueVisible: true,
-      priceLineColor: UP_COLOR(),
+    const seriesOpts = candleSeriesOptions(s)
+    const candleSeries = s.candlesType === 'line'
+      ? chart.addSeries(LineSeries, seriesOpts as DeepPartial<LineSeriesOptions>)
+      : s.candlesType === 'bars'
+        ? chart.addSeries(BarSeries, seriesOpts as DeepPartial<BarSeriesOptions>)
+        : chart.addSeries(CandlestickSeries, seriesOpts as DeepPartial<CandlestickSeriesOptions>)
+    candleSeries.applyOptions({
       priceFormat: {
         type: 'price',
         precision: pricePrecision,
         minMove: Math.pow(10, -pricePrecision),
       },
     })
-    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', priceLineVisible: false, lastValueVisible: false })
-    chart.priceScale('').applyOptions({ scaleMargins: { top: 0.9, bottom: 0 }, textColor: '#666666' })
+    const volumeSeries = chart.addSeries(HistogramSeries, { ...volumeSeriesOptions(), priceScaleId: '' })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: volumePaneTop(s.volumesHeight), bottom: 0 }, textColor: '#666666' })
+    watermarkRef.current = applyWatermark(chart, s, symbol)
 
     chartRef.current = chart
     candleRef.current = candleSeries
@@ -1242,12 +1457,30 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     return () => {
       destroyedRef.current = true
       ro.disconnect()
+      watermarkRef.current?.detach()
+      watermarkRef.current = null
       chart.remove()
       chartRef.current = null
       candleRef.current = null
       volumeRef.current = null
     }
-  }, [symbol, tf, pricePrecision])
+  }, [symbol, tf, pricePrecision, baseSettings.candlesType])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    const s = useChartSettings.getState()
+    chart.applyOptions({
+      rightPriceScale: { mode: s.priceScaleMode === 'log' ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal },
+      grid: { vertLines: { visible: s.vertGrid }, horzLines: { visible: s.horzGrid } },
+      timeScale: { timeVisible: timeVisibleFor(s.interval), barSpacing: s.barSpace, rightOffset: s.rightOffset },
+    })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: volumePaneTop(s.volumesHeight), bottom: 0 } })
+    if (s.watermark >= 0) {
+      watermarkRef.current?.detach()
+      watermarkRef.current = applyWatermark(chart, s, symbol)
+    }
+  }, [baseSettings.priceScaleMode, baseSettings.vertGrid, baseSettings.horzGrid, baseSettings.interval, baseSettings.barSpace, baseSettings.rightOffset, baseSettings.volumesHeight, baseSettings.watermark, baseSettings.watermarkSize, baseSettings.watermarkPlace, baseSettings.watermarkPattern])
 
   const [wsCount, setWsCount] = useState(getWsOpenCount)
   const [mountWsCount] = useState(() => getWsOpenCount())
@@ -1280,6 +1513,8 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     shiftLogicalOffset,
     CLICK_THRESHOLD,
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
+
+  useChartOverlays(candleRef, candlesDataRef, dataVersion, chartVersion, pricePrecision)
 
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)

@@ -236,22 +236,26 @@ export function updateCachedCandle(candle: UnifiedCandle): void {
   }
   if (lastIdx >= 0 && candle.time > arr[lastIdx].time) {
     // The stream skipped one or more periods (Binance hiccup, WS reconnect,
-    // backpressure). Fill the skipped buckets with flat candles NOW so the
-    // cache never holds a permanent hole — a real row replaces the filler
-    // later via the async repair or the next cache write.
+    // backpressure). With gap filling DISABLED (scalpboard parity default)
+    // the skipped buckets are left missing so the client paints whitespace —
+    // exactly what the server sent. With GAP_FILL_ENABLED=1 they are patched
+    // with flat candles NOW (a real row replaces the filler later via the
+    // async repair or the next cache write).
     let added = 1
-    const tfSec = TF_SECONDS[candle.timeframe]
-    if (tfSec) {
-      const diff = candle.time - arr[lastIdx].time
-      const periods = Math.round(diff / tfSec)
-      const missing = Math.min(periods - 1, MAX_FILL_WINDOW)
-      if (missing > 0) {
-        const prevClose = arr[lastIdx].close
-        for (let i = 1; i <= missing; i++) {
-          arr.push(flatCandle(candle, arr[lastIdx].time + i * tfSec, prevClose))
-          syntheticFilledTotal++
+    if (GAP_FILL_ENABLED) {
+      const tfSec = TF_SECONDS[candle.timeframe]
+      if (tfSec) {
+        const diff = candle.time - arr[lastIdx].time
+        const periods = Math.round(diff / tfSec)
+        const missing = Math.min(periods - 1, MAX_FILL_WINDOW)
+        if (missing > 0) {
+          const prevClose = arr[lastIdx].close
+          for (let i = 1; i <= missing; i++) {
+            arr.push(flatCandle(candle, arr[lastIdx].time + i * tfSec, prevClose))
+            syntheticFilledTotal++
+          }
+          added += missing
         }
-        added += missing
       }
     }
     arr.push(candle)
