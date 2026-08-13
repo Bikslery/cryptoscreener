@@ -55,7 +55,7 @@ function upsertBar(candlesDataRef: React.RefObject<UnifiedCandle[]>, bar: Unifie
   } else if (bar.time > last.time) {
     arr.push(bar)
   }
-  // Older than the tail is dropped by the events layer вЂ” nothing to do.
+  // Older than the tail is dropped by the events layer — nothing to do.
 }
 
 function applyChartPatch(
@@ -81,7 +81,7 @@ function applyChartPatch(
         volumeRef.current?.update({ time: t, value: bar.volume })
       }
     } catch {
-      // Series was recreated mid-paint (pricePrecision flip) вЂ” the next
+      // Series was recreated mid-paint (pricePrecision flip) — the next
       // history load repaints everything.
     }
     upsertBar(candlesDataRef, bar)
@@ -120,7 +120,7 @@ function ChartCornerSpinner() {
 
 function LiveIndicator({ isLive, lastUpdate, hasReceivedData }: { isLive: boolean; lastUpdate: number; hasReceivedData: boolean }) {
   // Staleness is re-derived on a 1s tick instead of Date.now() during render
-  // (component purity) вЂ” the indicator still reacts within a second of the
+  // (component purity) — the indicator still reacts within a second of the
   // feed going stale.
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -223,7 +223,7 @@ function useFullHistory(
   const [status, setStatus] = useState<FullHistoryStatus>('loading')
   const [dataVersion, setDataVersion] = useState(0)
 
-  // Key of the last painted series вЂ” used to save the viewport we are about
+  // Key of the last painted series — used to save the viewport we are about
   // to leave and to know whether a reload is a same-key refresh.
   const lastPaintedKeyRef = useRef<string | null>(null)
 
@@ -235,7 +235,7 @@ function useFullHistory(
 
     const renderCandles = (candles: UnifiedCandle[]) => {
       if (destroyedRef.current || !candleRef.current || !volumeRef.current) {
-        // Nothing was painted вЂ” release reconciliation so realtime events
+        // Nothing was painted — release reconciliation so realtime events
         // that arrived during the fetch are not stuck in the buffer.
         eventsRef?.current?.setBuffered(false)
         return
@@ -262,7 +262,7 @@ function useFullHistory(
         time: toChartTime(c.time) as Time, value: c.volume,
       }))
       try {
-        // Capture BEFORE setData вЂ” setData resets the whole time scale.
+        // Capture BEFORE setData — setData resets the whole time scale.
         const leavingKey = lastPaintedKeyRef.current
         if (leavingKey && leavingKey === key) {
           saveViewport(leavingKey, captureViewport(chartRef.current))
@@ -274,7 +274,7 @@ function useFullHistory(
         const saved = getViewport(key)
         if (saved) {
           // Restore the pair's saved viewport (scroll position, bar spacing,
-          // right offset, time visibility) вЂ” scalpboard's ae() equivalent.
+          // right offset, time visibility) — scalpboard's ae() equivalent.
           restoreViewport(chartRef.current, saved)
         } else if (fitOnOpen) {
           // Expanded chart: open maximally zoomed out.
@@ -290,7 +290,7 @@ function useFullHistory(
       setDataVersion(v => v + 1)
       if (eventsRef) {
         // History lands first, then buffered live events (klines/ticks that
-        // arrived during the fetch) are replayed on top вЂ” never lost, never
+        // arrived during the fetch) are replayed on top — never lost, never
         // double-painted.
         eventsRef.current?.applyHistory(valid)
         const flush = eventsRef.current?.setBuffered(false)
@@ -328,7 +328,7 @@ function useFullHistory(
         return
       }
 
-      // Fetch with scalpboard-style retry backoff (100ms в†’ 300ms): a
+      // Fetch with scalpboard-style retry backoff (100ms → 300ms): a
       // transient REST failure must not leave the chart blank forever.
       let fetched: UnifiedCandle[] = []
       for (const delay of [0, 100, 300]) {
@@ -362,7 +362,7 @@ function useFullHistory(
     run()
     return () => { cancelled.value = true }
     // `chartVersion` re-paints history when the canvas/series is recreated
-    // (pricePrecision flip) вЂ” the new chart starts empty.
+    // (pricePrecision flip) — the new chart starts empty.
     // `wsEpoch` re-paints after a WS reconnect so periods that fell through
     // the dead window are restored from the server.
   }, [symbol, exchange, tf, chartVersion, wsEpoch, limit, forceServer, fitOnOpen, visibleBars, skipHistory,
@@ -439,7 +439,7 @@ function useLazyScroll(
           eventsRef?.current?.setBuffered(false)
           return
         }
-        // Capture BEFORE setData вЂ” prepending shifts every logical index.
+        // Capture BEFORE setData — prepending shifts every logical index.
         const prevLogical = ts.getVisibleLogicalRange()
         const prevLen = candlesDataRef.current.length
         const added = merged.length - prevLen
@@ -479,7 +479,7 @@ function useLazyScroll(
         } finally {
           adjustingRef.current = false
         }
-        // Restore by logical range shifted by `added` вЂ” the exact same bars
+        // Restore by logical range shifted by `added` — the exact same bars
         // land at the exact same pixels as before the prepend.
         if (prevLogical) {
           try {
@@ -538,7 +538,7 @@ function useLazyScroll(
           setIsLoadingMoreRef.current?.(false)
         })
         .catch((err: Error & { isNetworkError?: boolean }) => {
-          // Network error вЂ” NOT end of history: stay ready to retry.
+          // Network error — NOT end of history: stay ready to retry.
           if (!err?.isNetworkError) {
             emptyCountRef.current++
             if (emptyCountRef.current >= 3) {
@@ -625,7 +625,7 @@ function useStaleDataDetection(
   useEffect(() => {
     const interval = setInterval(() => {
       const last = lastUpdateRef.current
-      // lastUpdate === 0 means "never received anything yet" вЂ” not stale.
+      // lastUpdate === 0 means "never received anything yet" — not stale.
       const elapsed = last > 0 ? Date.now() - last : 0
       const shouldBeStale = elapsed > threshold
       setIsStale(shouldBeStale)
@@ -650,7 +650,7 @@ function useWsCandle(
   lastUpdateRef?: React.RefObject<number>,
 ) {
   useEffect(() => {
-    // Second timeframes are aggregated client-side from the trade lane вЂ” no
+    // Second timeframes are aggregated client-side from the trade lane — no
     // server kline stream exists for them (and adapters would silently
     // substitute a 1m/5m interval), so the candle channel is never touched.
     if (!exchange || isSecondTimeframe(tf)) return
@@ -670,7 +670,7 @@ function useWsCandle(
       const ev = eventsRef.current
       if (!ev) return
 
-      // kline snapshot в†’ FULL replace of the bar (scalpboard's Cn).
+      // kline snapshot → FULL replace of the bar (scalpboard's Cn).
       const patch = ev.applyKline(c)
       if (adjustingRef?.current) return
 
@@ -697,10 +697,11 @@ function useWsTrade(
   lastUpdateRef?: React.RefObject<number>,
   aggregatorRef?: React.RefObject<SecondCandleAggregator | null>,
 ) {
-  // The price lane (bookTicker mid) is the primary tick source вЂ” like
+  // The price lane (bookTicker mid) is the primary tick source — like
   // scalpboard's single price stream. The trade lane only kicks in when the
   // mid has been quiet for a second, so two prices never alternate on the
-  // same forming bar.
+  // same forming bar. Second timeframes (1s/5s/15s) are the exception: they
+  // run on the trade lane only, exactly like scalpboard's chart.
   const lastMidTickAtRef = useRef(0)
 
   useEffect(() => {
@@ -725,21 +726,21 @@ function useWsTrade(
         : Math.floor(Date.now() / 1000)
 
       // Second timeframes: every print feeds the client-side aggregator
-      // (volume included) вЂ” the mid-vs-trade alternation guard does not
-      // apply, both lanes must merge into the forming bar.
+      // (volume included). The mid lane is not even subscribed for these
+      // timeframes — a quote can never open or skew a forming bucket.
       if (isSecondTimeframe(tf)) {
         const volume = typeof trade.volume === 'number' ? trade.volume : parseFloat(String(trade.volume ?? '0'))
         aggregatorRef?.current?.addTrade(price, isFinite(volume) && volume > 0 ? volume : 0, tradeTime)
         return
       }
 
-      // The mid lane is fresher вЂ” skip the trade print entirely.
+      // The mid lane is fresher — skip the trade print entirely.
       if (Date.now() - lastMidTickAtRef.current < 1000) return
 
       const ev = eventsRef.current
       if (!ev) return
 
-      // Price tick в†’ mutate ONLY the last bar's close/high/low (scalpboard's
+      // Price tick → mutate ONLY the last bar's close/high/low (scalpboard's
       // En). Volume never comes from trades.
       const patch = ev.applyTick({ price, timeSec: tradeTime } as TickPayload)
       if (adjustingRef?.current) return
@@ -748,7 +749,18 @@ function useWsTrade(
     })
     wsSubscribe(tradeType)
 
-    // Fast-lane price: bookTicker mid вЂ” the scalpboard-style "live" feel.
+    // Second timeframes: candles come exclusively from the trade lane —
+    // scalpboard's chart explicitly skips its own 'price' feed for 1s/5s/15s.
+    // Not subscribing to the mid at all is stricter than just ignoring it:
+    // bookTicker quotes can never leak into a forming second bucket.
+    if (isSecondTimeframe(tf)) {
+      return () => {
+        unsub()
+        wsUnsubscribe(tradeType)
+      }
+    }
+
+    // Fast-lane price: bookTicker mid — the scalpboard-style "live" feel.
     // Exchange filter: the channel is keyed by symbol only; only the
     // matching exchange's mid reaches this chart.
     const priceChannel = `price:${symbol}`
@@ -758,13 +770,6 @@ function useWsTrade(
       if (!d || typeof d.price !== 'number' || !isFinite(d.price) || d.price <= 0) return
       if (exchange && d.exchange && d.exchange !== exchange) return
       lastMidTickAtRef.current = Date.now()
-
-      // Second timeframes: the mid merges into the forming aggregator bar
-      // (volume untouched by the mid lane).
-      if (isSecondTimeframe(tf)) {
-        aggregatorRef?.current?.addMid(d.price, Math.floor(Date.now() / 1000))
-        return
-      }
 
       const ev = eventsRef.current
       if (!ev || adjustingRef?.current) return
@@ -820,7 +825,7 @@ function useSecondCandleAggregator(
     }
   }, [symbol, exchange, tf, adjustingRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
 
-  // WS reconnect: the dead window must not survive inside a forming bar вЂ”
+  // WS reconnect: the dead window must not survive inside a forming bar —
   // drop it so the next print re-opens a clean bucket.
   const [wsCount, setWsCount] = useState(getWsOpenCount)
   useEffect(() => {
@@ -979,9 +984,9 @@ const MiniChart = memo(function MiniChart({
       candleRef.current = null
       volumeRef.current = null
     }
-    // NB: `tf` is deliberately NOT a dependency вЂ” a timeframe switch only
+    // NB: `tf` is deliberately NOT a dependency — a timeframe switch only
     // needs new data (useFullHistory handles setData + visible range), not a
-    // full chart destroy/recreate. `candlesType` DOES trigger a recreate вЂ”
+    // full chart destroy/recreate. `candlesType` DOES trigger a recreate —
     // the series construction differs per style.
   }, [symbol, pricePrecision, baseSettings.candlesType])
 
@@ -1352,14 +1357,14 @@ function ChartSettingsPanel() {
 
       <div className="mt-2 border-t border-[#222] pt-2">
         <div className="text-[10px] text-[#666] leading-[1.5]">
-          РљР°СЃРєР°РґС‹ вЂ” РїРѕР»РЅР°СЏ РЅР°СЃС‚СЂРѕР№РєР° РІ Р»РёС‡РЅРѕРј РєР°Р±РёРЅРµС‚Рµ
+          РљР°СЃРєР°РґС‹ — РїРѕР»РЅР°СЏ РЅР°СЃС‚СЂРѕР№РєР° РІ Р»РёС‡РЅРѕРј РєР°Р±РёРЅРµС‚Рµ
         </div>
       </div>
       <div className="mt-2 flex items-center gap-3">
         <Toggle checked={s.showTriggeredAlerts} onChange={v => setSetting('showTriggeredAlerts', v)} label="РђР»РµСЂС‚С‹" />
       </div>
 
-      <div className="mt-1 text-[10px] text-[#666]">{'{ticker}'} вЂ” С‚РёРєРµСЂ РІ С‚РµРєСЃС‚Рµ Р·РЅР°РєР°</div>
+      <div className="mt-1 text-[10px] text-[#666]">{'{ticker}'} — С‚РёРєРµСЂ РІ С‚РµРєСЃС‚Рµ Р·РЅР°РєР°</div>
     </div>
   )
 }
@@ -1379,7 +1384,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
       low24h: c.low24h,
     }
   }))
-  // Smoothed price display (presentation only вЂ” chart/store data stays exact).
+  // Smoothed price display (presentation only — chart/store data stays exact).
   const priceRef = useSmoothedPriceRef(symbol, coin?.pricePrecision ?? 2, coin?.price, '$')
   const isUp = coin ? coin.change24h >= 0 : true
   const badge = exchangeBadge(chartExchange)
@@ -1445,11 +1450,11 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
         )}
         {activeTool !== null && (
           <span className="text-[10px] text-[#ccc] font-mono bg-[#333] px-[6px] py-[2px] rounded-[3px] border border-[#444]">
-            {activeTool === 'h-ray' ? 'Р“РѕСЂРёР·. Р»СѓС‡' : activeTool === 't-ray' ? 'РўСЂРµРЅРґ. Р»СѓС‡' : activeTool === 'alert' ? 'Р¦РµРЅРѕРІРѕР№ Р°Р»РµСЂС‚' : 'РћС‚СЂРµР·РѕРє'} вЂ” РєР»РёРє РЅР° РіСЂР°С„РёРєРµ | Esc вЂ” РѕС‚РјРµРЅР°
+            {activeTool === 'h-ray' ? 'Р“РѕСЂРёР·. Р»СѓС‡' : activeTool === 't-ray' ? 'РўСЂРµРЅРґ. Р»СѓС‡' : activeTool === 'alert' ? 'Р¦РµРЅРѕРІРѕР№ Р°Р»РµСЂС‚' : 'РћС‚СЂРµР·РѕРє'} — РєР»РёРє РЅР° РіСЂР°С„РёРєРµ | Esc — РѕС‚РјРµРЅР°
           </span>
         )}
         <span className="text-[10px] text-[#666] font-mono">
-          Shift + Р›РљРњ / РљРѕР»С‘СЃРёРєРѕ вЂ” РёР·РјРµСЂРёС‚СЊ %
+          Shift + Р›РљРњ / РљРѕР»С‘СЃРёРєРѕ — РёР·РјРµСЂРёС‚СЊ %
         </span>
       </div>
     </div>
@@ -1664,7 +1669,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
         }
       }
 
-      // Tooltip anchor clamped to the container HERE (event context вЂ” refs
+      // Tooltip anchor clamped to the container HERE (event context — refs
       // are legal in handlers); the render reads plain numbers only.
       const box = containerRef.current
       const boxW = box?.clientWidth ?? 9999
@@ -1905,7 +1910,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
                     {selection.changePct.toFixed(2)}%
                   </div>
                   <div className="text-[10px] text-[#888] mt-[2px]">
-                    ${formatPrice(selection.startPrice, precision)} в†’ ${formatPrice(selection.endPrice, precision)}
+                    ${formatPrice(selection.startPrice, precision)} → ${formatPrice(selection.endPrice, precision)}
                   </div>
                   <div className="text-[10px] text-[#666]">
                     О” {formatDuration(selection.durationSec)}

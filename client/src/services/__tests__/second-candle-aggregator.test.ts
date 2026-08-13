@@ -94,32 +94,46 @@ describe('second-candle-aggregator (scalpboard processTradeForSeconds parity)', 
     expect(emitted[1].open).toBe(110)
   })
 
-  it('addMid never touches volume and dedupes identical consecutive mids', () => {
-    agg.addMid(100, 30)
-    agg.addMid(100, 30.2)
-    agg.addMid(101, 30.4)
-    vi.advanceTimersByTime(50)
-    expect(emitted).toHaveLength(1)
-    expect(emitted[0].volume).toBe(0)
-    expect(emitted[0].close).toBe(101)
+  it('flat market: a new bar opens exactly at the previous close', () => {
+    // The user-visible guarantee: open of a bar === close of the previous
+    // one when the market did not move. With no mid lane, a bucket opens
+    // only on the first real print, so same-price trades chain perfectly.
+    agg.addTrade(100, 1, 9.5)
+    agg.addTrade(100, 2, 9.9)
+    agg.addTrade(100, 3, 10.3)
 
-    // A trade after the mid accumulates volume on the same bucket.
-    agg.addTrade(102, 7, 30.6)
+    expect(emittedTimes).toEqual([9])
     vi.advanceTimersByTime(50)
-    expect(emitted[1].volume).toBe(7)
-    expect(emitted[1].close).toBe(102)
+    expect(emittedTimes).toEqual([9, 10])
+    expect(emitted[0].close).toBe(100)
+    expect(emitted[1].open).toBe(100)
   })
 
-  it('mid and trade lanes share one bar', () => {
-    agg.addTrade(100, 2, 40)
-    agg.addMid(101, 40.3)
-    agg.addTrade(99, 1, 40.7)
+  it('ignores a late print for an already-closed bucket (no open repaint)', () => {
+    // A delayed/out-of-order print (reconnect replay) must not roll the
+    // series back: the previous bar was already flushed, the forming bucket
+    // stays untouched and the new bucket's open is not overwritten.
+    agg.addTrade(100, 1, 10)
+    agg.addTrade(105, 2, 11)
+
+    // Late print carrying a stale price for bucket 10.
+    agg.addTrade(90, 1, 10.7)
+
+    expect(emittedTimes).toEqual([10])
+    vi.advanceTimersByTime(50)
+    expect(emittedTimes).toEqual([10, 11])
+    expect(emitted[1]).toEqual(expect.objectContaining({ open: 105, close: 105, low: 105, volume: 2 }))
+  })
+
+  it('out-of-order prints within the same bucket still merge', () => {
+    // The guard only drops prints for buckets OLDER than the current one.
+    // Same-bucket out-of-order prints keep normal OHLC semantics.
+    agg.addTrade(100, 1, 10.9)
+    agg.addTrade(99, 1, 10.1)
+    agg.addTrade(101, 1, 10.5)
     vi.advanceTimersByTime(50)
     expect(emitted).toHaveLength(1)
-    expect(emitted[0].high).toBe(101)
-    expect(emitted[0].low).toBe(99)
-    expect(emitted[0].close).toBe(99)
-    expect(emitted[0].volume).toBe(3)
+    expect(emitted[0]).toEqual(expect.objectContaining({ open: 100, high: 101, low: 99, close: 101, volume: 3 }))
   })
 
   it('reset() clears the open bar; a fresh print re-opens the bucket', () => {
@@ -140,7 +154,6 @@ describe('second-candle-aggregator (scalpboard processTradeForSeconds parity)', 
     agg.addTrade(0, 1, 10)
     agg.addTrade(100, 1, -5)
     agg.addTrade(NaN, 1, 10)
-    agg.addMid(0, 10)
     vi.advanceTimersByTime(100)
     expect(emitted).toHaveLength(0)
   })

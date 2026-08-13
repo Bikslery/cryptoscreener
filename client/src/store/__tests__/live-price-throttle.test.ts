@@ -42,12 +42,12 @@ describe('live-price throttled publisher (1000ms cadence)', () => {
   })
 
   it('continues on the cadence even after a step (next commit at the boundary)', () => {
-    setLivePrice('A', 100) // first в†’ immediate
+    setLivePrice('A', 100) // first → immediate
     setLivePrice('A', 102) // queued
     vi.advanceTimersByTime(1000) // -> 102 committed at the 1000ms boundary
     expect(getLivePrice('A')).toBe(102)
 
-    setLivePrice('A', 250) // within the window again в†’ queued, not instant
+    setLivePrice('A', 250) // within the window again → queued, not instant
     expect(getLivePrice('A')).toBe(102)
     vi.advanceTimersByTime(1000) // -> 250 committed on the next boundary
     expect(getLivePrice('A')).toBe(250)
@@ -64,14 +64,14 @@ describe('live-price throttled publisher (1000ms cadence)', () => {
   it('skips subscribers when the value is unchanged', () => {
     const listener = vi.fn()
     const unsub = subscribeLivePrice('A', listener)
-    setLivePrice('A', 100) // first price в†’ immediate publish, listener fires once
+    setLivePrice('A', 100) // first price → immediate publish, listener fires once
     expect(listener).toHaveBeenCalledTimes(1)
     listener.mockClear()
     setLivePrice('A', 100)
     setLivePrice('A', 100)
     vi.advanceTimersByTime(1000)
     expect(getLivePrice('A')).toBe(100)
-    expect(listener).not.toHaveBeenCalled() // unchanged value в†’ no re-notify
+    expect(listener).not.toHaveBeenCalled() // unchanged value → no re-notify
     unsub()
   })
 })

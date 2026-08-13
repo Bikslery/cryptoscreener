@@ -4,19 +4,24 @@ import type { UnifiedCandle, Exchange } from '../types'
  * Client-side second-candle aggregator (scalpboard.io `processTradeForSeconds`
  * parity).
  *
- * Scalpboard builds 1s/5s/15s candles on the client from the aggTrade lane:
- * each print is bucketed into `floor(timeSec / interval) * interval` (UTC),
- * OHLCV accumulates in-place, and the current bar is flushed on a 50ms timer.
- * Second-candle timeframes never round-trip through the server kline lane —
- * the server cannot serve 1s klines for futures/bybit, so the client becomes
- * the candle source.
+ * Scalpboard builds 1s/5s/15s candles on the client from the aggTrade lane
+ * ONLY — the chart's price lane is explicitly skipped for 1s/5s/15s, and the
+ * server cannot serve second klines for futures/bybit. Each print is bucketed
+ * into `floor(timeSec / interval) * interval` (UTC), OHLCV accumulates
+ * in-place, and the current bar is flushed on a 50ms timer.
  *
  * Rules (mirror scalpboard exactly):
  *  - bucket start = `floor(timeSec / tfSec) * tfSec` on RAW UTC seconds —
  *    the chart paint shift (toChartTime) is applied by the caller later.
- *  - first print of a bucket opens the bar (open = high = low = close).
- *  - trade prints accumulate volume; the bookTicker mid (`addMid`) never
- *    touches volume.
+ *  - first print of a bucket opens the bar (open = high = low = close). A
+ *    bucket NEVER re-opens: once open, only high/low/close/volume mutate, so
+ *    the open is exactly the first real print — no quote contamination, no
+ *    repaint with a different open.
+ *  - prints accumulate base volume (consistent with our server-side candles;
+ *    scalpboard accumulates quote volume — either is self-consistent).
+ *  - a late print for an ALREADY-CLOSED bucket (bucket < current) is DROPPED:
+ *    replaying it would roll the bar back and repaint a different open. The
+ *    trade lane is ordered by the server, so this only guards reconnects.
  *  - a bucket switch pushes the previous bar out IMMEDIATELY (it would
  *    otherwise be lost between flushes).
  *  - the current bar is flushed every 50ms, but only when it actually
@@ -36,7 +41,6 @@ export interface SecondCandleAggregatorOpts {
 
 export interface SecondCandleAggregator {
   addTrade(price: number, volume: number, timeSec: number): void
-  addMid(price: number, timeSec: number): void
   reset(): void
   destroy(): void
 }
@@ -47,7 +51,6 @@ export function createSecondCandleAggregator(opts: SecondCandleAggregatorOpts): 
   let current: UnifiedCandle | null = null
   let dirty = false
   let destroyed = false
-  let lastMidPrice = 0
   let flushTimer: ReturnType<typeof setInterval> | null = null
 
   function open(price: number, timeSec: number, volume: number) {
@@ -72,30 +75,31 @@ export function createSecondCandleAggregator(opts: SecondCandleAggregatorOpts): 
     dirty = false
   }
 
-  function add(price: number, volume: number, timeSec: number, isMid: boolean) {
+  function add(price: number, volume: number, timeSec: number) {
     if (destroyed) return
     if (!isFinite(price) || price <= 0) return
     if (!isFinite(timeSec) || timeSec <= 0) return
 
     const bucket = Math.floor(timeSec / tfSeconds) * tfSeconds
 
-    if (!current || bucket !== current.time) {
-      // Bucket switch: the previous bar must not be lost between flushes.
-      if (current) flushNow()
-      open(price, timeSec, isMid ? 0 : volume)
-      if (isMid) lastMidPrice = price
+    if (current && bucket < current.time) {
+      // Late print for an already-closed bucket: the previous bar was already
+      // flushed/painted, and re-opening it would roll the series back and
+      // repaint the open. Drop.
       return
     }
 
-    // Dedupe only applies to the mid lane: identical consecutive mid prints
-    // add nothing, but identical trade prints still carry volume.
-    if (isMid && price === lastMidPrice) return
-    if (isMid) lastMidPrice = price
+    if (!current || bucket > current.time) {
+      // Bucket switch: the previous bar must not be lost between flushes.
+      if (current) flushNow()
+      open(price, timeSec, volume)
+      return
+    }
 
     current.high = Math.max(current.high, price)
     current.low = Math.min(current.low, price)
     current.close = price
-    if (!isMid) current.volume += volume
+    current.volume += volume
     dirty = true
   }
 
@@ -106,15 +110,11 @@ export function createSecondCandleAggregator(opts: SecondCandleAggregatorOpts): 
 
   return {
     addTrade(price: number, volume: number, timeSec: number) {
-      add(price, volume, timeSec, false)
-    },
-    addMid(price: number, timeSec: number) {
-      add(price, 0, timeSec, true)
+      add(price, volume, timeSec)
     },
     reset() {
       current = null
       dirty = false
-      lastMidPrice = 0
     },
     destroy() {
       destroyed = true
