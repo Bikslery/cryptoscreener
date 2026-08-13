@@ -177,6 +177,19 @@ export function calcCascades(
 }
 
 /**
+ * The trading level of a cascade — the price the drawn line sits on. For a
+ * resistance ('h') cascade it is the highest rejection of the chain (max
+ * high), for a support ('l') cascade the lowest (min low).
+ */
+export function cascadeLevel(chain: OverlayPeak[], side: 'h' | 'l'): number {
+  let level = chain[0]?.e ?? 0
+  for (const p of chain) {
+    if (side === 'h' ? p.e > level : p.e < level) level = p.e
+  }
+  return level
+}
+
+/**
  * Drop peaks whose level a later candle has traded through (scalpboard parity:
  * the server deletes a peak once price crosses it). An 'h' peak is dead when
  * some LATER candle's high exceeds it, an 'l' peak when a later candle's low

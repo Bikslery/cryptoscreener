@@ -3,9 +3,9 @@ import type {
   SeriesAttachedParameter, SeriesType, Time,
 } from 'lightweight-charts'
 import type { OverlaysData } from '../../../services/chart-overlays'
+import { cascadeLevel } from '../../../services/chart-overlays'
 import { At } from '../../../services/chart-config'
 import { toChartTime } from '../../../services/candle-events'
-import { formatCompact } from '../../../utils/format'
 
 /**
  * Peaks/cascades renderer — a verbatim port of scalpboard's `labled_line`
@@ -31,6 +31,12 @@ import { formatCompact } from '../../../utils/format'
  *  colorschemes (chart options `other`):
  *    peak:    upColor = downColor = --chart--peak (#4d4d4d)
  *    baseline: cascades l->top, h->bottom
+ *
+ *  One deliberate deviation: scalpboard draws one line per cascade rung (the
+ *  whole ladder); here each cascade draws ONE line at its trading level — the
+ *  chain's extreme (cascadeLevel): the highest rejection for resistance, the
+ *  lowest support for support — starting at the first touch. The label shows
+ *  the level price and the touch count instead of the peak volume.
  */
 interface LineSpec {
   time: number
@@ -203,15 +209,19 @@ class OverlaysPaneView implements IPrimitivePaneView {
     const specs: LineSpec[] = []
     for (const side of ['h', 'l'] as const) {
       for (const cascade of data.cascades[side]) {
-        const baseline: 'top' | 'bottom' = side === 'l' ? 'top' : 'bottom'
-        for (const peak of cascade) {
-          specs.push({
-            time: peak.t,
-            price: peak.e,
-            text: formatCompact(peak.c),
-            baseline,
-          })
-        }
+        if (cascade.length === 0) continue
+        // One level line per cascade (deliberate deviation from scalpboard's
+        // per-rung ladder): the drawn price is the cascade's extreme — the
+        // highest rejection for resistance, the lowest support for support —
+        // and the label shows the level price plus how many times price
+        // tested it (chain members are the touches).
+        const price = cascadeLevel(cascade, side)
+        specs.push({
+          time: cascade[0].t,
+          price,
+          text: `${price.toFixed(this._primitive.pricePrecision())} ×${cascade.length}`,
+          baseline: side === 'l' ? 'top' : 'bottom',
+        })
       }
     }
     return specs

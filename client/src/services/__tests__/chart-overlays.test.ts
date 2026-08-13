@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   detectPeaks, calcCascades, computeOverlays, computeCascades,
-  DEFAULT_CASCADES_CONFIG,
+  cascadeLevel, DEFAULT_CASCADES_CONFIG,
 } from '../chart-overlays'
 import type { UnifiedCandle } from '../../types'
 
@@ -125,6 +125,29 @@ describe('calcCascades (verbatim scalpboard port)', () => {
     const tight = [peak(100.6, 1), peak(100.3, 2), peak(100.0, 3)]
     expect(calcCascades(tight, 'h', 2, 0.5).length).toBe(1)
     expect(calcCascades(tight, 'l', 2, 0.5).length).toBe(1)
+  })
+})
+
+describe('cascadeLevel — the trading level of a cascade', () => {
+  const peak = (e: number, t: number, c = 1) => ({ e, t, c })
+
+  it('h: the level is the highest rejection of the chain', () => {
+    // descending highs, but one rung pokes higher — the level is the max
+    expect(cascadeLevel([peak(100.3, 2), peak(100.0, 4), peak(100.6, 6)], 'h')).toBe(100.6)
+  })
+
+  it('l: the level is the lowest support of the chain', () => {
+    expect(cascadeLevel([peak(98.0, 2), peak(98.3, 4), peak(97.9, 6)], 'l')).toBe(97.9)
+  })
+
+  it('single-member chain: the level is that member', () => {
+    expect(cascadeLevel([peak(123.4, 2)], 'h')).toBe(123.4)
+    expect(cascadeLevel([peak(123.4, 2)], 'l')).toBe(123.4)
+  })
+
+  it('empty chain yields 0 without crashing', () => {
+    expect(cascadeLevel([], 'h')).toBe(0)
+    expect(cascadeLevel([], 'l')).toBe(0)
   })
 })
 
