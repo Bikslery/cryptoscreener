@@ -1,7 +1,7 @@
 import { useEffect, useRef, memo, useState, useMemo } from 'react'
 import { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
-import { useCoinListStore, setLivePrice, getLivePriceIntervalMs } from '../../store'
+import { useCoinListStore, setLivePrice } from '../../store'
 import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
@@ -13,14 +13,9 @@ import * as candleCache from '../../services/candle-cache'
 import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT, EXPANDED_CANDLE_LIMIT } from '../../services/candle-prefetch'
 import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
 import { UP_COLOR, DOWN_COLOR, UP_COLOR_VOL, DOWN_COLOR_VOL, UP_BORDER, DOWN_BORDER } from './chart-colors'
-import { createCandleLifecycle, type CandleLifecycle, type CandlePatch, type TradePayload, type GapBackfill } from '../../services/candle-lifecycle'
-import { recordDiag } from '../../services/candle-diag'
-import { sanitizeCandle, sanitizeSeries, contextWindow, findOutlierCandles } from '../../services/candle-sanity'
-import { isFiniteOHLCV, validateCandle, normalizeCandle } from '../../services/candle-utils'
-import { applyCandleUpdates } from '../../services/candle-merge'
-import { beginFormingGlide, advanceFormingGlide, type FormingTarget, type FormingGlide } from '../../services/candle-anim'
-import { registerGlider, unregisterGlider, glideDurationFor, type Glider } from '../../services/glide'
-import { computeCursorAnchoredZoomRange } from '../../services/chart-zoom'
+import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatch, type TickPayload } from '../../services/candle-events'
+import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
+import { isFiniteOHLCV, validateCandle } from '../../services/candle-utils'
 import { useDrawings } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
 
@@ -32,615 +27,61 @@ const TF_SECONDS: Record<string, number> = {
 function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
 
 /**
- * Zoom (ctrl/cmd+wheel or trackpad pinch) anchored at the cursor, so the bar
- * under the pointer stays in place — zooming in/out never shifts what the
- * user is looking at.
+ * "Dumb renderer" (scalpboard.io parity).
  *
- * Why this is needed: lightweight-charts' own wheel zoom is cursor-anchored,
- * but with `handleScale.mouseWheel` enabled every ctrl+wheel/pinch tick ALSO
- * hit the old custom handler, which called `applyOptions({ barSpacing })` —
- * that path anchors to the RIGHT EDGE of the data (bar-mode rightOffset stays
- * fixed), so the view jumped back toward the newest bars and the chart
- * visibly jittered when zooming out. The caller intercepts the event in the
- * capture phase and stopPropagation so LWC's native handler never fires.
- *
- * The new range is computed purely from the PRE-zoom visible range — nothing
- * is read after `applyOptions`/`setVisibleLogicalRange` (LWC applies options
- * asynchronously, and `coordinateToLogical` is integer-rounded, so both are
- * unreliable mid-zoom).
+ * The server is the ONLY source of truth for candles. The client paints
+ * kline snapshots wholesale and mutates ONLY the last bar's close/high/low
+ * from price ticks (open and volume are never touched by a tick). There is
+ * no client-side aggregation, no glide, no sanity clamping, no synthetic
+ * filler candles and no self-heal: what the server says is what is drawn.
  */
-function applyCursorAnchoredZoom(
-  chart: IChartApi,
-  container: HTMLElement,
-  clientX: number,
-  deltaY: number,
-) {
-  const ts = chart.timeScale()
-  const vr = ts.getVisibleLogicalRange()
-  if (!vr) return
-  const width = ts.width()
-  if (width <= 0) return
-  const rect = container.getBoundingClientRect()
-  const next = computeCursorAnchoredZoomRange(vr, width, clientX - rect.left, deltaY)
-  if (!next) return
-  ts.setVisibleLogicalRange(next)
-}
-
-function repaintSeries(
-  chartRef: React.RefObject<IChartApi | null> | undefined,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
-  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  candles: UnifiedCandle[],
-) {
-  if (!candleRef.current || !volumeRef.current || candles.length === 0) return
-  // A repaint paints exact data — any pending forming-candle glide must stop
-  // so it can't overwrite the exact values on the next frame.
-  cancelFormingGate(candleRef.current)
-  getFormingAnimator(candleRef.current, () => candleRef.current, volumeRef.current, () => volumeRef.current).reset()
-  const valid = candles.filter(validateCandle).map(normalizeCandle)
-  if (valid.length === 0) return
-  // Capture the view BEFORE setData — LWC recomputes the scale from the new
-  // data, and restoring the same logical window keeps the viewport put.
-  const ts = chartRef?.current?.timeScale()
-  const prevLogical = ts ? ts.getVisibleLogicalRange() : null
-  try {
-    candleRef.current.setData(valid.map(c => ({
-      time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
-    })))
-    volumeRef.current.setData(valid.map(c => ({
-      time: c.time as Time, value: c.volume,
-      color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-    })))
-    if (ts && prevLogical) {
-      ts.setVisibleLogicalRange(prevLogical)
-    }
-  } catch {}
-}
-
-/**
- * Smooth forming-candle renderer (scalpboard-style glide).
- *
- * The backing array stays authoritative and exact; this animator only
- * interpolates what gets PAINTED on the last (forming) bar. Each live update
- * (trade / bookTicker mid / non-final kline) sets a new target; a shared
- * rAF coordinator glides the displayed OHLC toward it with TIME-BASED easing
- * (easeOutCubic) and an ADAPTIVE duration — active pairs (updates every few
- * ms) converge almost instantly, quiet symbols glide long and smooth. Final
- * candles, history loads and repaints always paint exact values — the
- * animation never touches data.
- */
-class FormingAnimator implements Glider {
-  private displayed: FormingTarget | null = null
-  private target: FormingTarget | null = null
-  private glide: FormingGlide | null = null
-  private lastTargetAt = 0
-  private readonly series: ISeriesApi<'Candlestick'>
-  private readonly getRef: () => ISeriesApi<'Candlestick'> | null
-  private readonly volSeries: ISeriesApi<'Histogram'>
-  private readonly getVolRef: () => ISeriesApi<'Histogram'> | null
-
-  constructor(
-    series: ISeriesApi<'Candlestick'>,
-    getRef: () => ISeriesApi<'Candlestick'> | null,
-    volSeries: ISeriesApi<'Histogram'>,
-    getVolRef: () => ISeriesApi<'Histogram'> | null,
-  ) {
-    this.series = series
-    this.getRef = getRef
-    this.volSeries = volSeries
-    this.getVolRef = getVolRef
+function upsertBar(candlesDataRef: React.RefObject<UnifiedCandle[]>, bar: UnifiedCandle): void {
+  const arr = candlesDataRef.current
+  if (!arr) return
+  const last = arr[arr.length - 1]
+  if (!last) { arr.push(bar); return }
+  if (bar.time === last.time) {
+    arr[arr.length - 1] = bar
+  } else if (bar.time > last.time) {
+    arr.push(bar)
   }
-
-  get isAnimating(): boolean {
-    return this.glide !== null
-  }
-
-  /** Route a live forming-candle update through the animator. Returns true when handled. */
-  paint(c: UnifiedCandle): boolean {
-    const t: FormingTarget = {
-      time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
-      volume: c.volume,
-    }
-    if (!this.displayed || this.displayed.time !== t.time) {
-      // New bar (or first seed after a repaint): snap exactly — the glide
-      // must never stretch across period boundaries.
-      this.glide = null
-      unregisterGlider(this)
-      this.target = t
-      this.displayed = { ...t }
-      this.paintSeries(this.displayed)
-      return true
-    }
-    this.target = t
-    // Adaptive duration from how long it's been since the last live update.
-    const now = performance.now()
-    const interval = this.lastTargetAt === 0 ? 0 : now - this.lastTargetAt
-    this.lastTargetAt = now
-    this.glide = beginFormingGlide({ ...this.displayed }, t, glideDurationFor(interval))
-    registerGlider(this)
-    return true
-  }
-
-  /** Advance one frame (driven by the shared rAF coordinator). */
-  tick(dt: number): boolean {
-    if (this.getRef() !== this.series || !this.target || !this.displayed || !this.glide) return false
-    const { next, converged, glide } = advanceFormingGlide(this.glide, dt)
-    this.glide = glide
-    if (converged) {
-      this.glide = null
-      this.displayed = { ...this.target }
-      this.paintSeries(this.displayed)
-      return false
-    }
-    this.displayed = next
-    this.paintSeries(next)
-    return true
-  }
-
-  /** A final kline (or any repaint) must show exact values — stop the glide. */
-  reset() {
-    this.glide = null
-    unregisterGlider(this)
-    this.displayed = null
-    this.target = null
-  }
-
-  private paintSeries(t: FormingTarget) {
-    try {
-      this.series.update({
-        time: t.time as Time,
-        open: t.open,
-        high: t.high,
-        low: t.low,
-        close: t.close,
-      })
-    } catch {
-      // Series is gone (chart removed / recreated) — stop cleanly.
-      this.reset()
-      return
-    }
-    // Volume glides with the same eased progress; the color follows the
-    // TARGET direction (authoritative) so it never flickers mid-glide.
-    const vol = this.getVolRef()
-    if (!vol || vol !== this.volSeries) {
-      this.reset()
-      return
-    }
-    try {
-      this.volSeries.update({
-        time: t.time as Time,
-        value: t.volume,
-        color: t.close >= t.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-      })
-    } catch {
-      this.reset()
-    }
-  }
-}
-
-// One animator per candle series (chart instance). WeakMap → GC'd with the
-// series; the loop self-stops when the ref no longer points at this series
-// (unmount, or pricePrecision flip recreates the series).
-const formingAnimators = new WeakMap<ISeriesApi<'Candlestick'>, FormingAnimator>()
-
-function getFormingAnimator(
-  series: ISeriesApi<'Candlestick'>,
-  getRef: () => ISeriesApi<'Candlestick'> | null,
-  volSeries: ISeriesApi<'Histogram'>,
-  getVolRef: () => ISeriesApi<'Histogram'> | null,
-): FormingAnimator {
-  let a = formingAnimators.get(series)
-  if (!a) {
-    a = new FormingAnimator(series, getRef, volSeries, getVolRef)
-    formingAnimators.set(series, a)
-  }
-  return a
-}
-
-// --- Forming-candle CANVAS cadence gate ----------------------------------
-// The store throttles the NUMERIC live price to the shared cadence, but the
-// chart's own live price (forming-candle body, price line, last-value label)
-// is painted straight from candle patches and stayed on every trade/mid/kline.
-// This gate BUFFERS the visual forming-candle updates (latest-wins) and paints
-// them at the same cadence, so the canvas steps together with the numbers.
-// The backing array stays exact & real-time; final candles, history loads and
-// gap backfills always paint immediately (never gated).
-const formingPaintGates = new WeakMap<ISeriesApi<'Candlestick'>, {
-  pending: UnifiedCandle | null
-  lastPaintAt: number
-  timer: ReturnType<typeof setTimeout> | null
-}>()
-
-function cancelFormingGate(series: ISeriesApi<'Candlestick'> | null | undefined) {
-  if (!series) return
-  const g = formingPaintGates.get(series)
-  if (!g) return
-  if (g.timer !== null) { clearTimeout(g.timer); g.timer = null }
-  g.pending = null
-}
-
-function queueFormingGate(
-  series: ISeriesApi<'Candlestick'>,
-  c: UnifiedCandle,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
-  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-) {
-  let g = formingPaintGates.get(series)
-  if (!g) {
-    g = { pending: null, lastPaintAt: -Infinity, timer: null }
-    formingPaintGates.set(series, g)
-  }
-  g.pending = c
-  if (g.timer !== null) return
-  const interval = getLivePriceIntervalMs()
-  const delay = Math.max(0, interval - (Date.now() - g.lastPaintAt))
-  g.timer = setTimeout(() => {
-    g!.timer = null
-    const p = g!.pending
-    if (!p) return
-    g!.pending = null
-    g!.lastPaintAt = Date.now()
-    // Series swapped (pricePrecision recreate) → drop; the new series re-seeds.
-    if (candleRef.current !== series || !volumeRef.current) return
-    getFormingAnimator(series, () => candleRef.current, volumeRef.current, () => volumeRef.current).paint(p)
-  }, delay)
+  // Older than the tail is dropped by the events layer — nothing to do.
 }
 
 function applyChartPatch(
-  patch: CandlePatch,
+  patch: ChartEventPatch,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
   symbol: string,
   exchange: Exchange | undefined,
   tf: Timeframe,
-  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
-  chartRef?: React.RefObject<IChartApi | null>,
-  via?: string,
 ) {
-  const arr = candlesDataRef?.current
-  // Sync the backing array (sorted upsert) and detect out-of-order updates.
-  // lightweight-charts' series.update() THROWS for any bar older than the
-  // series' last bar, so a patch containing older candles (gap-backfill after
-  // a WS skip during sharp action, delayed klines) must be painted with a
-  // full setData repaint — otherwise the candle is silently dropped and the
-  // hole in history stays open forever.
-  const needsRepaint = arr ? applyCandleUpdates(arr, patch.candleUpdates) : false
-
-  if (needsRepaint && arr) {
-    repaintSeries(chartRef, candleRef, volumeRef, arr)
-  } else {
-    let didRepaint = false
-    const series = candleRef.current
-    const animator = series && volumeRef.current
-      ? getFormingAnimator(series, () => candleRef.current, volumeRef.current, () => volumeRef.current)
-      : null
-    // When the animator handles the forming bar, its volume glides along —
-    // skip that bar in the exact-volume loop below so it doesn't jump.
-    let formingTime: number | null = null
-    for (const raw of patch.candleUpdates) {
-      let c = normalizeCandle(raw)
-      if (!isFiniteOHLCV(c)) continue
-      // Paint-side sanity gate: a clear outlier (absurd range/price) is clamped
-      // into the local band so the phantom is never drawn — even if it somehow
-      // reached the patch without passing the array gate.
-      c = sanitizeCandle(c, arr ? contextWindow(arr, -1) : [], via ?? 'paint')
-      const arrLast = arr && arr.length > 0 ? arr[arr.length - 1] : null
-      if (animator && series) {
-        if (c.isFinal) {
-          // Period closed — paint exact values immediately, stop any pending
-          // glide, and drop a gated forming paint so nothing stale overwrites
-          // the finalized bar.
-          cancelFormingGate(series)
-          animator.reset()
-        } else if (arrLast && c.time === arrLast.time) {
-          // Live forming-candle update (trade / mid / non-final kline): NOW
-          // CADENCE-GATED — buffered (latest-wins) and painted at the shared
-          // 500ms interval, so the chart's live price steps with the numbers.
-          formingTime = c.time
-          queueFormingGate(series, c, candleRef, volumeRef)
-          continue
-        }
-      }
-      try {
-        candleRef.current?.update({
-          time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+  for (const u of patch.updates) {
+    const bar = u.bar
+    const t = toChartTime(bar.time) as Time
+    try {
+      candleRef.current?.update({ time: t, open: bar.open, high: bar.high, low: bar.low, close: bar.close })
+      if (u.paintVolume) {
+        volumeRef.current?.update({
+          time: t, value: bar.volume,
+          color: bar.close >= bar.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
         })
-      } catch {
-        // The series rejected the update (e.g. useFormingCandle painted a bar
-        // ahead of candlesDataRef, making this one "old"). Repaint everything
-        // from the backing array so the candle is never lost.
-        didRepaint = true
-        if (arr) repaintSeries(chartRef, candleRef, volumeRef, arr)
-        break
       }
+    } catch {
+      // Series was recreated mid-paint (pricePrecision flip) — the next
+      // history load repaints everything.
     }
-    if (!didRepaint) {
-      for (const raw of patch.volumeUpdates) {
-        const v = normalizeCandle(raw)
-        if (!isFinite(v.volume)) continue
-        if (formingTime !== null && v.time === formingTime) continue
-        try {
-          volumeRef.current?.update({
-            time: v.time as Time, value: v.volume,
-            color: v.close >= v.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-          })
-        } catch {
-          if (arr) repaintSeries(chartRef, candleRef, volumeRef, arr)
-          break
-        }
-      }
-    }
+    upsertBar(candlesDataRef, bar)
   }
-
   if (patch.livePrice != null) {
     setLivePrice(symbol, patch.livePrice)
   }
   if (patch.cacheWrites && exchange) {
     for (const c of patch.cacheWrites) {
-      candleCache.updateCandle(exchange, symbol, tf, normalizeCandle(c))
+      candleCache.updateCandle(exchange, symbol, tf, c)
     }
   }
-  const lastCandle = patch.candleUpdates[patch.candleUpdates.length - 1]
-  if (lastCandle && candleRef.current) {
-    // applyOptions triggers a style recalc — with bookTicker-mid updates
-    // arriving dozens of times per second, only touch it when the color
-    // actually flips (up ↔ down), not on every tick.
-    const color = lastCandle.close >= lastCandle.open ? UP_COLOR() : DOWN_COLOR()
-    if (lastPriceLineColor.get(candleRef.current) !== color) {
-      lastPriceLineColor.set(candleRef.current, color)
-      candleRef.current.applyOptions({ priceLineColor: color })
-    }
-  }
-}
-
-// Per-series cache of the last applied price-line color (avoids a style recalc
-// on every live tick — the color only flips when a bar closes up vs down).
-const lastPriceLineColor = new WeakMap<object, string>()
-
-/**
- * Self-healing consistency check (the "no silent holes" insurance).
- *
- * Every paint path keeps the backing array (candlesDataRef) authoritative and
- * syncs LWC incrementally — but a series can still drift silently (an update
- * LWC rejected, a canvas/series recreate mid-stream, a dropped frame). This
- * hook periodically compares the series' last bar with the array's last entry
- * and force-repaints (with visible-range preservation) when they diverge, so a
- * lost candle is restored automatically instead of leaving a permanent hole.
- */
-const SERIES_SELF_HEAL_INTERVAL_MS = 2500
-
-// DIAG + SELF-REPAIR: per-series persistence tracker for backing-array holes.
-// A hole seen on 2+ consecutive checks (~5s apart) is a permanent gap, not a
-// transient one waiting for a late kline/backfill. It is logged as
-// 'persistent_holes' AND auto-repaired via the same REST backfill path as the
-// WS gap detection — with a cooldown so a failed repair isn't spammed.
-const diagHoleHistory = new WeakMap<ISeriesApi<'Candlestick'>, { key: string; count: number; lastRepairAt?: number }>()
-const HOLE_REPAIR_COOLDOWN_MS = 30000
-
-function useSeriesSelfHeal(
-  chartRef: React.RefObject<IChartApi | null>,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
-  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  destroyedRef: React.RefObject<boolean>,
-  candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  adjustingRef?: React.RefObject<boolean>,
-  lifecycleRef?: React.RefObject<CandleLifecycle | null>,
-) {
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (destroyedRef.current) return
-      if (adjustingRef?.current) return
-      const series = candleRef.current
-      const volSeries = volumeRef.current
-      const arr = candlesDataRef.current
-      if (!series || !volSeries || !arr || arr.length === 0) return
-
-      // During a forming-candle glide the series' last bar intentionally
-      // differs from the array — skip the check until it converges.
-      const anim = formingAnimators.get(series)
-      if (anim?.isAnimating) return
-
-      let lwcLast: { time: number; close: number; volume: number } | null = null
-      try {
-        const data = series.data()
-        const last = data[data.length - 1] as { time: unknown; close: number } | undefined
-        const volData = volSeries.data()
-        const volLast = volData[volData.length - 1] as { value: number } | undefined
-        if (last && volLast) {
-          lwcLast = { time: last.time as number, close: last.close, volume: volLast.value }
-        }
-      } catch {
-        return
-      }
-
-      const arrLast = arr[arr.length - 1]
-      if (!arrLast) return
-
-      const diverged = !lwcLast
-        || lwcLast.time !== arrLast.time
-        || Math.abs(lwcLast.close - arrLast.close) > 1e-12
-        || Math.abs(lwcLast.volume - (arrLast.volume || 0)) > 1e-9
-
-      if (diverged) {
-        console.warn('[ChartGrid] Series drifted from backing array — self-heal repaint', {
-          symbol: arrLast.symbol,
-          lwc: lwcLast,
-          arr: { time: arrLast.time, close: arrLast.close, volume: arrLast.volume },
-        })
-        repaintSeries(chartRef, candleRef, volumeRef, arr)
-      }
-
-      // --- DIAG: whole-array continuity scan (holes in the middle) ---
-      const tfSecScan = getTfSeconds(arrLast.timeframe as Timeframe)
-      const holes: { from: number; to: number; periods: number }[] = []
-      if (tfSecScan > 0) {
-        for (let i = arr.length - 1; i > 0; i--) {
-          const diff = arr[i].time - arr[i - 1].time
-          if (diff > tfSecScan * 1.5) {
-            holes.push({
-              from: arr[i - 1].time + tfSecScan,
-              to: arr[i].time - tfSecScan,
-              periods: Math.max(1, Math.round(diff / tfSecScan) - 1),
-            })
-            if (holes.length >= 15) break
-          }
-        }
-      }
-      if (holes.length > 0) {
-        const key = holes.map(h => `${h.from}-${h.to}`).join(';')
-        const prev = diagHoleHistory.get(series)
-        if (prev && prev.key === key) {
-          prev.count++
-          if (prev.count >= 2) {
-            const totalPeriods = holes.reduce((a, h) => a + h.periods, 0)
-            if (prev.count === 2) {
-              console.warn('[Diag][SelfHeal] Persistent holes in backing array', {
-                symbol: arrLast.symbol,
-                tf: arrLast.timeframe,
-                holes: holes.slice(0, 5),
-                totalPeriods,
-              })
-              recordDiag('persistent_holes', {
-                symbol: arrLast.symbol,
-                tf: arrLast.timeframe,
-                periods: totalPeriods,
-                detail: JSON.stringify(holes.slice(0, 5)),
-              })
-            }
-            // SELF-REPAIR: the hole survived the backfill triggered by WS gap
-            // detection (it existed before the gap / the gap detector never
-            // fired because no new-period event landed). Restore it from REST,
-            // throttled per series-holeset so a failing backend isn't hammered.
-            const now = Date.now()
-            if (lifecycleRef && now - (prev.lastRepairAt || 0) >= HOLE_REPAIR_COOLDOWN_MS) {
-              prev.lastRepairAt = now
-              prev.count = 0 // re-arm: need 2 more consecutive checks to fire again
-              console.warn('[SelfHeal] Repairing holes from REST', {
-                symbol: arrLast.symbol,
-                tf: arrLast.timeframe,
-                holes: holes.slice(0, 5),
-              })
-              for (const h of holes) {
-                backfillGap(
-                  { fromTime: h.from, toTime: h.to },
-                  arrLast.symbol,
-                  arrLast.exchange,
-                  arrLast.timeframe as Timeframe,
-                  candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, chartRef,
-                )
-              }
-            }
-          }
-        } else {
-          diagHoleHistory.set(series, { key, count: 1 })
-        }
-      } else {
-        diagHoleHistory.delete(series)
-      }
-
-      // --- DIAG: phantom-candle sweep (outliers that survived the gates) ---
-      const outliers = findOutlierCandles(arr.slice(-80))
-      if (outliers.length > 0) {
-        recordDiag('render_outlier_present', {
-          symbol: arrLast.symbol,
-          tf: arrLast.timeframe,
-          periods: outliers.length,
-          detail: JSON.stringify(outliers.slice(0, 3).map(o => ({ t: o.time, h: o.high, l: o.low, c: o.close }))),
-        })
-      }
-    }, SERIES_SELF_HEAL_INTERVAL_MS)
-    return () => clearInterval(timer)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-}
-
-/**
- * Fetch and apply candles for a detected period gap (WS stream skipped one or
- * more buckets, e.g. after a brief disconnect during sharp price action).
- *
- * Uses `getOrFetchOlder` with `before = toTime + tfSec` and then filters to
- * the exact [fromTime, toTime] window. Deduplicated per (symbol,tf,gap) via an
- * in-flight set so a burst of late klines/trades for the same gap fires only
- * one REST request. The merge uses lifecycle.applyOlderPage + applyChartPatch
- * so it reuses the same draw/cache path as everything else.
- *
- * Safe to call concurrently from useWsCandle and useWsTrade — the second call
- * for the same gap no-ops once one is in flight, and overlapping fetches for
- * adjacent gaps are merged by the dedup-by-time inside applyChartPatch.
- */
-const backfillInflightKeys = new Set<string>()
-
-function backfillGap(
-  gap: GapBackfill,
-  symbol: string,
-  exchange: Exchange | undefined,
-  tf: Timeframe,
-  candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
-  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  lifecycleRef: React.RefObject<CandleLifecycle | null>,
-  destroyedRef: React.RefObject<boolean>,
-  candlesDataRef: React.RefObject<UnifiedCandle[]> | undefined,
-  chartRef?: React.RefObject<IChartApi | null>,
-) {
-  if (!exchange) return
-  if (destroyedRef.current) return
-  const key = `${exchange}:${symbol}:${tf}:${gap.fromTime}-${gap.toTime}`
-  if (backfillInflightKeys.has(key)) return
-  // Also collapse adjacent/nested gaps for the same series into one fetch
-  // window — a tight burst of WS messages often produces near-duplicate gaps.
-  const tfSec = getTfSeconds(tf)
-  for (const existing of backfillInflightKeys) {
-    const prefix = `${exchange}:${symbol}:${tf}:`
-    if (!existing.startsWith(prefix)) continue
-    const range = existing.slice(prefix.length).split('-')
-    const exFrom = Number(range[0])
-    const exTo = Number(range[1])
-    if (gap.fromTime >= exFrom - tfSec && gap.fromTime <= exTo + tfSec) {
-      // Overlaps or touches an in-flight gap — skip; that fetch will cover us.
-      return
-    }
-  }
-
-  backfillInflightKeys.add(key)
-  const before = gap.toTime + tfSec
-  const limit = Math.max(2, Math.round((gap.toTime - gap.fromTime) / tfSec) + 2)
-
-  getOrFetchOlder(symbol, tf, before, limit, exchange)
-    .then(candles => {
-      if (destroyedRef.current) return
-      const lc = lifecycleRef.current
-      if (!lc) return
-      const inWindow = candles.filter(c => c.time >= gap.fromTime && c.time <= gap.toTime)
-      if (inWindow.length === 0) {
-        // DIAG: the REST window came back without the missing periods — the
-        // hole the client detected is NOT in its own data, it's upstream.
-        recordDiag('backfill_empty', {
-          symbol, exchange, tf,
-          from: gap.fromTime, to: gap.toTime,
-          detail: `fetched ${candles.length} candles, window had none`,
-        })
-        return
-      }
-      // Apply through the lifecycle so tail state stays consistent, then paint.
-      const patch = lc.applyOlderPage(inWindow)
-      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'backfill')
-      recordDiag('backfill_filled', {
-        symbol, exchange, tf,
-        from: gap.fromTime, to: gap.toTime,
-        detail: `filled ${inWindow.length}/${candles.length} fetched`,
-      })
-    })
-    .catch((err) => {
-      // Network/server error — the gap remains visible but we don't crash.
-      // A subsequent kline for a later period will trigger another attempt.
-      recordDiag('backfill_failed', {
-        symbol, exchange, tf,
-        from: gap.fromTime, to: gap.toTime,
-        detail: err instanceof Error ? err.message : String(err),
-      })
-    })
-    .finally(() => {
-      backfillInflightKeys.delete(key)
-    })
 }
 
 function ChartMessageOverlay({ label, tone = 'muted' }: { label: string; tone?: 'muted' | 'error' }) {
@@ -666,7 +107,15 @@ function ChartCornerSpinner() {
 }
 
 function LiveIndicator({ isLive, lastUpdate, hasReceivedData }: { isLive: boolean; lastUpdate: number; hasReceivedData: boolean }) {
-  const timeSinceUpdate = Date.now() - lastUpdate
+  // Staleness is re-derived on a 1s tick instead of Date.now() during render
+  // (component purity) — the indicator still reacts within a second of the
+  // feed going stale.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const timeSinceUpdate = now - lastUpdate
   const showWarning = timeSinceUpdate > 3000
 
   const connecting = !hasReceivedData
@@ -736,6 +185,8 @@ function useInitialCandlesPush() {
   }, [])
 }
 
+type FullHistoryStatus = 'loading' | 'ready' | 'empty' | 'error'
+
 function useFullHistory(
   symbol: string,
   exchange: Exchange | undefined,
@@ -747,179 +198,147 @@ function useFullHistory(
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   options?: { limit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServer?: boolean; wsEpoch?: number },
   lastUpdateRef?: React.RefObject<number>,
-  lifecycleRef?: React.RefObject<CandleLifecycle | null>,
+  eventsRef?: React.RefObject<CandleEvents | null>,
   chartVersion?: number,
-): { isInitialLoading: boolean; status: 'loading' | 'ready' | 'empty' | 'error'; dataVersion: number } {
+): { isInitialLoading: boolean; status: FullHistoryStatus; dataVersion: number } {
   const limit = options?.limit ?? 1000
   const forceServer = options?.forceServer ?? false
   const wsEpoch = options?.wsEpoch ?? 0
+  const fitOnOpen = options?.fitOnOpen ?? false
+  const visibleBars = options?.visibleBars ?? 150
   const [isInitialLoading, setIsInitialLoading] = useState(true)
-  const [status, setStatus] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading')
+  const [status, setStatus] = useState<FullHistoryStatus>('loading')
   const [dataVersion, setDataVersion] = useState(0)
 
-  // Track the last painted (exchange,symbol,tf) key so a slow re-load of the
-  // SAME chart preserves the user's visible range instead of snapping back to
-  // the right edge (the "teleport" when the chart hadn't finished loading).
-  // New keys (symbol change / TF switch) still snap to the latest bars.
+  // Key of the last painted series — used to save the viewport we are about
+  // to leave and to know whether a reload is a same-key refresh.
   const lastPaintedKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!exchange) return
     const cancelled = { value: false }
-    // A reconnect-triggered refetch of the same chart must not blank it to the
-    // loading spinner — the current bars stay visible until the fresh history
-    // replaces them.
     const sameKeyReload = forceServer && lastPaintedKeyRef.current === `${exchange}:${symbol}:${tf}`
     if (!sameKeyReload) setIsInitialLoading(true)
-    setStatus('loading')
 
     const renderCandles = (candles: UnifiedCandle[]) => {
       if (destroyedRef.current || !candleRef.current || !volumeRef.current) {
-        // Nothing was painted — release reconciliation so realtime events that
-        // arrived during the fetch don't stay stuck in the buffer forever
-        // (which would freeze the forming candle).
-        lifecycleRef?.current?.setBuffered(false)
+        // Nothing was painted — release reconciliation so realtime events
+        // that arrived during the fetch are not stuck in the buffer.
+        eventsRef?.current?.setBuffered(false)
         return
       }
-      const prevData = candlesDataRef.current
-      // History/repaint sanitize gate: clamp any phantom outlier into the local
-      // band before it becomes authoritative data or reaches the canvas.
-      const safeSeries = sanitizeSeries(candles, 'history')
-      candlesDataRef.current = safeSeries
-      // Filter out invalid candles before rendering
-      const validCandles = safeSeries.filter(validateCandle).map(normalizeCandle)
-      const candleData = validCandles.map(c => ({
-        time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+      const key = `${exchange}:${symbol}:${tf}`
+      const ts = chartRef.current?.timeScale()
+
+      // Save the viewport we're LEAVING (symbol/TF switch) so returning to
+      // that pair restores exactly where the user left off.
+      const prevKey = lastPaintedKeyRef.current
+      if (ts && prevKey && prevKey !== key) {
+        saveViewport(prevKey, captureViewport(chartRef.current))
+      }
+
+      const valid = candles.filter(validateCandle)
+      candlesDataRef.current = valid
+      const candleData = valid.map(c => ({
+        time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close,
       }))
-      const volumeData = validCandles.map(c => ({
-        time: c.time as Time, value: c.volume,
+      const volumeData = valid.map(c => ({
+        time: toChartTime(c.time) as Time, value: c.volume,
         color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
       }))
-      const key = `${exchange}:${symbol}:${tf}`
-      const sameKey = lastPaintedKeyRef.current === key
       try {
-        const ts = chartRef.current?.timeScale()
-        // Capture BEFORE setData — setData resets the scale.
-        const prevLogical = sameKey && prevData.length > 0 ? ts?.getVisibleLogicalRange() ?? null : null
-        // Exact data replaces everything — a pending forming-candle glide
-        // must not paint stale interpolated values onto the new series.
-        cancelFormingGate(candleRef.current)
-        getFormingAnimator(candleRef.current, () => candleRef.current, volumeRef.current, () => volumeRef.current).reset()
+        // Capture BEFORE setData — setData resets the whole time scale.
+        const leavingKey = lastPaintedKeyRef.current
+        if (leavingKey && leavingKey === key) {
+          saveViewport(leavingKey, captureViewport(chartRef.current))
+        }
         candleRef.current.setData(candleData)
         volumeRef.current.setData(volumeData)
-        if (ts && candleData.length > 0) {
-          if (prevLogical) {
-            // Re-load of the same chart: keep the user exactly where they were.
-            // Restore by LOGICAL range, not by time — LWC's timeToIndex clamps
-            // times beyond the last bar to the last index, so a time-restore
-            // snapped the right edge onto the last candle whenever the view
-            // extended past it (e.g. default rightOffset or zoomed-out view).
-            ts.setVisibleLogicalRange(prevLogical)
-          } else if (options?.fitOnOpen) {
-            // Expanded chart: open maximally zoomed out — the whole loaded
-            // history fits on screen. The user can zoom in from there.
-            ts.fitContent()
-          } else {
-            const lastBar = candleData.length - 1
-            // Initial scale when opening a chart with no saved view: how many
-            // bars fit on screen. Mini charts default to 150; the expanded
-            // chart uses the user's setting (default 450) via options.visibleBars.
-            const rawVisibleBars = options?.visibleBars ?? 150
-            const visibleBars = Math.min(Math.max(rawVisibleBars, 20), 2000)
-            ts.setVisibleLogicalRange({ from: lastBar - visibleBars, to: lastBar + 5 })
-          }
+      } catch { /* benign: setData may throw on a fresh/empty series */ }
+      if (ts && candleData.length > 0) {
+        const saved = getViewport(key)
+        if (saved) {
+          // Restore the pair's saved viewport (scroll position, bar spacing,
+          // right offset, time visibility) — scalpboard's ae() equivalent.
+          restoreViewport(chartRef.current, saved)
+        } else if (fitOnOpen) {
+          // Expanded chart: open maximally zoomed out.
+          ts.fitContent()
+        } else {
+          // Mini charts: how many bars fit on screen.
+          const vbars = Math.min(Math.max(visibleBars, 20), 2000)
+          ts.setVisibleLogicalRange({ from: candleData.length - vbars, to: candleData.length + 5 })
         }
-      } catch {}
+      }
       lastPaintedKeyRef.current = key
-      // Bump dataVersion so the drawing primitive re-syncs (logical indexes
-      // shift when the underlying candle set is replaced, e.g. TF switch).
+      // Bump dataVersion so the drawing primitive re-syncs.
       setDataVersion(v => v + 1)
-      if (lifecycleRef) {
-        // Reconcile (scalpboard/cryptoscreener pattern): history is applied
-        // first, then buffered realtime events that arrived DURING the fetch
-        // are replayed on top — live updates are never lost or double-painted.
-        if (validCandles.length > 0) {
-          lifecycleRef.current?.applyHistory(validCandles)
-        }
-        const flushPatch = lifecycleRef.current?.setBuffered(false)
-        if (flushPatch && flushPatch.candleUpdates.length > 0) {
-          applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'buffer-flush')
+      if (eventsRef) {
+        // History lands first, then buffered live events (klines/ticks that
+        // arrived during the fetch) are replayed on top — never lost, never
+        // double-painted.
+        eventsRef.current?.applyHistory(valid)
+        const flush = eventsRef.current?.setBuffered(false)
+        if (flush && flush.updates.length > 0) {
+          applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf)
         }
       }
     }
 
     const run = async () => {
-      // Begin reconciliation: buffer realtime kline/trade events while the
-      // history loads so they aren't painted onto a partial array and then
-      // wiped by setData below (the flicker when loading history). renderCandles
-      // ends the buffering and replays the events on the loaded history.
-      lifecycleRef?.current?.setBuffered(true)
-      // Fast path: check client cache. Only a cache that covers the whole
-      // requested window counts — a 300-bar mini-chart cache must not satisfy
-      // the expanded chart's 3000-bar request, or the big chart would render
-      // partially zoomed out and never fetch the rest.
+      // Reconcile: buffer live events while the history loads.
+      eventsRef?.current?.setBuffered(true)
+
       const cached = candleCache.getCandles(exchange, symbol, tf)
       if (!forceServer && cached && cached.length >= limit) {
         if (!cancelled.value && !destroyedRef.current) {
           renderCandles(cached)
           setIsInitialLoading(false)
           setStatus('ready')
-          // Update lastUpdateRef after successful data load
-          if (lastUpdateRef) {
-            lastUpdateRef.current = Date.now()
-          }
+          if (lastUpdateRef) lastUpdateRef.current = Date.now()
         }
         return
       }
 
-      // Fallback: individual fetch (server does seamless stitching). forceServer
-      // skips the client-cache fast path inside getOrFetchHistory too, so a
-      // post-reconnect reload pulls fresh history and the cache's union fill
-      // heals any gaps that landed during the dead window.
-      try {
-        const fetched = await getOrFetchHistory(symbol, tf, limit, exchange, forceServer)
+      // Fetch with scalpboard-style retry backoff (100ms → 300ms): a
+      // transient REST failure must not leave the chart blank forever.
+      let fetched: UnifiedCandle[] = []
+      for (const delay of [0, 100, 300]) {
+        if (delay > 0) await new Promise(r => setTimeout(r, delay))
         if (cancelled.value || destroyedRef.current) {
-          // This run lost the race to a newer (symbol/exchange/tf) effect;
-          // release reconciliation so live events are never stranded.
-          lifecycleRef?.current?.setBuffered(false)
+          eventsRef?.current?.setBuffered(false)
           return
         }
-        if (fetched.length > 0) {
-          renderCandles(fetched)
-          setIsInitialLoading(false)
-          setStatus('ready')
-          // Update lastUpdateRef after successful data load
-          if (lastUpdateRef) {
-            lastUpdateRef.current = Date.now()
-            console.log('[useFullHistory] Initial load from server', { symbol, tf, candles: fetched.length })
-          }
-        } else {
-          // Empty history (server had nothing, or the fetch failed and
-          // getOrFetchHistory swallowed it): release the buffer so the forming
-          // candle can still be painted from live kline/trade events.
-          lifecycleRef?.current?.setBuffered(false)
-          setIsInitialLoading(false)
-          setStatus('empty')
-        }
-      } catch {
-        // Fetch failed — release reconciliation (the chart is empty/errored
-        // here; buffered events are discarded and the next load resyncs).
-        lifecycleRef?.current?.setBuffered(false)
+        fetched = await getOrFetchHistory(symbol, tf, limit, exchange, forceServer)
+        if (fetched.length > 0) break
+      }
+
+      if (cancelled.value || destroyedRef.current) {
+        eventsRef?.current?.setBuffered(false)
+        return
+      }
+      if (fetched.length > 0) {
+        renderCandles(fetched)
         setIsInitialLoading(false)
-        setStatus('error')
+        setStatus('ready')
+        if (lastUpdateRef) lastUpdateRef.current = Date.now()
+      } else {
+        // Server answered without candles (or every retry failed): release
+        // the buffer so the forming candle can still paint from live events.
+        eventsRef?.current?.setBuffered(false)
+        setIsInitialLoading(false)
+        setStatus('empty')
       }
     }
 
     run()
     return () => { cancelled.value = true }
     // `chartVersion` re-paints history when the canvas/series is recreated
-    // (e.g. pricePrecision flips): the new chart starts empty and would only
-    // show the live forming candle until the next symbol/TF change, because
-    // symbol/exchange/tf haven't changed. Without this, a recreated chart
-    // showed "just the last candle" until a kline arrived.
-    // `wsEpoch` re-paints history after a WS reconnect so periods that fell
-    // through the disconnected/dead window are restored from the server.
-  }, [symbol, exchange, tf, chartVersion, wsEpoch])
+    // (pricePrecision flip) — the new chart starts empty.
+    // `wsEpoch` re-paints after a WS reconnect so periods that fell through
+    // the dead window are restored from the server.
+  }, [symbol, exchange, tf, chartVersion, wsEpoch, limit, forceServer, fitOnOpen, visibleBars,
+    candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, lastUpdateRef, eventsRef])
 
   return { isInitialLoading, status, dataVersion }
 }
@@ -936,16 +355,20 @@ function useLazyScroll(
   isInitialLoading: boolean,
   adjustingRef: React.RefObject<boolean>,
   setIsLoadingMore?: (loading: boolean) => void,
-  lifecycleRef?: React.RefObject<CandleLifecycle | null>,
+  eventsRef?: React.RefObject<CandleEvents | null>,
   onLogicalShift?: (added: number) => void,
-  ) {
+) {
   const inflightRef = useRef(false)
   const reachedStartRef = useRef(false)
   const symbolRef = useRef(symbol)
   const exchangeRef = useRef(exchange)
   const tfRef = useRef(tf)
   const emptyCountRef = useRef(0)
-  const prefetchInflightRef = useRef(false)
+  const onLogicalShiftRef = useRef(onLogicalShift)
+  const setIsLoadingMoreRef = useRef(setIsLoadingMore)
+  const lastCallTimeRef = useRef(0)
+  const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingRangeRef = useRef<{ from: number; to: number } | null>(null)
 
   useEffect(() => {
     symbolRef.current = symbol
@@ -955,166 +378,105 @@ function useLazyScroll(
     inflightRef.current = false
     adjustingRef.current = false
     emptyCountRef.current = 0
-    prefetchInflightRef.current = false
-  }, [symbol, exchange, tf])
+    onLogicalShiftRef.current = onLogicalShift
+    setIsLoadingMoreRef.current = setIsLoadingMore
+  }, [symbol, exchange, tf, adjustingRef, onLogicalShift, setIsLoadingMore])
 
-  // Throttle instead of debounce: first call fires immediately (no delay),
-  // subsequent calls within 100ms are suppressed but the last one is replayed.
-  // This prevents both "empty space on fast scroll" (debounce too late)
-  // and "dozens of redundant checks" (no throttle at all).
+  // Throttle instead of debounce: first call fires immediately, subsequent
+  // calls within 100ms are suppressed but the last one is replayed.
   const onRange = useMemo(() => {
-    let lastCallTime = 0
-    let pendingTimer: ReturnType<typeof setTimeout> | null = null
-    let pendingRange: { from: number; to: number } | null = null
 
     const fire = (range: { from: number; to: number } | null) => {
       if (!range || adjustingRef.current || inflightRef.current || reachedStartRef.current) return
 
-      const visibleBars = range.to - range.from
-
-      // --- PREFETCH LAYER ---
-      // When user is approaching the edge (within 1.5× visible range),
-      // start prefetching into the cache BEFORE they actually need it.
-      // Fire-and-forget — warms the cache; the LOAD layer then paints from
-      // the cache without a network round-trip in the critical path.
-      const prefetchThreshold = Math.max(200, visibleBars * 1.5)
-      if (range.from < prefetchThreshold && !prefetchInflightRef.current) {
-        const curSymbol = symbolRef.current
-        const curExchange = exchangeRef.current
-        const curTf = tfRef.current
-          if (curExchange) {
-            const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
-            if (cached && cached.length > 0) {
-              prefetchInflightRef.current = true
-              const before = cached[0].time
-              getOrFetchOlder(curSymbol, curTf, before, 1000, curExchange)
-                .then(older => {
-                  const fresh = older.filter(c => c.time < before)
-                  if (fresh.length > 0) {
-                    candleCache.prependCandles(curExchange, curSymbol, curTf, fresh)
-                  }
-                })
-                .catch(() => {})
-                .finally(() => { prefetchInflightRef.current = false })
-            }
-          }
-      }
-
-      // --- LOAD LAYER ---
-      // Trigger actual chart data load when closer to the edge
-      const loadThreshold = Math.max(150, visibleBars * 0.8)
-
-      if (range.from > loadThreshold) return
-
       const curSymbol = symbolRef.current
       const curExchange = exchangeRef.current
       const curTf = tfRef.current
+      if (!curExchange) return
 
-      if (!curExchange) {
-        inflightRef.current = false
-        setIsLoadingMore?.(false)
-        return
-      }
+      // Scalpboard's pagination trigger (their I()): fetch the older page
+      // once the user crosses the LEFT EDGE of the loaded data (from < -10).
+      // Before that the loaded history fully covers the viewport.
+      if (range.from >= -10) return
 
       inflightRef.current = true
-      setIsLoadingMore?.(true)
+      setIsLoadingMoreRef.current?.(true)
+      // Reconcile: buffer live events for the whole fetch+prepend window.
+      eventsRef?.current?.setBuffered(true)
 
-      // Reconcile: buffer realtime kline/trade events for the WHOLE fetch
-      // window (not just the paint). paint() ends the buffering and replays
-      // them on the merged history; the empty/catch paths below release it
-      // too, so live updates can never stay stuck in the buffer.
-      lifecycleRef?.current?.setBuffered(true)
+      const paint = (merged: UnifiedCandle[]) => {
+        const chart = chartRef.current
+        const ts = chart?.timeScale()
+        if (!chart || !ts || destroyedRef.current) {
+          eventsRef?.current?.setBuffered(false)
+          return
+        }
+        // Capture BEFORE setData — prepending shifts every logical index.
+        const prevLogical = ts.getVisibleLogicalRange()
+        const prevLen = candlesDataRef.current.length
+        const added = merged.length - prevLen
+
+        if (added <= 0) {
+          const flush = eventsRef?.current?.setBuffered(false)
+          if (flush && flush.updates.length > 0) {
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf)
+          }
+          return
+        }
+
+        adjustingRef.current = true
+        try {
+          candlesDataRef.current = merged
+          const candleData = merged.map(c => ({
+            time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+          }))
+          const volumeData = merged.map(c => ({
+            time: toChartTime(c.time) as Time, value: c.volume,
+            color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
+          }))
+          onLogicalShiftRef.current?.(added)
+          candleRef.current?.setData(candleData)
+          volumeRef.current?.setData(volumeData)
+          // End reconciliation: replay any live events captured since the
+          // fetch started ON TOP of the merged history.
+          const flush = eventsRef?.current?.setBuffered(false)
+          if (flush && flush.updates.length > 0) {
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf)
+          }
+        } catch (err) {
+          console.error('[ChartGrid] setData failed during lazy scroll', { symbol: curSymbol, tf: curTf, error: err })
+          eventsRef?.current?.setBuffered(false)
+        } finally {
+          adjustingRef.current = false
+        }
+        // Restore by logical range shifted by `added` — the exact same bars
+        // land at the exact same pixels as before the prepend.
+        if (prevLogical) {
+          try {
+            ts.setVisibleLogicalRange({ from: prevLogical.from + added, to: prevLogical.to + added })
+            // setVisibleLogicalRange can throw while the time scale is mid-sync;
+            // the next range event re-syncs the view.
+          } catch { /* benign: next visible-range event re-syncs */ }
+        }
+      }
 
       const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
       if (!cached || cached.length === 0) {
         inflightRef.current = false
-        setIsLoadingMore?.(false)
-        // Nothing to paint — drop the buffer (next live event self-heals).
-        lifecycleRef?.current?.setBuffered(false)
+        setIsLoadingMoreRef.current?.(false)
+        eventsRef?.current?.setBuffered(false)
         return
-      }
-
-      // Apply merged data to the chart, preserving the visible range by TIME
-      // (times are stable across a prepend; logical indexes shift).
-      const paint = (merged: UnifiedCandle[]) => {
-        const chart = chartRef.current
-        const ts = chart?.timeScale()
-        if (!chart || !ts || destroyedRef.current) return
-
-        const prevLogical = ts.getVisibleLogicalRange()
-        const prevLen = candlesDataRef.current.length
-        const safeMerged = sanitizeSeries(merged, 'lazy-scroll')
-        candlesDataRef.current = safeMerged
-        const added = merged.length - prevLen
-
-        if (added <= 0) return
-
-        adjustingRef.current = true
-        lifecycleRef?.current?.setBuffered(true)
-
-        try {
-          const normalized = safeMerged.map(normalizeCandle)
-          const candleData = normalized.map(c => ({
-            time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close,
-          }))
-          const volumeData = normalized.map(c => ({
-            time: c.time as Time, value: c.volume,
-            color: c.close >= c.open ? UP_COLOR_VOL() : DOWN_COLOR_VOL(),
-          }))
-          onLogicalShift?.(added)
-
-          const seriesAfterLoad = candleRef.current
-          if (seriesAfterLoad && volumeRef.current) {
-            cancelFormingGate(seriesAfterLoad)
-            getFormingAnimator(seriesAfterLoad, () => candleRef.current, volumeRef.current, () => volumeRef.current).reset()
-          }
-          candleRef.current?.setData(candleData)
-          volumeRef.current?.setData(volumeData)
-
-          lifecycleRef?.current?.applyHistory(safeMerged)
-          const flushPatch = lifecycleRef?.current?.setBuffered(false)
-          if (flushPatch && flushPatch.candleUpdates.length > 0) {
-            applyChartPatch(flushPatch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'buffer-flush')
-          }
-
-          // Restore by LOGICAL range shifted by `added` — prepending bars
-          // shifts every old logical index by `added`, so [from+added, to+added]
-          // puts back the exact same bars at the same pixels, preserving the
-          // user's zoom and any empty space on the right. (Restoring by TIME
-          // snapped the right edge onto the last candle whenever the view
-          // extended past it: LWC's timeToIndex clamps beyond-the-last-bar
-          // times to the last index.)
-          if (prevLogical) {
-            ts.setVisibleLogicalRange({ from: prevLogical.from + added, to: prevLogical.to + added })
-          }
-        } catch (err) {
-          console.error('[ChartGrid] setData failed during lazy scroll', { symbol, tf, error: err })
-        } finally {
-          adjustingRef.current = false
-        }
       }
 
       const before = cached[0].time
-
-      // Fast path: the prefetch layer already filled the cache past the current
-      // left edge — paint from cache with no network round-trip at all.
-      const paintedFirst = candlesDataRef.current[0]?.time
-      if (paintedFirst != null && cached[0].time < paintedFirst && cached.length > candlesDataRef.current.length) {
-        paint(cached)
-        inflightRef.current = false
-        setIsLoadingMore?.(false)
-        return
-      }
-
       getOrFetchOlder(curSymbol, curTf, before, 1000, curExchange)
         .then(older => {
           if (destroyedRef.current) {
             inflightRef.current = false
-            setIsLoadingMore?.(false)
+            setIsLoadingMoreRef.current?.(false)
+            eventsRef?.current?.setBuffered(false)
             return
           }
-
-          // Filter out candles we already have (time >= before)
           const newCandles = older.filter(c => c.time < before)
           if (newCandles.length === 0) {
             emptyCountRef.current++
@@ -1122,32 +484,31 @@ function useLazyScroll(
               reachedStartRef.current = true
             }
             inflightRef.current = false
-            setIsLoadingMore?.(false)
-            // End reconciliation: replay any live events buffered during the
-            // fetch onto the current chart.
-            const flush = lifecycleRef?.current?.setBuffered(false)
-            if (flush && flush.candleUpdates.length > 0) {
-              applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef, chartRef, 'buffer-flush')
+            setIsLoadingMoreRef.current?.(false)
+            const flush = eventsRef?.current?.setBuffered(false)
+            if (flush && flush.updates.length > 0) {
+              applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf)
             }
             return
           }
 
-          // Got new data — reset empty counter
           emptyCountRef.current = 0
-
           candleCache.prependCandles(curExchange, curSymbol, curTf, newCandles)
           const merged = candleCache.getCandles(curExchange, curSymbol, curTf)
           if (!merged || merged.length === 0) {
             inflightRef.current = false
-            setIsLoadingMore?.(false)
+            setIsLoadingMoreRef.current?.(false)
+            eventsRef?.current?.setBuffered(false)
             return
           }
 
+          // scalpboard's Mn(): full setData with the merged array.
           paint(merged)
           inflightRef.current = false
-          setIsLoadingMore?.(false)
+          setIsLoadingMoreRef.current?.(false)
         })
         .catch((err: Error & { isNetworkError?: boolean }) => {
+          // Network error — NOT end of history: stay ready to retry.
           if (!err?.isNetworkError) {
             emptyCountRef.current++
             if (emptyCountRef.current >= 3) {
@@ -1155,11 +516,10 @@ function useLazyScroll(
             }
           }
           inflightRef.current = false
-          setIsLoadingMore?.(false)
-          // End reconciliation: replay buffered live events onto the chart.
-          const flush = lifecycleRef?.current?.setBuffered(false)
-          if (flush && flush.candleUpdates.length > 0) {
-            applyChartPatch(flush, candleRef, volumeRef, curSymbol, curExchange, curTf, candlesDataRef, chartRef, 'buffer-flush')
+          setIsLoadingMoreRef.current?.(false)
+          const flush = eventsRef?.current?.setBuffered(false)
+          if (flush && flush.updates.length > 0) {
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf)
           }
         })
     }
@@ -1167,25 +527,25 @@ function useLazyScroll(
     const throttled = (range: { from: number; to: number } | null) => {
       if (!range) { fire(null); return }
       const now = Date.now()
-      if (now - lastCallTime >= 100) {
-        lastCallTime = now
-        if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null }
+      if (now - lastCallTimeRef.current >= 100) {
+        lastCallTimeRef.current = now
+        if (pendingTimerRef.current) { clearTimeout(pendingTimerRef.current); pendingTimerRef.current = null }
         fire(range)
       } else {
-        pendingRange = range
-        if (!pendingTimer) {
-          pendingTimer = setTimeout(() => {
-            pendingTimer = null
-            lastCallTime = Date.now()
-            fire(pendingRange)
-            pendingRange = null
-          }, 100 - (now - lastCallTime))
+        pendingRangeRef.current = range
+        if (!pendingTimerRef.current) {
+          pendingTimerRef.current = setTimeout(() => {
+            pendingTimerRef.current = null
+            lastCallTimeRef.current = Date.now()
+            fire(pendingRangeRef.current)
+            pendingRangeRef.current = null
+          }, 100 - (now - lastCallTimeRef.current))
         }
       }
     }
 
     return throttled
-  }, [])
+  }, [adjustingRef, candleRef, candlesDataRef, chartRef, destroyedRef, eventsRef, volumeRef])
 
   useEffect(() => {
     if (isInitialLoading) return
@@ -1195,18 +555,18 @@ function useLazyScroll(
 
     ts.subscribeVisibleLogicalRangeChange(onRange)
     return () => { ts.unsubscribeVisibleLogicalRangeChange(onRange) }
-  }, [symbol, tf, isInitialLoading, onRange])
-  }
+  }, [symbol, tf, isInitialLoading, onRange, chartRef])
+}
 
 function useLiveIndicator(
   lastUpdateRef: React.RefObject<number>
 ): { isLive: boolean; lastUpdate: number; hasReceivedData: boolean } {
-  const [state, setState] = useState({ isLive: true, lastUpdate: Date.now(), hasReceivedData: false })
-  const mountTimeRef = useRef(Date.now())
+  const [state, setState] = useState({ isLive: true, lastUpdate: 0, hasReceivedData: false })
+  const mountTimeRef = useRef(0)
 
   useEffect(() => {
     mountTimeRef.current = Date.now()
-    const interval = setInterval(() => {
+    const tick = () => {
       const now = Date.now()
       const timeSinceUpdate = now - lastUpdateRef.current
       const hasReceivedData = lastUpdateRef.current > mountTimeRef.current
@@ -1215,10 +575,13 @@ function useLiveIndicator(
         lastUpdate: lastUpdateRef.current,
         hasReceivedData
       })
-    }, 500)
+    }
+    // Tick immediately so the very first paint reflects real feed state.
+    tick()
+    const interval = setInterval(tick, 500)
 
     return () => clearInterval(interval)
-  }, [])
+  }, [lastUpdateRef])
 
   return state
 }
@@ -1231,24 +594,15 @@ function useStaleDataDetection(
 
   useEffect(() => {
     const interval = setInterval(() => {
-      const elapsed = Date.now() - lastUpdateRef.current
+      const last = lastUpdateRef.current
+      // lastUpdate === 0 means "never received anything yet" — not stale.
+      const elapsed = last > 0 ? Date.now() - last : 0
       const shouldBeStale = elapsed > threshold
-
-      // Debug logging
-      if (shouldBeStale !== isStale) {
-        console.log('[StaleDetection]', {
-          elapsed: Math.round(elapsed / 1000) + 's',
-          threshold: Math.round(threshold / 1000) + 's',
-          isStale: shouldBeStale,
-          lastUpdate: new Date(lastUpdateRef.current).toLocaleTimeString()
-        })
-      }
-
       setIsStale(shouldBeStale)
     }, 1000)
 
     return () => clearInterval(interval)
-  }, [threshold])
+  }, [threshold, lastUpdateRef])
 
   return isStale
 }
@@ -1259,12 +613,11 @@ function useWsCandle(
   tf: Timeframe,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  lifecycleRef: React.RefObject<CandleLifecycle | null>,
+  eventsRef: React.RefObject<CandleEvents | null>,
   destroyedRef: React.RefObject<boolean>,
-  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
   adjustingRef?: React.RefObject<boolean>,
   lastUpdateRef?: React.RefObject<number>,
-  chartRef?: React.RefObject<IChartApi | null>,
 ) {
   useEffect(() => {
     if (!exchange) return
@@ -1281,23 +634,21 @@ function useWsCandle(
 
       if (!isFiniteOHLCV(c)) return
 
-      const lc = lifecycleRef.current
-      if (!lc) return
+      const ev = eventsRef.current
+      if (!ev) return
 
-      const patch = lc.applyKline(c)
+      // kline snapshot → FULL replace of the bar (scalpboard's Cn).
+      const patch = ev.applyKline(c)
       if (adjustingRef?.current) return
 
-      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'ws-kline')
-      if (patch.gapBackfill) {
-        backfillGap(patch.gapBackfill, symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, chartRef)
-      }
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf)
     })
     wsSubscribe(channel)
     return () => {
       unsub()
       wsUnsubscribe(channel)
     }
-  }, [symbol, exchange, tf])
+  }, [symbol, exchange, tf, adjustingRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
 }
 
 function useWsTrade(
@@ -1306,13 +657,18 @@ function useWsTrade(
   tf: Timeframe,
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>,
   volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  lifecycleRef: React.RefObject<CandleLifecycle | null>,
+  eventsRef: React.RefObject<CandleEvents | null>,
   destroyedRef: React.RefObject<boolean>,
-  candlesDataRef?: React.RefObject<UnifiedCandle[]>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
   adjustingRef?: React.RefObject<boolean>,
   lastUpdateRef?: React.RefObject<number>,
-  chartRef?: React.RefObject<IChartApi | null>,
 ) {
+  // The price lane (bookTicker mid) is the primary tick source — like
+  // scalpboard's single price stream. The trade lane only kicks in when the
+  // mid has been quiet for a second, so two prices never alternate on the
+  // same forming bar.
+  const lastMidTickAtRef = useRef(0)
+
   useEffect(() => {
     if (!exchange) return
     const tradeType = `trade:${exchange}:${symbol}`
@@ -1320,7 +676,7 @@ function useWsTrade(
     const unsub = wsOnType(tradeType, (msg) => {
       if (destroyedRef.current) return
 
-      const trade = msg.data as any
+      const trade = (msg as { data?: { price: string | number; time?: number } | null }).data
       if (!trade?.price) return
 
       if (lastUpdateRef) {
@@ -1330,59 +686,41 @@ function useWsTrade(
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(price)) return
 
-      const qty = typeof trade.volume === 'number' && isFinite(trade.volume) && trade.volume >= 0
-        ? trade.volume
-        : 0
-
-      const lc = lifecycleRef.current
-      if (!lc) return
+      // The mid lane is fresher — skip the trade print entirely.
+      if (Date.now() - lastMidTickAtRef.current < 1000) return
 
       const tradeTime = typeof trade.time === 'number' && isFinite(trade.time)
         ? trade.time
         : Math.floor(Date.now() / 1000)
 
-      const payload: TradePayload = {
-        symbol,
-        exchange: exchange!,
-        price,
-        qty,
-        time: tradeTime,
-      }
+      const ev = eventsRef.current
+      if (!ev) return
 
-      const patch = lc.applyTrade(payload)
+      // Price tick → mutate ONLY the last bar's close/high/low (scalpboard's
+      // En). Volume never comes from trades.
+      const patch = ev.applyTick({ price, timeSec: tradeTime } as TickPayload)
       if (adjustingRef?.current) return
 
-      applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'ws-trade')
-      if (patch.gapBackfill) {
-        backfillGap(patch.gapBackfill, symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, chartRef)
-      }
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf)
     })
     wsSubscribe(tradeType)
 
-    // Fast-lane price: the server broadcasts bookTicker mid changes for this
-    // symbol immediately (no 40ms batch) — header price moves on every
-    // top-of-book change, which is what makes a chart feel truly "live".
-    // Unsubscribed automatically when the chart closes.
-    //
-    // Exchange filter: the channel is keyed by symbol only, and mid comes from
-    // bookTicker (binance-futures / bybit-futures). A spot chart must not be
-    // driven by a futures mid (the two markets decohere during sharp moves) —
-    // only the matching exchange's mid reaches this chart's candle and header.
+    // Fast-lane price: bookTicker mid — the scalpboard-style "live" feel.
+    // Exchange filter: the channel is keyed by symbol only; only the
+    // matching exchange's mid reaches this chart.
     const priceChannel = `price:${symbol}`
     const unsubPrice = wsOnChannel(priceChannel, (msg) => {
       if (destroyedRef.current) return
       const d = msg.data as { symbol: string; exchange?: string; price: number } | undefined
       if (!d || typeof d.price !== 'number' || !isFinite(d.price) || d.price <= 0) return
       if (exchange && d.exchange && d.exchange !== exchange) return
-      setLivePrice(symbol, d.price)
-      // Mid drives the forming candle between trades — continuous, scalpboard-
-      // style motion. Volume untouched; the next trade/kline corrects drift.
-      const lc = lifecycleRef.current
-      if (!lc || adjustingRef?.current) return
-      const patch = lc.applyMid(d.price)
-      if (patch.candleUpdates.length > 0) {
-        applyChartPatch(patch, candleRef, volumeRef, symbol, exchange, tf, candlesDataRef, chartRef, 'mid')
-      }
+      lastMidTickAtRef.current = Date.now()
+
+      const ev = eventsRef.current
+      if (!ev || adjustingRef?.current) return
+
+      const patch = ev.applyTick({ price: d.price, timeSec: Math.floor(Date.now() / 1000) } as TickPayload)
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf)
     })
     wsSubscribe(priceChannel)
 
@@ -1392,7 +730,7 @@ function useWsTrade(
       unsubPrice()
       wsUnsubscribe(priceChannel)
     }
-  }, [symbol, exchange, tf])
+  }, [symbol, exchange, tf, adjustingRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
 }
 
 
@@ -1460,19 +798,19 @@ const MiniChart = memo(function MiniChart({
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
   const exchange: Exchange | undefined = chartExchange
   const candlesDataRef = useRef<UnifiedCandle[]>([])
-  const lastUpdateRef = useRef<number>(Date.now())
+  const lastUpdateRef = useRef(0)
   const [chartVersion, setChartVersion] = useState(0)
 
-  const lifecycleRef = useRef<CandleLifecycle | null>(null)
+  const eventsRef = useRef<CandleEvents | null>(null)
 
   useEffect(() => {
     if (exchange) {
-      lifecycleRef.current?.destroy()
-      lifecycleRef.current = createCandleLifecycle({
+      eventsRef.current?.destroy()
+      eventsRef.current = createCandleEvents({
         symbol, exchange, tf, tfSeconds: getTfSeconds(tf),
       })
     }
-    return () => { lifecycleRef.current?.destroy() }
+    return () => { eventsRef.current?.destroy() }
   }, [symbol, exchange, tf])
 
   const liveIndicator = useLiveIndicator(lastUpdateRef)
@@ -1534,36 +872,21 @@ const MiniChart = memo(function MiniChart({
     })
     ro.observe(containerRef.current)
 
-    const onWheel = (e: WheelEvent) => {
-      // Capture phase: run BEFORE lightweight-charts' own wheel listener on
-      // the canvas and stopPropagation, so the native zoom (which would zoom
-      // a second time, anchored elsewhere) never fires.
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault()
-        e.stopPropagation()
-        if (containerRef.current) {
-          applyCursorAnchoredZoom(chart, containerRef.current, e.clientX, e.deltaY)
-        }
-      }
-    }
-    containerRef.current.addEventListener('wheel', onWheel, { passive: false, capture: true })
-
     return () => {
       destroyedRef.current = true
-      containerRef.current?.removeEventListener('wheel', onWheel, { capture: true })
       ro.disconnect()
       chart.remove()
       chartRef.current = null
       candleRef.current = null
       volumeRef.current = null
     }
-    // NB: `tf` is deliberately NOT a dependency — a timeframe switch only needs
-    // new data (useFullHistory handles setData + visible range), not a full
-    // chart destroy/recreate. This makes TF switching near-instant on warm cache.
+    // NB: `tf` is deliberately NOT a dependency — a timeframe switch only
+    // needs new data (useFullHistory handles setData + visible range), not a
+    // full chart destroy/recreate.
   }, [symbol, pricePrecision])
 
   const [wsCount, setWsCount] = useState(getWsOpenCount)
-  const mountWsCountRef = useRef(getWsOpenCount())
+  const [mountWsCount] = useState(() => getWsOpenCount())
   useEffect(() => {
     const un = wsOnType('open', () => setWsCount(getWsOpenCount()))
     return un
@@ -1571,9 +894,9 @@ const MiniChart = memo(function MiniChart({
 
   const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
     limit: GRID_CANDLE_LIMIT,
-    forceServer: wsCount > mountWsCountRef.current,
+    forceServer: wsCount > mountWsCount,
     wsEpoch: wsCount,
-  }, lastUpdateRef, lifecycleRef, chartVersion)
+  }, lastUpdateRef, eventsRef, chartVersion)
 
   const adjustingRef = useRef(false)
 
@@ -1591,10 +914,9 @@ const MiniChart = memo(function MiniChart({
     CLICK_THRESHOLD,
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
 
-  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
-  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
-  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, lifecycleRef, shiftLogicalOffset)
-  useSeriesSelfHeal(chartRef, candleRef, volumeRef, destroyedRef, candlesDataRef, adjustingRef, lifecycleRef)
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, eventsRef, shiftLogicalOffset)
 
   useEffect(() => {
     const container = containerRef.current
@@ -1740,6 +1062,9 @@ type RangeSelection = {
   changePct: number
   durationSec: number
   valid: boolean
+  /** Tooltip anchor pre-clamped to the container (computed in the handler). */
+  tooltipLeft: number
+  tooltipTop: number
 }
 
 function formatDuration(sec: number): string {
@@ -1768,10 +1093,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
       low24h: c.low24h,
     }
   }))
-  // Smoothed price display: glides toward the live value straight in the DOM
-  // (no React re-render per frame — the shared rAF coordinator writes
-  // textContent into the span). Presentation only — chart/store data stays
-  // exact; fast markets converge within a few frames.
+  // Smoothed price display (presentation only — chart/store data stays exact).
   const priceRef = useSmoothedPriceRef(symbol, coin?.pricePrecision ?? 2, coin?.price, '$')
   const isUp = coin ? coin.change24h >= 0 : true
   const badge = exchangeBadge(chartExchange)
@@ -1848,17 +1170,17 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   const [selection, setSelection] = useState<RangeSelection | null>(null)
   const [chartVersion, setChartVersion] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
-  const lastUpdateRef = useRef<number>(Date.now())
-  const lifecycleRef = useRef<CandleLifecycle | null>(null)
+  const lastUpdateRef = useRef(0)
+  const eventsRef = useRef<CandleEvents | null>(null)
 
   useEffect(() => {
     if (exchange) {
-      lifecycleRef.current?.destroy()
-      lifecycleRef.current = createCandleLifecycle({
+      eventsRef.current?.destroy()
+      eventsRef.current = createCandleEvents({
         symbol, exchange, tf, tfSeconds: getTfSeconds(tf),
       })
     }
-    return () => { lifecycleRef.current?.destroy() }
+    return () => { eventsRef.current?.destroy() }
   }, [symbol, exchange, tf])
 
   useEffect(() => {
@@ -1917,23 +1239,8 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     })
     ro.observe(containerRef.current)
 
-    const onWheel = (e: WheelEvent) => {
-      // Capture phase: run BEFORE lightweight-charts' own wheel listener on
-      // the canvas and stopPropagation, so the native zoom (which would zoom
-      // a second time, anchored elsewhere) never fires.
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault()
-        e.stopPropagation()
-        if (containerRef.current) {
-          applyCursorAnchoredZoom(chart, containerRef.current, e.clientX, e.deltaY)
-        }
-      }
-    }
-    containerRef.current.addEventListener('wheel', onWheel, { passive: false, capture: true })
-
     return () => {
       destroyedRef.current = true
-      containerRef.current?.removeEventListener('wheel', onWheel, { capture: true })
       ro.disconnect()
       chart.remove()
       chartRef.current = null
@@ -1943,7 +1250,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   }, [symbol, tf, pricePrecision])
 
   const [wsCount, setWsCount] = useState(getWsOpenCount)
-  const mountWsCountRef = useRef(getWsOpenCount())
+  const [mountWsCount] = useState(() => getWsOpenCount())
   useEffect(() => {
     const un = wsOnType('open', () => setWsCount(getWsOpenCount()))
     return un
@@ -1952,9 +1259,9 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
     limit: EXPANDED_CANDLE_LIMIT,
     fitOnOpen: true,
-    forceServer: wsCount > mountWsCountRef.current,
+    forceServer: wsCount > mountWsCount,
     wsEpoch: wsCount,
-  }, lastUpdateRef, lifecycleRef, chartVersion)
+  }, lastUpdateRef, eventsRef, chartVersion)
 
   const {
     activeTool,
@@ -1977,15 +1284,15 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
 
-  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
-  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, lifecycleRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, chartRef)
-  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, lifecycleRef, shiftLogicalOffset)
-  useSeriesSelfHeal(chartRef, candleRef, volumeRef, destroyedRef, candlesDataRef, adjustingRef, lifecycleRef)
-
-
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, eventsRef, shiftLogicalOffset)
 
   useEffect(() => {
-    setSelection(null)
+    // Deferred: the release handler finished the drag; clearing one frame
+    // later keeps the tooltip from flickering during symbol/TF switches.
+    const raf = requestAnimationFrame(() => setSelection(null))
+    return () => cancelAnimationFrame(raf)
   }, [symbol, tf])
 
   useEffect(() => {
@@ -2022,9 +1329,6 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
           valid = true
         }
 
-        // DIAG-c2a4: LWC may return BusinessDay {year,month,day} on 1h+ TFs
-        // for coordinateToTime. Normalise to UNIX-seconds before the
-        // subtraction — `as number` is a TS-only cast and would yield NaN.
         const t1Raw = chart.timeScale().coordinateToTime(x1) as number | null
         const t2Raw = chart.timeScale().coordinateToTime(x2) as number | null
         const t1Num = (t1Raw == null || typeof t1Raw === 'number')
@@ -2039,6 +1343,14 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
         }
       }
 
+      // Tooltip anchor clamped to the container HERE (event context — refs
+      // are legal in handlers); the render reads plain numbers only.
+      const box = containerRef.current
+      const boxW = box?.clientWidth ?? 9999
+      const boxH = box?.clientHeight ?? 9999
+      const tooltipLeft = Math.min(Math.max(curX + 10, 0), boxW - 180)
+      const tooltipTop = Math.min(Math.max(curY + 10, 0), boxH - 70)
+
       return {
         startX,
         startY,
@@ -2049,6 +1361,8 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
         changePct,
         durationSec,
         valid,
+        tooltipLeft,
+        tooltipTop,
       }
     }
 
@@ -2184,7 +1498,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
       dragging = false
       if (mmRaf != null) cancelAnimationFrame(mmRaf)
     }
-  }, [symbol, tf, activeTool, drawingClickHandler, drawingMouseDownHandler, drawingMouseMoveHandler, drawingMouseUpHandler, deactivateTool, isDraggingRef])
+  }, [symbol, tf, activeTool, drawingClickHandler, drawingMouseDownHandler, drawingMouseMoveHandler, drawingMouseUpHandler, deactivateTool, isDraggingRef, CLICK_THRESHOLD, removeDrawing])
 
   const precision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
 
@@ -2205,7 +1519,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     }
     container.addEventListener('contextmenu', onCtx)
     return () => container.removeEventListener('contextmenu', onCtx)
-  }, [primitiveRef])
+  }, [primitiveRef, removeDrawing])
 
   return (
     <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
@@ -2259,14 +1573,8 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
                     : 'border-[#e74c3c] text-[#e74c3c]'
               }`}
               style={{
-                left: Math.min(
-                  Math.max(selection.endX + 10, 0),
-                  (containerRef.current?.clientWidth ?? 9999) - 180,
-                ),
-                top: Math.min(
-                  Math.max(selection.endY + 10, 0),
-                  (containerRef.current?.clientHeight ?? 9999) - 70,
-                ),
+                left: selection.tooltipLeft,
+                top: selection.tooltipTop,
               }}
             >
               {selection.valid ? (
@@ -2296,15 +1604,12 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
 export const ChartGrid = memo(function ChartGrid() {
   const sortedCoins = useCoinListStore(s => s.sortedCoins)
   const pageIndex = useCoinListStore(s => s.pageIndex)
-  const prevTopRef = useRef<string[]>([])
-  const topSymbols = useMemo(() => {
-    const next = sortedCoins.slice(pageIndex * 9, pageIndex * 9 + 9).map(c => c.symbol)
-    if (next.length === prevTopRef.current.length && next.every((s, i) => s === prevTopRef.current[i])) {
-      return prevTopRef.current
-    }
-    prevTopRef.current = next
-    return next
-  }, [sortedCoins, pageIndex])
+  // New array identity when sortedCoins reorders, but getOrFetchBulk serves
+  // every symbol from the cache, so a reorder never triggers a network fetch.
+  const topSymbols = useMemo(
+    () => sortedCoins.slice(pageIndex * 9, pageIndex * 9 + 9).map(c => c.symbol),
+    [sortedCoins, pageIndex],
+  )
   const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const expandChart = useCoinListStore(s => s.expandChart)
   const tf = useCoinListStore(s => s.activeTimeframe)
@@ -2321,10 +1626,6 @@ export const ChartGrid = memo(function ChartGrid() {
     return <ExpandedChart symbol={expandedSymbol} onBack={() => expandChart(null)} chartExchange={chartExchange} />
   }
 
-  // Each chart shows itself as soon as its own data is ready (per-cell spinner
-  // inside MiniChart). Previously a full-grid blur overlay waited for ALL 9
-  // charts, so one slow symbol blocked everything.
-  // NB: key intentionally excludes `tf` — see MiniChart's createChart effect.
   return (
     <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
       <div className="relative flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px] isolate">

@@ -16,6 +16,14 @@ const TF_SECONDS: Record<string, number> = {
  */
 const MAX_FILL_WINDOW = 120
 
+/**
+ * Synthetic flat-candle gap filling is DISABLED by default (scalpboard.io
+ * parity): the client paints exactly what the server sends and gaps render
+ * as whitespace, never as fake volume-0 candles. Set GAP_FILL_ENABLED=1 to
+ * restore TradingView-style continuity rows.
+ */
+const GAP_FILL_ENABLED = process.env.GAP_FILL_ENABLED === '1'
+
 let syntheticFilledTotal = 0
 
 export function getSyntheticFillCount(): number {
@@ -47,6 +55,8 @@ function flatCandle(anchor: { symbol: string; exchange: Exchange; timeframe: str
  * the input unchanged when there is nothing to fill. Assumes sorted input.
  */
 export function fillGaps(candles: UnifiedCandle[], symbol: string, exchange: Exchange, tf: string): UnifiedCandle[] {
+  if (!GAP_FILL_ENABLED) return candles
+
   const tfSec = TF_SECONDS[tf]
   if (!tfSec || candles.length < 2) return candles
   let prev: UnifiedCandle | null = null
