@@ -115,6 +115,17 @@ describe('calcCascades (verbatim scalpboard port)', () => {
     const out = calcCascades(peaks, 'l', 2, 0.4)
     expect(out[0].map(p => p.e)).toEqual([100, 99.7, 99.4])
   })
+
+  it('does NOT chain members farther apart than maxDistance (either direction)', () => {
+    // two supports 6% apart must NOT become one cascade (maxDistance 0.25%)
+    expect(calcCascades([peak(57759, 1), peak(61297, 2)], 'l', 2, 0.25)).toEqual([])
+    // descending highs 6% apart must NOT chain on the h side either
+    expect(calcCascades([peak(61297, 1), peak(57759, 2)], 'h', 2, 0.25)).toEqual([])
+    // a tight ladder still chains in both directions
+    const tight = [peak(100.6, 1), peak(100.3, 2), peak(100.0, 3)]
+    expect(calcCascades(tight, 'h', 2, 0.5).length).toBe(1)
+    expect(calcCascades(tight, 'l', 2, 0.5).length).toBe(1)
+  })
 })
 
 describe('computeCascades — crossed levels disappear (scalpboard parity)', () => {
@@ -157,15 +168,15 @@ describe('computeCascades — crossed levels disappear (scalpboard parity)', () 
     expect(out.h[0].map(p => p.t)).toEqual([2, 4])
   })
 
-  // ascending low plateaus: l-peaks at 97.9 / 98.5 / 99.1 (t2/t4/t6);
-  // every later candle stays ABOVE each rung
+  // ascending low plateaus: l-peaks at 98.0 / 98.3 / 98.6 (t2/t4/t6, steps
+  // 0.3% <= maxDistance 0.5); every later candle stays ABOVE each rung
   const lLadder = (extra: UnifiedCandle[] = []): UnifiedCandle[] => [
     candle(1, 100.0, 99.0, 10),
-    candle(2, 100.6, 97.9, 10),
+    candle(2, 100.6, 98.0, 10),
     candle(3, 100.3, 98.6, 10),
-    candle(4, 100.3, 98.5, 10),
+    candle(4, 100.3, 98.3, 10),
     candle(5, 100.0, 99.3, 10),
-    candle(6, 100.0, 99.1, 10),
+    candle(6, 100.0, 98.6, 10),
     candle(7, 99.8, 99.5, 10),
     candle(8, 99.8, 99.5, 10),
     ...extra,
@@ -174,7 +185,7 @@ describe('computeCascades — crossed levels disappear (scalpboard parity)', () 
   it('keeps an l-ladder while no later candle trades through it', () => {
     const out = computeCascades(lLadder(), raw)
     expect(out.l.length).toBe(1)
-    expect(out.l[0].map(p => p.e)).toEqual([97.9, 98.5, 99.1])
+    expect(out.l[0].map(p => p.e)).toEqual([98.0, 98.3, 98.6])
     expect(out.l[0].map(p => p.t)).toEqual([2, 4, 6])
   })
 

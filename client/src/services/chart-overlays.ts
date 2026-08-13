@@ -134,11 +134,19 @@ export function detectPeaks(candles: UnifiedCandle[], opts?: PeakDetectOptions):
 }
 
 /**
- * Verbatim port of scalpboard's calcCascades():
- * walk the peaks and chain every consecutive member whose directional
- * distance to the previous anchor stays within maxDistance%; a chain of
- * >= minPeaks members is a cascade. The walk for the NEXT cascade resumes
- * right after the member that broke the previous chain.
+ * Walk the peaks and chain every consecutive member whose gap to the
+ * previous anchor stays within maxDistance%; a chain of >= minPeaks members
+ * is a cascade. The walk for the NEXT cascade resumes right after the member
+ * that broke the previous chain.
+ *
+ * Based on scalpboard's calcCascades() with one deliberate deviation: the
+ * gap is measured in ABSOLUTE terms (|dist| <= maxDistance). Scalpboard
+ * chains any step in the "direction of travel" (descending h-peaks,
+ * ascending l-peaks) because that distance is negative and always passes —
+ * fine for their live order-book peaks, but candle-derived peaks would then
+ * chain arbitrarily far apart (e.g. two support levels 6% away become one
+ * "cascade" despite maxDistance 0.25%). Absolute distance keeps a cascade a
+ * tight cluster of levels.
  */
 export function calcCascades(
   peaks: OverlayPeak[],
@@ -154,7 +162,7 @@ export function calcCascades(
     for (; d < peaks.length; d++) {
       const p = peaks[d].e
       const dist = side === 'h' ? (p - anchor) / anchor : (anchor - p) / anchor
-      if (dist <= maxDistance / 100) {
+      if (Math.abs(dist) <= maxDistance / 100) {
         chain.push({ ...peaks[d], d: dist * 100 })
         anchor = p
       } else {
