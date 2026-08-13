@@ -27,7 +27,9 @@ import type { CascadesConfig, UnifiedCandle } from '../types'
  *    ladders vanish, live ones stay.
  *  - touches: filterByTouches() hides cascades that price did not approach
  *    often enough — a cascade is drawn only after minTouches candles came
- *    within touchDistancePct% of one of its levels (0 disables the filter).
+ *    within touchDistancePct% of one of its levels (0 = at least one touch).
+ *    Only genuine re-tests count: the members' own formation candles (±
+ *    prominenceWindow bars) never count as touches.
  */
 
 export const DEFAULT_CASCADES_CONFIG: CascadesConfig = {
@@ -213,11 +215,15 @@ export function filterCrossedPeaks(
 /**
  * Hide cascades that price did not approach often enough: a cascade is drawn
  * only after at least `minTouches` candles came within `touchDistancePct`% of
- * one of its levels. A touch is the candle's extreme on the valid side of the
- * level — an 'h' level is touched by candles whose high comes within the band
- * below it, an 'l' level by candles whose low comes within the band above it.
- * The cascade's own member candles ARE the level, so they never count.
- * minTouches <= 0 disables the filter entirely.
+ * one of its levels (0 means at least one touch). A touch is the candle's
+ * extreme on the valid side of the level — an 'h' level is touched by candles
+ * whose high comes within the band below it, an 'l' level by candles whose
+ * low comes within the band above it.
+ *
+ * Only genuine RE-tests count: the cascade's own member candles AND their
+ * prominence-window neighborhood (the candles that formed the peak) never
+ * count — otherwise every ladder passes on its own formation and the filter
+ * is toothless.
  */
 export function filterByTouches(
   candles: UnifiedCandle[],
@@ -225,14 +231,35 @@ export function filterByTouches(
   side: 'h' | 'l',
   minTouches: number,
   touchDistancePct: number,
+  prominenceWindow: number,
 ): OverlayPeak[][] {
-  if (minTouches <= 0 || chains.length === 0) return chains
+  if (chains.length === 0) return chains
+  const need = Math.max(1, Math.floor(minTouches))
   const distFrac = Math.max(0, touchDistancePct) / 100
+  const n = candles.length
+  const idxOf = (t: number): number => {
+    let lo = 0
+    let hi = n - 1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (candles[mid].time < t) lo = mid + 1
+      else hi = mid - 1
+    }
+    return lo < n && candles[lo].time === t ? lo : -1
+  }
   return chains.filter(chain => {
-    const memberTimes = new Set(chain.map(p => p.t))
+    // formation neighborhood: every member candle ± prominenceWindow bars
+    const excluded = new Set<number>()
+    for (const p of chain) {
+      const i = idxOf(p.t)
+      if (i < 0) continue
+      for (let k = Math.max(0, i - prominenceWindow); k <= Math.min(n - 1, i + prominenceWindow); k++) {
+        excluded.add(candles[k].time)
+      }
+    }
     let touches = 0
     for (const c of candles) {
-      if (memberTimes.has(c.time)) continue
+      if (excluded.has(c.time)) continue
       const near = chain.some(p => {
         if (side === 'h') {
           // high approaches the level from below without crossing it
@@ -240,7 +267,7 @@ export function filterByTouches(
         }
         return c.low >= p.e && (c.low - p.e) / p.e <= distFrac
       })
-      if (near && ++touches >= minTouches) return true
+      if (near && ++touches >= need) return true
     }
     return false
   })
@@ -263,7 +290,7 @@ export function computeCascades(
     // scalpboard: crossed levels are deleted server-side before chaining
     const live = filterCrossedPeaks(candles, peaks[side], side)
     let chains = calcCascades(live, side, c.minPeaks, c.maxDistance)
-    chains = filterByTouches(candles, chains, side, c.minTouches, c.touchDistancePct)
+    chains = filterByTouches(candles, chains, side, c.minTouches, c.touchDistancePct, c.prominenceWindow)
     if (c.maxChainLen > 0) chains = chains.map(ch => ch.slice(0, c.maxChainLen))
     if (c.maxCascades > 0) chains = chains.slice(0, c.maxCascades)
     return chains

@@ -639,7 +639,7 @@ export default function ProfileModal() {
               />
               <span className="profile-scale-value">{cascades.minTouches || 'без'}</span>
             </div>
-            <div className="profile-scale-hint">Каскад рисуется, только если его уровень касались минимум N раз (0 — без фильтра)</div>
+            <div className="profile-scale-hint">Каскад рисуется, только если его уровень касались минимум N раз (0 — хотя бы одно касание)</div>
           </div>
 
           <div className="profile-field">

@@ -118,8 +118,9 @@ describe('calcCascades (verbatim scalpboard port)', () => {
 })
 
 describe('computeCascades — crossed levels disappear (scalpboard parity)', () => {
-  // window=1, no noise filters: peaks are the raw local extrema
-  const raw = { prominenceWindow: 1, minProminencePct: 0, minVolumePct: 0, maxChainLen: 0, maxCascades: 0, minPeaks: 2, maxDistance: 0.5 }
+  // window=1, no noise filters: peaks are the raw local extrema.
+  // touchDistancePct:100 makes the touch filter a no-op so only crossing is tested.
+  const raw = { prominenceWindow: 1, minProminencePct: 0, minVolumePct: 0, maxChainLen: 0, maxCascades: 0, minPeaks: 2, maxDistance: 0.5, touchDistancePct: 100 }
 
   // descending high plateaus: h-peaks at 100.6 / 100.3 / 100.0 (t2/t4/t6);
   // every later candle stays BELOW each rung, so nothing crosses them
@@ -186,10 +187,11 @@ describe('computeCascades — crossed levels disappear (scalpboard parity)', () 
 
 describe('computeCascades — touch count filter', () => {
   // window=1, no noise filters, no crossing interference
-  const base = { prominenceWindow: 1, minProminencePct: 0, minVolumePct: 0, maxChainLen: 0, maxCascades: 0, minPeaks: 2, maxDistance: 0.5, minTouches: 0, touchDistancePct: 0.5 }
+  const base = { prominenceWindow: 1, minProminencePct: 0, minVolumePct: 0, maxChainLen: 0, maxCascades: 0, minPeaks: 2, maxDistance: 0.5 }
 
-  // same ladder as above: h-peaks at 100.6 / 100.3 / 100.0 (t2/t4/t6)
-  const ladder = (): UnifiedCandle[] => [
+  // rungs at 100.6/100.3/100.0 (t2/t4/t6); t1..t7 is the formation
+  // neighborhood (window=1), so only `tail` candles can be real touches
+  const ladder = (tail: UnifiedCandle[] = []): UnifiedCandle[] => [
     candle(1, 100.0, 99.0, 10),
     candle(2, 100.6, 98.8, 10),
     candle(3, 100.3, 98.5, 10),
@@ -197,29 +199,34 @@ describe('computeCascades — touch count filter', () => {
     candle(5, 100.0, 98.1, 10),
     candle(6, 100.0, 97.9, 10),
     candle(7, 99.8, 97.7, 10),
-    candle(8, 99.8, 97.5, 10),
+    ...tail,
   ]
 
-  // non-member candles t1/t3/t5/t7/t8 come within 0.5% of a rung = 5 touches
-  it('hides a cascade that was touched fewer times than minTouches', () => {
-    const out = computeCascades(ladder(), { ...base, minTouches: 6 })
-    expect(out.h).toEqual([])
-    const shown = computeCascades(ladder(), { ...base, minTouches: 5 })
-    expect(shown.h.length).toBe(1)
+  it('formation candles are NOT touches — only genuine re-tests count', () => {
+    // t8 (0.2% from rung 100.0) is the only non-formation candle → 1 touch
+    const candles = ladder([candle(8, 99.8, 97.5, 10)])
+    expect(computeCascades(candles, { ...base, minTouches: 2, touchDistancePct: 0.3 }).h).toEqual([])
+    expect(computeCascades(candles, { ...base, minTouches: 1, touchDistancePct: 0.3 }).h.length).toBe(1)
   })
 
-  it('minTouches 0 disables the filter', () => {
-    const out = computeCascades(ladder(), { ...base, minTouches: 0 })
+  it('hides a cascade whose nearest candle is 6% away (the reported bug)', () => {
+    // no candle comes within 0.3% of any rung — nearest is ~6% below
+    const out = computeCascades(ladder([candle(20, 94.0, 92.0, 10)]), { ...base, minTouches: 0, touchDistancePct: 0.3 })
+    expect(out.h).toEqual([])
+  })
+
+  it('minTouches 0 means at least one touch (filter is always active)', () => {
+    // t8 re-tests the level within 0.3% → passes with minTouches 0
+    const out = computeCascades(ladder([candle(8, 99.8, 97.5, 10)]), { ...base, minTouches: 0, touchDistancePct: 0.3 })
     expect(out.h.length).toBe(1)
   })
 
   it('touch distance shrinks the touch set', () => {
-    // 0.2% band: t1(100.0), t3(100.3), t5(100.0) touch; t7/t8(99.8) are 0.2%
-    // from rung 100.0 so they stay inside a 0.2% band too — use 0.1% to cut
-    // them: only t1, t3, t5 touch (distance 0)
-    const tight = computeCascades(ladder(), { ...base, touchDistancePct: 0.1, minTouches: 4 })
+    // t8 is 0.2% from rung 100.0; t20 is 0.05% from it
+    const candles = ladder([candle(8, 99.8, 97.5, 10), candle(20, 99.95, 97.9, 10)])
+    const tight = computeCascades(candles, { ...base, minTouches: 2, touchDistancePct: 0.1 })
     expect(tight.h).toEqual([])
-    const loose = computeCascades(ladder(), { ...base, touchDistancePct: 0.1, minTouches: 3 })
+    const loose = computeCascades(candles, { ...base, minTouches: 2, touchDistancePct: 0.25 })
     expect(loose.h.length).toBe(1)
   })
 })
