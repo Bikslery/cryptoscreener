@@ -1258,7 +1258,7 @@ function ChartSettingsPanel() {
 
       <div className="mt-2 border-t border-[#222] pt-2">
         <div className="text-[10px] text-[#666] leading-[1.5]">
-          Каскады и карта плотности — полная настройка в личном кабинете
+          Каскады — полная настройка в личном кабинете
         </div>
       </div>
       <div className="mt-2 flex items-center gap-3">

@@ -74,8 +74,6 @@
   --chart--peak: #4d4d4d;
   --chart--price: #b3b3b3;
   --chart--volumes: #4d4d4d;
-  --chart--density-up: #c74343;
-  --chart--density-down: #43c743;
   --chart--measure-up: #43c74333;
   --chart--measure-down: #c7434333;
   --chart--fire: #c74343;
@@ -91,10 +89,6 @@
   --foreground-20: #cccccc33;
   --foreground-10: #cccccc1a;
   --foreground-alt: #333333;
-  --map--top: #c74343;
-  --map--bottom: #43c743;
-  --map--density-s: 50;
-  --map--density-l: 50;
 }
 
 *,

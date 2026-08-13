@@ -103,7 +103,6 @@ export interface UserSettings {
   layout: {
     coinListWidth: number
     alertsWidth: number
-    mapHeight: number
   }
   defaultTimeframe: string
   chartBlocks: string[]

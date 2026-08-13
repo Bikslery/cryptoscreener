@@ -7,9 +7,9 @@ import { At } from '../../../services/chart-config'
 import { formatCompact } from '../../../utils/format'
 
 /**
- * Peaks/cascades/density renderer — a verbatim port of scalpboard's
- * `labled_line` painter + figures lib (extracted from their production
- * bundle `DuwwQn7y.js`):
+ * Peaks/cascades renderer — a verbatim port of scalpboard's `labled_line`
+ * painter + figures lib (extracted from their production bundle
+ * `DuwwQn7y.js`):
  *
  *  painter (`labled_line`):
  *    - if no coords or e[0].x > paneWidth -> skip
@@ -29,15 +29,13 @@ import { formatCompact } from '../../../utils/format'
  *
  *  colorschemes (chart options `other`):
  *    peak:    upColor = downColor = --chart--peak (#4d4d4d)
- *    density: upColor = --chart--density-down (green), downColor = --chart--density-up (red)
- *    baseline: cascades l->top, h->bottom; density b(bid)->top, a(ask)->bottom
+ *    baseline: cascades l->top, h->bottom
  */
 interface LineSpec {
   time: number
   price: number
   text: string
   baseline: 'top' | 'bottom'
-  scheme: 'peak' | 'density'
 }
 
 const BOX_PAD_X = 4
@@ -139,8 +137,6 @@ class OverlaysPaneView implements IPrimitivePaneView {
 
       const timeScale = chart.timeScale()
       const peak = withAlpha(At('--chart--peak', '#4d4d4d'), opacity)
-      const densityUp = withAlpha(At('--chart--density-down', '#43c743'), opacity)
-      const densityDown = withAlpha(At('--chart--density-up', '#c74343'), opacity)
       const textColor = At('--foreground', '#cccccc')
 
       ctx.font = `300 ${FONT_SIZE}px ${FONT}`
@@ -161,9 +157,7 @@ class OverlaysPaneView implements IPrimitivePaneView {
         if (x0 === null || y0 === null || !isFinite(x0) || !isFinite(y0)) continue
         if (x0 > width) continue
 
-        const color = s.scheme === 'peak'
-          ? peak
-          : s.baseline === 'top' ? densityUp : densityDown
+        const color = peak
 
         const A = s.text.length * 6 + 8 + 8
         const p = lastDataX + 32 + A < width ? width - A : lastDataX + 32
@@ -210,19 +204,9 @@ class OverlaysPaneView implements IPrimitivePaneView {
             price: peak.e,
             text: formatCompact(peak.c),
             baseline,
-            scheme: 'peak',
           })
         }
       }
-    }
-    for (const d of data.densities) {
-      specs.push({
-        time: d.time,
-        price: d.price,
-        text: `${formatCompact(d.size)} ${d.price.toFixed(this._primitive.pricePrecision())}`,
-        baseline: d.direction === 'b' ? 'top' : 'bottom',
-        scheme: 'density',
-      })
     }
     return specs
   }

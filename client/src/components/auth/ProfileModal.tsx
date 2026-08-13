@@ -471,7 +471,7 @@ export default function ProfileModal() {
             <div className="section-icon">
               <Layers size={14} />
             </div>
-            <h2>Каскады и карта</h2>
+            <h2>Каскады</h2>
           </div>
 
           <div className="profile-field">
@@ -487,38 +487,6 @@ export default function ProfileModal() {
                 <span className="track" />
               </label>
             </div>
-          </div>
-
-          <div className="profile-field">
-            <div className="profile-notify-row">
-              <label>Карта плотности</label>
-              <label className="profile-switch">
-                <input
-                  type="checkbox"
-                  checked={cascades.showDensities}
-                  onChange={(e) => saveCascades({ ...cascades, showDensities: e.target.checked })}
-                  data-testid="cascades-density-toggle"
-                />
-                <span className="track" />
-              </label>
-            </div>
-          </div>
-
-          <div className="profile-field">
-            <label>Порог карты, %</label>
-            <div className="profile-scale-row">
-              <input
-                type="range"
-                min={0.5}
-                max={10}
-                step={0.5}
-                value={cascades.densityThresholdPct}
-                onChange={(e) => saveCascades({ ...cascades, densityThresholdPct: Number(e.target.value) })}
-                className="profile-scale-slider"
-              />
-              <span className="profile-scale-value">{cascades.densityThresholdPct}</span>
-            </div>
-            <div className="profile-scale-hint">Строки карты ниже этого % от сильнейшего уровня скрываются</div>
           </div>
 
           <div className="profile-field">

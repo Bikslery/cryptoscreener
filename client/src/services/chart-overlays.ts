@@ -1,12 +1,12 @@
 import type { CascadesConfig, UnifiedCandle } from '../types'
 
 /**
- * Chart overlays data — scalpboard.io parity (peaks / cascades / density).
+ * Chart overlays data — scalpboard.io parity (peaks / cascades).
  *
  * RENDERING parity is exact (ported verbatim from scalpboard's bundle);
  * the DATA is computed locally from the candles we already hold, because
- * scalpboard's peaks/density live on their closed backend. The formulas
- * below reproduce the observable behavior:
+ * scalpboard's peaks live on their closed backend. The formulas below
+ * reproduce the observable behavior:
  *
  *  - peaks: every local extremum (high >= both neighbours / low <= both
  *    neighbours) is a peak {e: price, t: epoch, c: volume}. Plateaus form
@@ -19,14 +19,10 @@ import type { CascadesConfig, UnifiedCandle } from '../types'
  *    previous member stays <= maxDistance%; a chain with >= minPeaks
  *    members becomes a cascade. Defaults match scalpboard:
  *    minPeaks: 2, maxDistance: 0.4 (%).
- *  - density: volume-by-price profile built from candle high-low ranges,
- *    bucketed to a tick; 'a' = resistance rows (red, from bearish candles),
- *    'b' = support rows (green, from bullish candles).
  */
 
 export const DEFAULT_CASCADES_CONFIG: CascadesConfig = {
   showCascades: true,
-  showDensities: true,
   minPeaks: 2,
   maxDistance: 0.4,
   prominenceWindow: 3,
@@ -38,7 +34,6 @@ export const DEFAULT_CASCADES_CONFIG: CascadesConfig = {
   showLabels: true,
   lineWidth: 1,
   opacity: 100,
-  densityThresholdPct: 1.5,
 }
 
 export type CascadesConfigPatch = Partial<CascadesConfig>
@@ -63,15 +58,6 @@ export interface OverlayCascades {
   l: OverlayPeak[][]
 }
 
-export interface DensityRow {
-  price: number
-  size: number
-  /** epoch seconds of the last touch (line goes from here to the right edge) */
-  time: number
-  /** 'a' = resistance (red, baseline bottom), 'b' = support (green, baseline top) */
-  direction: 'a' | 'b'
-}
-
 export interface OverlayRenderOptions {
   showLabels: boolean
   lineWidth: number
@@ -80,7 +66,6 @@ export interface OverlayRenderOptions {
 
 export interface OverlaysData {
   cascades: OverlayCascades
-  densities: DensityRow[]
   render: OverlayRenderOptions
 }
 
@@ -192,88 +177,14 @@ export function computeCascades(
   return { h: cap('h'), l: cap('l') }
 }
 
-const MAX_BUCKETS = 500
-
-/**
- * Volume-by-price profile over the candle history. Each candle spreads its
- * volume uniformly across the buckets between its low and high. Bucket size
- * follows the price tick but is widened when the range would explode the
- * bucket count. Direction: bearish candles feed 'a' (resistance, red),
- * bullish candles feed 'b' (support, green). Rows below the visibility
- * threshold (a fraction of the strongest level) are dropped.
- */
-export function computeDensities(
-  candles: UnifiedCandle[],
-  pricePrecision: number,
-  thresholdPct = 1.5,
-): DensityRow[] {
-  if (candles.length === 0) return []
-  let minP = Infinity
-  let maxP = -Infinity
-  for (const c of candles) {
-    if (c.low < minP) minP = c.low
-    if (c.high > maxP) maxP = c.high
-  }
-  if (!isFinite(minP) || !isFinite(maxP) || maxP <= minP) return []
-
-  const tick = Math.pow(10, -pricePrecision)
-  const idealBuckets = Math.min(MAX_BUCKETS, Math.ceil((maxP - minP) / tick))
-  const bucketSize = Math.max(tick, (maxP - minP) / idealBuckets)
-
-  const aSize = new Map<number, number>()
-  const aTime = new Map<number, number>()
-  const bSize = new Map<number, number>()
-  const bTime = new Map<number, number>()
-
-  const bucketOf = (price: number): number => Math.floor((price - minP) / bucketSize)
-
-  for (const c of candles) {
-    const from = Math.max(0, bucketOf(c.low))
-    const to = Math.min(idealBuckets - 1, bucketOf(c.high))
-    const span = to - from + 1
-    if (span <= 0) continue
-    const share = c.volume / span
-    const target = c.close >= c.open ? 'b' : 'a'
-    const sizeMap = target === 'a' ? aSize : bSize
-    const timeMap = target === 'a' ? aTime : bTime
-    for (let b = from; b <= to; b++) {
-      sizeMap.set(b, (sizeMap.get(b) ?? 0) + share)
-      timeMap.set(b, c.time)
-    }
-  }
-
-  const rows: DensityRow[] = []
-  const consider = (sizeMap: Map<number, number>, timeMap: Map<number, number>, direction: 'a' | 'b') => {
-    let maxSize = 0
-    for (const [, s] of sizeMap) if (s > maxSize) maxSize = s
-    if (maxSize <= 0) return
-    const cutoff = maxSize * (thresholdPct / 100)
-    for (const [b, s] of sizeMap) {
-      if (s < cutoff) continue
-      rows.push({
-        price: minP + (b + 0.5) * bucketSize,
-        size: s,
-        time: timeMap.get(b) ?? 0,
-        direction,
-      })
-    }
-  }
-  consider(aSize, aTime, 'a')
-  consider(bSize, bTime, 'b')
-
-  return rows.sort((x, y) => y.size - x.size).slice(0, 120)
-}
-
 /** full overlay payload for one chart */
 export function computeOverlays(
   candles: UnifiedCandle[],
-  pricePrecision: number,
   config?: CascadesConfigPatch,
 ): OverlaysData {
   const c = resolveCascadesConfig(config)
   return {
     cascades: computeCascades(candles, c),
-    densities: c.showDensities ? computeDensities(candles, pricePrecision, c.densityThresholdPct) : [],
     render: {
       showLabels: c.showLabels,
       lineWidth: c.lineWidth,

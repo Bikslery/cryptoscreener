@@ -38,6 +38,22 @@
   box-shadow: var(--shadow-card), var(--glow-border);
   animation: profile-fade-in-up 0.5s ease-out;
   transition: border-color var(--transition), box-shadow var(--transition);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.profile-modal::-webkit-scrollbar {
+  width: 6px;
+}
+
+.profile-modal::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+
+.profile-modal::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .profile-modal:hover {

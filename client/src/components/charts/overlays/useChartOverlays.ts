@@ -42,11 +42,11 @@ export function useChartOverlays(
     const candles = candlesDataRef.current
     if (!prim) return
     const cfg = { ...cascadesConfig }
-    if (cfg.showCascades === false && cfg.showDensities === false) {
+    if (cfg.showCascades === false) {
       prim.update(null, null, pricePrecision)
       return
     }
-    const data = computeOverlays(candles ?? [], pricePrecision, cascadesConfig)
+    const data = computeOverlays(candles ?? [], cascadesConfig)
     prim.update(data, candles && candles.length > 0 ? candles[candles.length - 1].time : null, pricePrecision)
   }, [dataVersion, cascadesConfig, pricePrecision, chartVersion, candlesDataRef])
 }

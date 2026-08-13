@@ -165,15 +165,13 @@ export interface Watchlist {
 }
 
 /**
- * Full cascade (peaks/chains) + density map configuration. Lives in the
- * user cabinet (server-persisted); the chart engine consumes it via
+ * Full cascade (peaks/chains) configuration. Lives in the user cabinet
+ * (server-persisted); the chart engine consumes it via
  * DEFAULT_CASCADES_CONFIG fallbacks.
  */
 export interface CascadesConfig {
   /** render cascades at all */
   showCascades: boolean
-  /** render the density map at all */
-  showDensities: boolean
   /** min members for a chain to become a cascade */
   minPeaks: number
   /** max directional step % between chained members */
@@ -196,8 +194,6 @@ export interface CascadesConfig {
   lineWidth: number
   /** cascade line opacity in % (10–100) */
   opacity: number
-  /** density rows below this % of the strongest level are dropped */
-  densityThresholdPct: number
 }
 
 export interface UserSettings {
@@ -205,7 +201,6 @@ export interface UserSettings {
   layout?: {
     coinListWidth: number
     alertsWidth: number
-    mapHeight: number
   }
   defaultTimeframe?: string
   chartBlocks?: string[]
@@ -215,7 +210,7 @@ export interface UserSettings {
   // Alert notifications: play a sound on fire (default true) and its volume (0–1).
   notifySound?: boolean
   notifyVolume?: number
-  // Cascade + density map engine configuration (all parameters, cabinet UI).
+  // Cascade engine configuration (all parameters, cabinet UI).
   cascades?: Partial<CascadesConfig>
 }
 

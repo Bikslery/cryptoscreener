@@ -1,12 +1,8 @@
-import { useState, memo, lazy, Suspense } from 'react'
+import { useState, memo } from 'react'
 import { CoinList } from '../coinlist/CoinList'
 import { AlertStack } from '../alerts/AlertStack'
-// Плотности — тяжёлый компонент, который открывается только по клику на
-// вкладку; код грузится отдельным чанком при первом открытии, а не в
-// основном бандле первой отрисовки.
-const DensityMap = lazy(() => import('../density/DensityMap').then(m => ({ default: m.DensityMap })))
 
-type Tab = 'charts' | 'density' | 'alerts'
+type Tab = 'charts' | 'alerts'
 
 export const RightPanel = memo(function RightPanel() {
   const [tab, setTab] = useState<Tab>('charts')
@@ -27,16 +23,6 @@ export const RightPanel = memo(function RightPanel() {
         </button>
         <button
           className={`flex-1 h-full text-[11px] font-medium cursor-pointer border-b-2 transition-all ${
-            tab === 'density'
-              ? 'text-white border-white text-shadow-[var(--glow-text-strong)]'
-              : 'text-[#666] border-transparent hover:text-[#999] hover:border-[rgba(255,255,255,0.1)]'
-          }`}
-          onClick={() => setTab('density')}
-        >
-          Плотности
-        </button>
-        <button
-          className={`flex-1 h-full text-[11px] font-medium cursor-pointer border-b-2 transition-all ${
             tab === 'alerts'
               ? 'text-white border-white text-shadow-[var(--glow-text-strong)]'
               : 'text-[#666] border-transparent hover:text-[#999] hover:border-[rgba(255,255,255,0.1)]'
@@ -50,11 +36,6 @@ export const RightPanel = memo(function RightPanel() {
       {/* Content */}
       <div className="flex-1 overflow-hidden">
         {tab === 'charts' && <CoinList />}
-        {tab === 'density' && (
-          <Suspense fallback={<div className="text-center py-8 text-[#333] text-[11px]">Загрузка...</div>}>
-            <DensityMap />
-          </Suspense>
-        )}
         {tab === 'alerts' && <AlertStack />}
       </div>
     </div>

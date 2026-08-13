@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  detectPeaks, calcCascades, computeDensities, computeOverlays, computeCascades,
+  detectPeaks, calcCascades, computeOverlays, computeCascades,
   DEFAULT_CASCADES_CONFIG,
 } from '../chart-overlays'
 import type { UnifiedCandle } from '../../types'
@@ -117,38 +117,6 @@ describe('calcCascades (verbatim scalpboard port)', () => {
   })
 })
 
-describe('computeDensities', () => {
-  it('spreads volume across price buckets and drops weak rows', () => {
-    const candles = [
-      candle(1, 100, 99, 100, 99, 100), // bullish -> b
-      candle(2, 100, 99, 10, 100, 99),  // bearish -> a
-    ]
-    const rows = computeDensities(candles, 2)
-    expect(rows.length).toBeGreaterThan(0)
-    const bids = rows.filter(r => r.direction === 'b')
-    const asks = rows.filter(r => r.direction === 'a')
-    expect(bids.length).toBeGreaterThan(asks.length)
-    expect(bids[0].size).toBeGreaterThan(asks[0].size)
-  })
-
-  it('drops rows below the visibility threshold', () => {
-    const candles = [candle(1, 100, 99, 1000, 99, 100)]
-    const rows = computeDensities(candles, 2)
-    expect(rows.length).toBeGreaterThan(0)
-    for (const r of rows) expect(r.size).toBeGreaterThan(0)
-  })
-
-  it('honours a user-set density threshold', () => {
-    const candles = [
-      candle(1, 100, 99, 1000, 99, 100),
-      candle(2, 100, 99, 10, 100, 99),
-    ]
-    const strict = computeDensities(candles, 2, 50)
-    const lenient = computeDensities(candles, 2, 0.1)
-    expect(strict.length).toBeLessThanOrEqual(lenient.length)
-  })
-})
-
 describe('computeOverlays', () => {
   const ladder = (): UnifiedCandle[] => {
     const candles: UnifiedCandle[] = []
@@ -158,16 +126,11 @@ describe('computeOverlays', () => {
     return candles
   }
 
-  it('returns cascades and densities for a candle history', () => {
-    const out = computeOverlays(ladder(), 2)
+  it('returns cascades and render options for a candle history', () => {
+    const out = computeOverlays(ladder())
     expect(out.cascades).toBeDefined()
     expect(out.cascades.h).toBeInstanceOf(Array)
     expect(out.cascades.l).toBeInstanceOf(Array)
-    expect(out.densities).toBeInstanceOf(Array)
-    for (const d of out.densities) {
-      expect(['a', 'b']).toContain(d.direction)
-      expect(d.time).toBeGreaterThan(0)
-    }
     expect(out.render).toEqual({
       showLabels: DEFAULT_CASCADES_CONFIG.showLabels,
       lineWidth: DEFAULT_CASCADES_CONFIG.lineWidth,
@@ -176,28 +139,9 @@ describe('computeOverlays', () => {
   })
 
   it('disables cascades via config', () => {
-    const out = computeOverlays(ladder(), 2, { showCascades: false })
+    const out = computeOverlays(ladder(), { showCascades: false })
     expect(out.cascades.h).toEqual([])
     expect(out.cascades.l).toEqual([])
-    expect(out.densities.length).toBeGreaterThan(0)
-  })
-
-  it('disables densities via config', () => {
-    // gentle up-drift with alternating +0.2% highs → h-cascades; disable the
-    // default prominence filter so the synthetic pulses actually qualify
-    const candles: UnifiedCandle[] = []
-    for (let i = 0; i < 200; i++) {
-      const base = 100 + i * 0.005
-      candles.push(candle(i + 1, i % 2 === 0 ? base : base + 0.2, base + 0.1, 5 + (i % 3)))
-    }
-    const out = computeOverlays(candles, 2, {
-      showDensities: false,
-      prominenceWindow: 1,
-      minProminencePct: 0,
-      minVolumePct: 0,
-    })
-    expect(out.densities).toEqual([])
-    expect(out.cascades.h.length + out.cascades.l.length).toBeGreaterThan(0)
   })
 
   it('caps cascade count and chain length via config', () => {
