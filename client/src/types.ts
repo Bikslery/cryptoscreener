@@ -164,6 +164,42 @@ export interface Watchlist {
   coins: string[]
 }
 
+/**
+ * Full cascade (peaks/chains) + density map configuration. Lives in the
+ * user cabinet (server-persisted); the chart engine consumes it via
+ * DEFAULT_CASCADES_CONFIG fallbacks.
+ */
+export interface CascadesConfig {
+  /** render cascades at all */
+  showCascades: boolean
+  /** render the density map at all */
+  showDensities: boolean
+  /** min members for a chain to become a cascade */
+  minPeaks: number
+  /** max directional step % between chained members */
+  maxDistance: number
+  /** ±bars used to compare an extremum against its neighbours (1 = scalpboard parity) */
+  prominenceWindow: number
+  /** an extremum must stand out at least this % from its window neighbours to be a peak */
+  minProminencePct: number
+  /** extremum candle volume must be >= this % of the window's max volume */
+  minVolumePct: number
+  /** only consider the last N candles for peaks (0 = whole history) */
+  lookback: number
+  /** max cascades drawn per side (0 = unlimited) */
+  maxCascades: number
+  /** max chain members per cascade (0 = unlimited) */
+  maxChainLen: number
+  /** draw the price/volume labels next to cascade lines */
+  showLabels: boolean
+  /** cascade line width in px (1–3) */
+  lineWidth: number
+  /** cascade line opacity in % (10–100) */
+  opacity: number
+  /** density rows below this % of the strongest level are dropped */
+  densityThresholdPct: number
+}
+
 export interface UserSettings {
   theme?: 'dark' | 'light'
   layout?: {
@@ -179,6 +215,8 @@ export interface UserSettings {
   // Alert notifications: play a sound on fire (default true) and its volume (0–1).
   notifySound?: boolean
   notifyVolume?: number
+  // Cascade + density map engine configuration (all parameters, cabinet UI).
+  cascades?: Partial<CascadesConfig>
 }
 
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'

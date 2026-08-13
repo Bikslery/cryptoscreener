@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { detectPeaks, calcCascades, computeDensities, computeOverlays } from '../chart-overlays'
+import {
+  detectPeaks, calcCascades, computeDensities, computeOverlays, computeCascades,
+  DEFAULT_CASCADES_CONFIG,
+} from '../chart-overlays'
 import type { UnifiedCandle } from '../../types'
 
 function candle(time: number, high: number, low: number, volume: number, open = (high + low) / 2, close = open): UnifiedCandle {
@@ -25,6 +28,60 @@ describe('detectPeaks', () => {
     expect(h).toEqual([{ e: 50, t: 2, c: 1 }])
     expect(l).toEqual([{ e: 30, t: 2, c: 1 }])
   })
+
+  it('prominenceWindow filters single-candle wiggles around a wider floor', () => {
+    // bar 3 is a local max vs direct neighbours (101 > 100, 100), but inside
+    // a ±2 window the surrounding highs (105/104) make it a non-peak
+    const candles = [
+      candle(1, 105, 100, 10),
+      candle(2, 100, 98, 10),
+      candle(3, 101, 99, 10),
+      candle(4, 100, 98, 10),
+      candle(5, 104, 99, 10),
+    ]
+    const raw = detectPeaks(candles)
+    expect(raw.h.map(p => p.e)).toContain(101)
+    const filtered = detectPeaks(candles, { prominenceWindow: 2 })
+    expect(filtered.h.map(p => p.e)).not.toContain(101)
+  })
+
+  it('minProminencePct drops weak extrema', () => {
+    const candles = [
+      candle(1, 100, 99, 10),
+      candle(2, 100.05, 99, 10), // +0.05% vs neighbours — below 0.1% threshold
+      candle(3, 100, 99, 10),
+      candle(4, 100.5, 99, 10), // +0.5% standalone — passes
+      candle(5, 100, 99, 10),
+    ]
+    const filtered = detectPeaks(candles, { minProminencePct: 0.1 })
+    expect(filtered.h.map(p => p.e)).toEqual([100.5])
+  })
+
+  it('minVolumePct drops low-volume extrema', () => {
+    const candles = [
+      candle(1, 100, 99, 100),
+      candle(2, 101, 99, 2),
+      candle(3, 100, 99, 100),
+    ]
+    const filtered = detectPeaks(candles, { minVolumePct: 10 })
+    expect(filtered.h).toEqual([])
+    const allowed = detectPeaks(candles, { minVolumePct: 1 })
+    expect(allowed.h.map(p => p.e)).toEqual([101])
+  })
+
+  it('lookback only considers recent candles', () => {
+    const candles = [
+      candle(1, 100, 99, 10),
+      candle(2, 105, 99, 10),
+      candle(3, 100, 99, 10),
+      candle(4, 103, 99, 10),
+      candle(5, 100, 99, 10),
+    ]
+    const all = detectPeaks(candles)
+    expect(all.h.map(p => p.e)).toEqual([105, 103])
+    const recent = detectPeaks(candles, { lookback: 2 })
+    expect(recent.h.map(p => p.e)).toEqual([103])
+  })
 })
 
 describe('calcCascades (verbatim scalpboard port)', () => {
@@ -46,8 +103,6 @@ describe('calcCascades (verbatim scalpboard port)', () => {
   })
 
   it('resumes the walk right after the breaker (which joins the next chain)', () => {
-    // chain1: 100, 100.3, 100.6 | 102 breaks it | chain2: 102, 102.2, 102.4
-    // (verbatim scalpboard port: the breaker re-anchors the next cascade)
     const peaks = [peak(100, 1), peak(100.3, 2), peak(100.6, 3), peak(102, 4), peak(102.2, 5), peak(102.4, 6)]
     const out = calcCascades(peaks, 'h', 2, 0.4)
     expect(out.length).toBe(2)
@@ -73,7 +128,6 @@ describe('computeDensities', () => {
     const bids = rows.filter(r => r.direction === 'b')
     const asks = rows.filter(r => r.direction === 'a')
     expect(bids.length).toBeGreaterThan(asks.length)
-    // bearish share 10/span vs bullish 100/span: bullish rows dominate
     expect(bids[0].size).toBeGreaterThan(asks[0].size)
   })
 
@@ -83,15 +137,29 @@ describe('computeDensities', () => {
     expect(rows.length).toBeGreaterThan(0)
     for (const r of rows) expect(r.size).toBeGreaterThan(0)
   })
+
+  it('honours a user-set density threshold', () => {
+    const candles = [
+      candle(1, 100, 99, 1000, 99, 100),
+      candle(2, 100, 99, 10, 100, 99),
+    ]
+    const strict = computeDensities(candles, 2, 50)
+    const lenient = computeDensities(candles, 2, 0.1)
+    expect(strict.length).toBeLessThanOrEqual(lenient.length)
+  })
 })
 
 describe('computeOverlays', () => {
-  it('returns cascades and densities for a candle history', () => {
+  const ladder = (): UnifiedCandle[] => {
     const candles: UnifiedCandle[] = []
     for (let i = 0; i < 60; i++) {
       candles.push(candle(i + 1, 100 + i * 0.05, 99 + i * 0.05, 10))
     }
-    const out = computeOverlays(candles, 2, 2, 0.4)
+    return candles
+  }
+
+  it('returns cascades and densities for a candle history', () => {
+    const out = computeOverlays(ladder(), 2)
     expect(out.cascades).toBeDefined()
     expect(out.cascades.h).toBeInstanceOf(Array)
     expect(out.cascades.l).toBeInstanceOf(Array)
@@ -100,5 +168,57 @@ describe('computeOverlays', () => {
       expect(['a', 'b']).toContain(d.direction)
       expect(d.time).toBeGreaterThan(0)
     }
+    expect(out.render).toEqual({
+      showLabels: DEFAULT_CASCADES_CONFIG.showLabels,
+      lineWidth: DEFAULT_CASCADES_CONFIG.lineWidth,
+      opacity: DEFAULT_CASCADES_CONFIG.opacity,
+    })
+  })
+
+  it('disables cascades via config', () => {
+    const out = computeOverlays(ladder(), 2, { showCascades: false })
+    expect(out.cascades.h).toEqual([])
+    expect(out.cascades.l).toEqual([])
+    expect(out.densities.length).toBeGreaterThan(0)
+  })
+
+  it('disables densities via config', () => {
+    // gentle up-drift with alternating +0.2% highs → h-cascades; disable the
+    // default prominence filter so the synthetic pulses actually qualify
+    const candles: UnifiedCandle[] = []
+    for (let i = 0; i < 200; i++) {
+      const base = 100 + i * 0.005
+      candles.push(candle(i + 1, i % 2 === 0 ? base : base + 0.2, base + 0.1, 5 + (i % 3)))
+    }
+    const out = computeOverlays(candles, 2, {
+      showDensities: false,
+      prominenceWindow: 1,
+      minProminencePct: 0,
+      minVolumePct: 0,
+    })
+    expect(out.densities).toEqual([])
+    expect(out.cascades.h.length + out.cascades.l.length).toBeGreaterThan(0)
+  })
+
+  it('caps cascade count and chain length via config', () => {
+    const out = computeCascades(ladder(), { maxCascades: 2, maxChainLen: 2 })
+    const all = [...out.h, ...out.l]
+    expect(all.length).toBeLessThanOrEqual(2)
+    for (const chain of all) expect(chain.length).toBeLessThanOrEqual(2)
+  })
+
+  it('defaults reduce noise for candle-derived peaks', () => {
+    // A sine-ish series: raw peaks would chain everywhere; default filters
+    // should visibly cut the level count vs the all-window=1 config.
+    const candles: UnifiedCandle[] = []
+    for (let i = 0; i < 200; i++) {
+      const w = Math.sin(i / 7) * 0.4
+      candles.push(candle(i + 1, 100 + w, 99.8 + w, 5 + (i % 3)))
+    }
+    const raw = computeCascades(candles, { prominenceWindow: 1, minProminencePct: 0, minVolumePct: 0, maxChainLen: 0, maxCascades: 0 })
+    const filtered = computeCascades(candles)
+    const rawCount = raw.h.length + raw.l.length
+    const filteredCount = filtered.h.length + filtered.l.length
+    expect(filteredCount).toBeLessThan(rawCount)
   })
 })

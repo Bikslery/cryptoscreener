@@ -47,6 +47,18 @@ const FONT_SIZE = 10
 const BOX_H = BOX_PAD_TOP + FONT_SIZE + BOX_PAD_BOTTOM
 const FONT = 'JetBrains Mono, ui-monospace, monospace'
 
+/** #rrggbb -> rgba with the given opacity (hex colors come from CSS vars) */
+function withAlpha(color: string, alpha: number): string {
+  if (alpha >= 0.999) return color
+  const m = /^#([0-9a-f]{6})$/i.exec(color.trim())
+  if (!m) return color
+  const n = parseInt(m[1], 16)
+  const r = (n >> 16) & 255
+  const g = (n >> 8) & 255
+  const b = n & 255
+  return `rgba(${r},${g},${b},${alpha})`
+}
+
 export class OverlaysPrimitive implements ISeriesPrimitive<Time> {
   private _chart: IChartApi | null = null
   private _series: ISeriesApi<SeriesType> | null = null
@@ -121,16 +133,20 @@ class OverlaysPaneView implements IPrimitivePaneView {
       const specs = this._buildSpecs(data)
       if (specs.length === 0) return
 
+      const render = data.render
+      const opacity = Math.max(0, Math.min(100, render.opacity)) / 100
+      const lineWidth = Math.max(1, Math.min(3, render.lineWidth))
+
       const timeScale = chart.timeScale()
-      const peak = At('--chart--peak', '#4d4d4d')
-      const densityUp = At('--chart--density-down', '#43c743')
-      const densityDown = At('--chart--density-up', '#c74343')
+      const peak = withAlpha(At('--chart--peak', '#4d4d4d'), opacity)
+      const densityUp = withAlpha(At('--chart--density-down', '#43c743'), opacity)
+      const densityDown = withAlpha(At('--chart--density-up', '#c74343'), opacity)
       const textColor = At('--foreground', '#cccccc')
 
       ctx.font = `300 ${FONT_SIZE}px ${FONT}`
       ctx.textAlign = 'left'
       ctx.textBaseline = 'top'
-      ctx.lineWidth = 1
+      ctx.lineWidth = lineWidth
 
       const lastDataX = (() => {
         const lt = this._primitive.lastDataTime()
@@ -163,13 +179,15 @@ class OverlaysPaneView implements IPrimitivePaneView {
         ctx.fillStyle = color
         ctx.fillRect(x0 - 1, y0 - 1, 3, 3)
 
+        if (!render.showLabels) continue
+
         // label box (figures lib Ah() + fh())
         const textY = s.baseline === 'bottom' ? y0 + 1 : y0
         const boxY = s.baseline === 'bottom' ? textY - BOX_H : textY
         const textW = Math.round(ctx.measureText(s.text).width)
         const boxW = BOX_PAD_X + textW + BOX_PAD_X
 
-        ctx.fillStyle = color + '20'
+        ctx.fillStyle = withAlpha(color, opacity * 0.125)
         ctx.fillRect(p, boxY, boxW, BOX_H)
         ctx.strokeStyle = color
         ctx.strokeRect(p + 0.5, boxY + 0.5, boxW - 1, BOX_H - 1)

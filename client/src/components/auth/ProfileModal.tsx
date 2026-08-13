@@ -5,7 +5,9 @@ import { useDrawingHotkeysStore, eventToCombo, formatCombo, DRAWING_TOOL_LABELS,
 import type { DrawingTool } from '../../types'
 import api from '../../services/api'
 import { playAlertSound } from '../../services/alert-notify'
-import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3, Bell, Volume2 } from 'lucide-react'
+import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3, Bell, Volume2, Layers } from 'lucide-react'
+import { resolveCascadesConfig } from '../../services/chart-overlays'
+import type { CascadesConfig } from '../../types'
 import './ProfileModal.css'
 
 type ResetStep = 'idle' | 'code' | 'password' | 'done'
@@ -86,6 +88,36 @@ export default function ProfileModal() {
       if (scaleSaveTimer.current) clearTimeout(scaleSaveTimer.current)
     }
   }, [])
+
+  // Cascade + density engine config — every parameter of the chart overlays.
+  const [cascades, setCascades] = useState<CascadesConfig>(() =>
+    resolveCascadesConfig(settings?.cascades),
+  )
+  const cascadesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    setCascades(resolveCascadesConfig(settings?.cascades))
+  }, [settings?.cascades])
+
+  const saveCascades = (next: CascadesConfig) => {
+    setCascades(next)
+    if (cascadesSaveTimer.current) clearTimeout(cascadesSaveTimer.current)
+    cascadesSaveTimer.current = setTimeout(() => {
+      updateSettings({ cascades: next }).catch(() => {})
+    }, 400)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (cascadesSaveTimer.current) clearTimeout(cascadesSaveTimer.current)
+    }
+  }, [])
+
+  const handleCascadesReset = () => {
+    setCascades(resolveCascadesConfig(undefined))
+    if (cascadesSaveTimer.current) clearTimeout(cascadesSaveTimer.current)
+    updateSettings({ cascades: undefined }).catch(() => {})
+  }
 
   const stopTimer = () => {
     if (timerRef.current) {
@@ -431,6 +463,252 @@ export default function ProfileModal() {
               Применяется к большому графику при открытии нового символа
             </div>
           </div>
+        </div>
+
+        {/* Cascades section — full engine configuration */}
+        <div className="profile-section">
+          <div className="section-header">
+            <div className="section-icon">
+              <Layers size={14} />
+            </div>
+            <h2>Каскады и карта</h2>
+          </div>
+
+          <div className="profile-field">
+            <div className="profile-notify-row">
+              <label>Показ каскадов</label>
+              <label className="profile-switch">
+                <input
+                  type="checkbox"
+                  checked={cascades.showCascades}
+                  onChange={(e) => saveCascades({ ...cascades, showCascades: e.target.checked })}
+                  data-testid="cascades-show-toggle"
+                />
+                <span className="track" />
+              </label>
+            </div>
+          </div>
+
+          <div className="profile-field">
+            <div className="profile-notify-row">
+              <label>Карта плотности</label>
+              <label className="profile-switch">
+                <input
+                  type="checkbox"
+                  checked={cascades.showDensities}
+                  onChange={(e) => saveCascades({ ...cascades, showDensities: e.target.checked })}
+                  data-testid="cascades-density-toggle"
+                />
+                <span className="track" />
+              </label>
+            </div>
+          </div>
+
+          <div className="profile-field">
+            <label>Порог карты, %</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0.5}
+                max={10}
+                step={0.5}
+                value={cascades.densityThresholdPct}
+                onChange={(e) => saveCascades({ ...cascades, densityThresholdPct: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.densityThresholdPct}</span>
+            </div>
+            <div className="profile-scale-hint">Строки карты ниже этого % от сильнейшего уровня скрываются</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Минимум уровней в цепочке</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={2}
+                max={8}
+                step={1}
+                value={cascades.minPeaks}
+                onChange={(e) => saveCascades({ ...cascades, minPeaks: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.minPeaks}</span>
+            </div>
+            <div className="profile-scale-hint">Цепочка короче этого не становится каскадом</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Макс. разрыв цепочки, %</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0.1}
+                max={1.5}
+                step={0.05}
+                value={cascades.maxDistance}
+                onChange={(e) => saveCascades({ ...cascades, maxDistance: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.maxDistance}</span>
+            </div>
+            <div className="profile-scale-hint">Больше — цепочки длиннее и плотнее</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Окно сравнения, свечей</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={1}
+                max={10}
+                step={1}
+                value={cascades.prominenceWindow}
+                onChange={(e) => saveCascades({ ...cascades, prominenceWindow: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.prominenceWindow}</span>
+            </div>
+            <div className="profile-scale-hint">Экстремум сравнивается с ±N соседними свечами (1 — точно как scalpboard)</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Мин. значимость, %</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={cascades.minProminencePct}
+                onChange={(e) => saveCascades({ ...cascades, minProminencePct: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.minProminencePct}</span>
+            </div>
+            <div className="profile-scale-hint">Уровень должен выступать минимум на этот % — фильтр шумовых пиков</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Мин. объём свечи, %</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                value={cascades.minVolumePct}
+                onChange={(e) => saveCascades({ ...cascades, minVolumePct: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.minVolumePct}</span>
+            </div>
+            <div className="profile-scale-hint">Объём свечи экстремума относительно максимума окна</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Окно истории, свечей</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0}
+                max={3000}
+                step={100}
+                value={cascades.lookback}
+                onChange={(e) => saveCascades({ ...cascades, lookback: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.lookback || 'всё'}</span>
+            </div>
+            <div className="profile-scale-hint">Учитывать только последние N свечей (0 — всю историю)</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Лимит каскадов на сторону</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={cascades.maxCascades}
+                onChange={(e) => saveCascades({ ...cascades, maxCascades: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.maxCascades || 'без'}</span>
+            </div>
+            <div className="profile-scale-hint">Ограничивает общее число каскадов (0 — без лимита)</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Макс. длина цепочки</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0}
+                max={20}
+                step={1}
+                value={cascades.maxChainLen}
+                onChange={(e) => saveCascades({ ...cascades, maxChainLen: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.maxChainLen || 'без'}</span>
+            </div>
+            <div className="profile-scale-hint">Рвёт слишком длинные каскады (0 — без лимита)</div>
+          </div>
+
+          <div className="profile-field">
+            <div className="profile-notify-row">
+              <label>Подписи уровней</label>
+              <label className="profile-switch">
+                <input
+                  type="checkbox"
+                  checked={cascades.showLabels}
+                  onChange={(e) => saveCascades({ ...cascades, showLabels: e.target.checked })}
+                  data-testid="cascades-labels-toggle"
+                />
+                <span className="track" />
+              </label>
+            </div>
+          </div>
+
+          <div className="profile-field">
+            <label>Толщина линий</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={1}
+                max={3}
+                step={1}
+                value={cascades.lineWidth}
+                onChange={(e) => saveCascades({ ...cascades, lineWidth: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.lineWidth}</span>
+            </div>
+          </div>
+
+          <div className="profile-field">
+            <label>Прозрачность линий, %</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={10}
+                max={100}
+                step={5}
+                value={cascades.opacity}
+                onChange={(e) => saveCascades({ ...cascades, opacity: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.opacity}%</span>
+            </div>
+            <div className="profile-scale-hint">Меньше — каскады не перекрывают свечи</div>
+          </div>
+
+          <button className="profile-action-btn" onClick={handleCascadesReset}>
+            <Layers size={15} />
+            сбросить каскады по умолчанию
+          </button>
         </div>
 
         {/* Notifications section */}

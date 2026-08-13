@@ -1257,20 +1257,9 @@ function ChartSettingsPanel() {
       </SettingsRow>
 
       <div className="mt-2 border-t border-[#222] pt-2">
-        <SettingsRow label="Каскады">
-          <Toggle checked={s.showCascades} onChange={v => setSetting('showCascades', v)} label="Каскады" />
-          <Toggle checked={s.showDensities} onChange={v => setSetting('showDensities', v)} label="Карта" />
-        </SettingsRow>
-        {s.showCascades && (
-          <>
-            <SettingsRow label="Уровней">
-              <SettingsSlider value={s.cascadesMinPeaks} min={1} max={5} step={1} onChange={v => setSetting('cascadesMinPeaks', v)} />
-            </SettingsRow>
-            <SettingsRow label="Шаг, %">
-              <SettingsSlider value={s.cascadesMaxDistance} min={0.1} max={1} step={0.05} onChange={v => setSetting('cascadesMaxDistance', v)} />
-            </SettingsRow>
-          </>
-        )}
+        <div className="text-[10px] text-[#666] leading-[1.5]">
+          Каскады и карта плотности — полная настройка в личном кабинете
+        </div>
       </div>
       <div className="mt-2 flex items-center gap-3">
         <Toggle checked={s.showTriggeredAlerts} onChange={v => setSetting('showTriggeredAlerts', v)} label="Алерты" />

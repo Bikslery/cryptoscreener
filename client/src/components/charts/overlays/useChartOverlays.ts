@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { ISeriesApi, SeriesType } from 'lightweight-charts'
 import type { UnifiedCandle } from '../../../types'
 import { computeOverlays } from '../../../services/chart-overlays'
-import { useChartSettings } from '../../../services/chart-settings'
+import { useAuthStore } from '../../../store'
 import { OverlaysPrimitive } from './OverlaysPrimitive'
 
 /**
@@ -11,7 +11,8 @@ import { OverlaysPrimitive } from './OverlaysPrimitive'
  *
  * The primitive is (re)attached whenever the chart is recreated
  * (`chartVersion` bumps in the chart-creation effect), and the overlay data
- * is recomputed on every data tick and on settings changes.
+ * is recomputed on every data tick and when the user's cascade config
+ * changes (cabinet settings, server-persisted).
  */
 export function useChartOverlays(
   candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
@@ -22,8 +23,7 @@ export function useChartOverlays(
 ): void {
   const primitiveRef = useRef<OverlaysPrimitive | null>(null)
 
-  const s = useChartSettings()
-  const { showCascades, showDensities, cascadesMinPeaks, cascadesMaxDistance } = s
+  const cascadesConfig = useAuthStore(s => s.settings?.cascades)
 
   useEffect(() => {
     const series = candleRef.current
@@ -41,11 +41,12 @@ export function useChartOverlays(
     const prim = primitiveRef.current
     const candles = candlesDataRef.current
     if (!prim) return
-    if (!showCascades && !showDensities) {
+    const cfg = { ...cascadesConfig }
+    if (cfg.showCascades === false && cfg.showDensities === false) {
       prim.update(null, null, pricePrecision)
       return
     }
-    const data = computeOverlays(candles ?? [], pricePrecision, cascadesMinPeaks, cascadesMaxDistance)
+    const data = computeOverlays(candles ?? [], pricePrecision, cascadesConfig)
     prim.update(data, candles && candles.length > 0 ? candles[candles.length - 1].time : null, pricePrecision)
-  }, [dataVersion, showCascades, showDensities, cascadesMinPeaks, cascadesMaxDistance, pricePrecision, chartVersion, candlesDataRef])
+  }, [dataVersion, cascadesConfig, pricePrecision, chartVersion, candlesDataRef])
 }

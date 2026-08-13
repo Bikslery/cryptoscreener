@@ -40,10 +40,6 @@ export interface ChartSettings {
   watermarkSize: number
   watermarkPlace: WatermarkPlace
   watermarkPattern: string
-  showCascades: boolean
-  showDensities: boolean
-  cascadesMinPeaks: number
-  cascadesMaxDistance: number
   showDrawings: boolean
   showTriggeredAlerts: boolean
   showCountdown: boolean
@@ -64,10 +60,6 @@ export const DEFAULT_CHART_SETTINGS: ChartSettings = {
   watermarkSize: 48,
   watermarkPlace: 'center-center',
   watermarkPattern: '{ticker}',
-  showCascades: true,
-  showDensities: true,
-  cascadesMinPeaks: 2,
-  cascadesMaxDistance: 0.4,
   showDrawings: true,
   showTriggeredAlerts: true,
   showCountdown: false,

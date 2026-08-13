@@ -1,4 +1,4 @@
-import type { UnifiedCandle } from '../types'
+import type { CascadesConfig, UnifiedCandle } from '../types'
 
 /**
  * Chart overlays data — scalpboard.io parity (peaks / cascades / density).
@@ -11,6 +11,9 @@ import type { UnifiedCandle } from '../types'
  *  - peaks: every local extremum (high >= both neighbours / low <= both
  *    neighbours) is a peak {e: price, t: epoch, c: volume}. Plateaus form
  *    dense runs — exactly what cascades need to cluster into ladders.
+ *    An optional noise filter (prominence window / min prominence / min
+ *    volume / lookback) keeps candle-derived peaks meaningful — without it
+ *    every candle wiggle becomes a cascade level and the chart drowns.
  *  - cascades: verbatim port of scalpboard's calcCascades(): consecutive
  *    peaks on the same side chained while the directional distance to the
  *    previous member stays <= maxDistance%; a chain with >= minPeaks
@@ -20,6 +23,29 @@ import type { UnifiedCandle } from '../types'
  *    bucketed to a tick; 'a' = resistance rows (red, from bearish candles),
  *    'b' = support rows (green, from bullish candles).
  */
+
+export const DEFAULT_CASCADES_CONFIG: CascadesConfig = {
+  showCascades: true,
+  showDensities: true,
+  minPeaks: 2,
+  maxDistance: 0.4,
+  prominenceWindow: 3,
+  minProminencePct: 0.15,
+  minVolumePct: 5,
+  lookback: 0,
+  maxCascades: 0,
+  maxChainLen: 0,
+  showLabels: true,
+  lineWidth: 1,
+  opacity: 100,
+  densityThresholdPct: 1.5,
+}
+
+export type CascadesConfigPatch = Partial<CascadesConfig>
+
+export function resolveCascadesConfig(patch?: CascadesConfigPatch): CascadesConfig {
+  return { ...DEFAULT_CASCADES_CONFIG, ...patch }
+}
 
 export interface OverlayPeak {
   /** price of the extremum */
@@ -46,23 +72,63 @@ export interface DensityRow {
   direction: 'a' | 'b'
 }
 
+export interface OverlayRenderOptions {
+  showLabels: boolean
+  lineWidth: number
+  opacity: number
+}
+
 export interface OverlaysData {
   cascades: OverlayCascades
   densities: DensityRow[]
+  render: OverlayRenderOptions
 }
 
-/** local extrema: every candle whose high >= both neighbours (and low <= both) */
-export function detectPeaks(candles: UnifiedCandle[]): { h: OverlayPeak[]; l: OverlayPeak[] } {
+export interface PeakDetectOptions {
+  prominenceWindow?: number
+  minProminencePct?: number
+  minVolumePct?: number
+  lookback?: number
+}
+
+/**
+ * Local extrema over the candle history. Every candle whose high >= the
+ * highs of its prominence-window neighbours (and low <= the lows) is a peak;
+ * window 1 with zero thresholds reproduces scalpboard's raw peak set.
+ * Optional filters (all relative, configurable from the cabinet):
+ *  - prominenceWindow: compare against ±N candles instead of direct neighbours
+ *  - minProminencePct: the extremum must stand out from its window neighbours
+ *  - minVolumePct: the extremum candle must carry volume (vs window max)
+ *  - lookback: only consider the last N candles (0 = whole history)
+ */
+export function detectPeaks(candles: UnifiedCandle[], opts?: PeakDetectOptions): { h: OverlayPeak[]; l: OverlayPeak[] } {
+  const windowBars = opts?.prominenceWindow ?? 1
+  const minProminence = (opts?.minProminencePct ?? 0) / 100
+  const minVolumeFrac = (opts?.minVolumePct ?? 0) / 100
+  const lookback = opts?.lookback ?? 0
+  const from = lookback > 0 ? Math.max(1, candles.length - lookback) : 1
+
   const h: OverlayPeak[] = []
   const l: OverlayPeak[] = []
-  for (let i = 1; i < candles.length - 1; i++) {
+  for (let i = from; i < candles.length - 1; i++) {
     const c = candles[i]
-    const prev = candles[i - 1]
-    const next = candles[i + 1]
-    if (c.high >= prev.high && c.high >= next.high) {
+    const lo = Math.max(0, i - windowBars)
+    const hi = Math.min(candles.length - 1, i + windowBars)
+    let maxHi = -Infinity
+    let minLo = Infinity
+    let maxVol = 0
+    for (let j = lo; j <= hi; j++) {
+      if (j === i) continue
+      const p = candles[j]
+      if (p.high > maxHi) maxHi = p.high
+      if (p.low < minLo) minLo = p.low
+      if (p.volume > maxVol) maxVol = p.volume
+    }
+    if (minVolumeFrac > 0 && maxVol > 0 && c.volume / maxVol < minVolumeFrac) continue
+    if (c.high >= maxHi && (c.high - maxHi) / c.close >= minProminence) {
       h.push({ e: c.high, t: c.time, c: c.volume })
     }
-    if (c.low <= prev.low && c.low <= next.low) {
+    if (c.low <= minLo && (minLo - c.low) / c.close >= minProminence) {
       l.push({ e: c.low, t: c.time, c: c.volume })
     }
   }
@@ -104,17 +170,26 @@ export function calcCascades(
   return cascades
 }
 
-/** cascades for both sides of the price ladder */
+/** cascades for both sides of the price ladder, config-driven */
 export function computeCascades(
   candles: UnifiedCandle[],
-  minPeaks: number,
-  maxDistance: number,
+  config?: CascadesConfigPatch,
 ): OverlayCascades {
-  const peaks = detectPeaks(candles)
-  return {
-    h: calcCascades(peaks.h, 'h', minPeaks, maxDistance),
-    l: calcCascades(peaks.l, 'l', minPeaks, maxDistance),
+  const c = resolveCascadesConfig(config)
+  if (!c.showCascades) return { h: [], l: [] }
+  const peaks = detectPeaks(candles, {
+    prominenceWindow: c.prominenceWindow,
+    minProminencePct: c.minProminencePct,
+    minVolumePct: c.minVolumePct,
+    lookback: c.lookback,
+  })
+  const cap = (side: 'h' | 'l'): OverlayPeak[][] => {
+    let chains = calcCascades(peaks[side], side, c.minPeaks, c.maxDistance)
+    if (c.maxChainLen > 0) chains = chains.map(ch => ch.slice(0, c.maxChainLen))
+    if (c.maxCascades > 0) chains = chains.slice(0, c.maxCascades)
+    return chains
   }
+  return { h: cap('h'), l: cap('l') }
 }
 
 const MAX_BUCKETS = 500
@@ -130,7 +205,7 @@ const MAX_BUCKETS = 500
 export function computeDensities(
   candles: UnifiedCandle[],
   pricePrecision: number,
-  thresholdPct = 0.015,
+  thresholdPct = 1.5,
 ): DensityRow[] {
   if (candles.length === 0) return []
   let minP = Infinity
@@ -172,7 +247,7 @@ export function computeDensities(
     let maxSize = 0
     for (const [, s] of sizeMap) if (s > maxSize) maxSize = s
     if (maxSize <= 0) return
-    const cutoff = maxSize * thresholdPct
+    const cutoff = maxSize * (thresholdPct / 100)
     for (const [b, s] of sizeMap) {
       if (s < cutoff) continue
       rows.push({
@@ -193,11 +268,16 @@ export function computeDensities(
 export function computeOverlays(
   candles: UnifiedCandle[],
   pricePrecision: number,
-  minPeaks: number,
-  maxDistance: number,
+  config?: CascadesConfigPatch,
 ): OverlaysData {
+  const c = resolveCascadesConfig(config)
   return {
-    cascades: computeCascades(candles, minPeaks, maxDistance),
-    densities: computeDensities(candles, pricePrecision),
+    cascades: computeCascades(candles, c),
+    densities: c.showDensities ? computeDensities(candles, pricePrecision, c.densityThresholdPct) : [],
+    render: {
+      showLabels: c.showLabels,
+      lineWidth: c.lineWidth,
+      opacity: c.opacity,
+    },
   }
 }
