@@ -4,6 +4,7 @@ import type {
 } from 'lightweight-charts'
 import type { OverlaysData } from '../../../services/chart-overlays'
 import { At } from '../../../services/chart-config'
+import { toChartTime } from '../../../services/candle-events'
 import { formatCompact } from '../../../utils/format'
 
 /**
@@ -147,12 +148,17 @@ class OverlaysPaneView implements IPrimitivePaneView {
       const lastDataX = (() => {
         const lt = this._primitive.lastDataTime()
         if (lt === null) return 0
-        const x = timeScale.timeToCoordinate(lt as Time)
+        // The series paints `toChartTime(candle.time)` — the overlay must ask
+        // for the same shifted time or the lookup misses (timeToCoordinate
+        // returns null / collides with a candle N bars away).
+        const x = timeScale.timeToCoordinate(toChartTime(lt) as Time)
         return x === null ? 0 : x
       })()
 
       for (const s of specs) {
-        const x0 = timeScale.timeToCoordinate(s.time as Time)
+        // Same shift as the candle series (chart-overlays keeps raw epoch
+        // seconds; the shift belongs to the paint boundary only).
+        const x0 = timeScale.timeToCoordinate(toChartTime(s.time) as Time)
         const y0 = series.priceToCoordinate(s.price)
         if (x0 === null || y0 === null || !isFinite(x0) || !isFinite(y0)) continue
         if (x0 > width) continue

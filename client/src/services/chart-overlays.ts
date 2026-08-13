@@ -19,6 +19,11 @@ import type { CascadesConfig, UnifiedCandle } from '../types'
  *    previous member stays <= maxDistance%; a chain with >= minPeaks
  *    members becomes a cascade. Defaults match scalpboard:
  *    minPeaks: 2, maxDistance: 0.4 (%).
+ *  - crossing: scalpboard's server deletes a peak once price trades through
+ *    its level and cascades are recomputed from the survivors, so a cascade
+ *    disappears when price crosses it. Candle data has no such lifecycle, so
+ *    filterCrossedPeaks() drops every peak a LATER candle has closed through
+ *    before chaining — crossed ladders vanish, live ones stay.
  */
 
 export const DEFAULT_CASCADES_CONFIG: CascadesConfig = {
@@ -155,6 +160,49 @@ export function calcCascades(
   return cascades
 }
 
+/**
+ * Drop peaks whose level a later candle has closed through (scalpboard parity:
+ * the server deletes a peak once price trades through it). An 'h' peak is dead
+ * when some LATER candle's close exceeds it, an 'l' peak when a later close
+ * goes under it — wicks alone don't consume a level, a confirmed close does.
+ * Survivors keep their order, so chains recompute from the still-valid levels.
+ */
+export function filterCrossedPeaks(
+  candles: UnifiedCandle[],
+  peaks: OverlayPeak[],
+  side: 'h' | 'l',
+): OverlayPeak[] {
+  const n = candles.length
+  if (peaks.length === 0 || n < 2) return peaks
+  // suffix close extremes: the best/worst close reached AFTER each candle
+  const suffHigh = new Array<number>(n)
+  const suffLow = new Array<number>(n)
+  suffHigh[n - 1] = candles[n - 1].close
+  suffLow[n - 1] = candles[n - 1].close
+  for (let i = n - 2; i >= 0; i--) {
+    const c = candles[i]
+    suffHigh[i] = Math.max(c.close, suffHigh[i + 1])
+    suffLow[i] = Math.min(c.close, suffLow[i + 1])
+  }
+  const crossed = (t: number, e: number): boolean => {
+    // locate the peak's candle (candles are chronological, unique times)
+    let lo = 0
+    let hi = n - 1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (candles[mid].time < t) lo = mid + 1
+      else hi = mid - 1
+    }
+    if (lo >= n - 1) return false // peak sits on the last candle — nothing after it
+    return side === 'h' ? suffHigh[lo + 1] > e : suffLow[lo + 1] < e
+  }
+  const live: OverlayPeak[] = []
+  for (const p of peaks) {
+    if (!crossed(p.t, p.e)) live.push(p)
+  }
+  return live
+}
+
 /** cascades for both sides of the price ladder, config-driven */
 export function computeCascades(
   candles: UnifiedCandle[],
@@ -169,7 +217,9 @@ export function computeCascades(
     lookback: c.lookback,
   })
   const cap = (side: 'h' | 'l'): OverlayPeak[][] => {
-    let chains = calcCascades(peaks[side], side, c.minPeaks, c.maxDistance)
+    // scalpboard: crossed levels are deleted server-side before chaining
+    const live = filterCrossedPeaks(candles, peaks[side], side)
+    let chains = calcCascades(live, side, c.minPeaks, c.maxDistance)
     if (c.maxChainLen > 0) chains = chains.map(ch => ch.slice(0, c.maxChainLen))
     if (c.maxCascades > 0) chains = chains.slice(0, c.maxCascades)
     return chains

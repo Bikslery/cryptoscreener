@@ -117,6 +117,93 @@ describe('calcCascades (verbatim scalpboard port)', () => {
   })
 })
 
+describe('computeCascades — crossed levels disappear (scalpboard parity)', () => {
+  // window=1, no noise filters: peaks are the raw local extrema
+  const raw = { prominenceWindow: 1, minProminencePct: 0, minVolumePct: 0, maxChainLen: 0, maxCascades: 0, minPeaks: 2, maxDistance: 0.5 }
+
+  // alternating H/L ladder: h-peaks at 100 / 100.3 / 100.6
+  const ladder = (last: UnifiedCandle): UnifiedCandle[] => [
+    candle(1, 99, 97, 10),
+    candle(2, 100, 98, 10),
+    candle(3, 99.5, 97.5, 10),
+    candle(4, 100.3, 98.3, 10),
+    candle(5, 99.6, 97.6, 10),
+    candle(6, 100.6, 98.6, 10),
+    candle(7, 100.2, 98.2, 10),
+    last,
+  ]
+
+  it('keeps an h-ladder while no later candle closes through it', () => {
+    // last candle closes at 99.85 — below every rung
+    const out = computeCascades(ladder(candle(8, 100.2, 99.5, 10)), raw)
+    expect(out.h.length).toBe(1)
+    expect(out.h[0].map(p => p.e)).toEqual([100, 100.3, 100.6])
+    expect(out.h[0].map(p => p.t)).toEqual([2, 4, 6])
+    expect(out.h[0][1].d).toBeCloseTo(0.3, 8)
+    expect(out.h[0][2].d).toBeCloseTo(0.2991, 3)
+  })
+
+  it('consumes the whole h-ladder once a later candle closes through it', () => {
+    // last candle closes at 100.8 — above every rung
+    const out = computeCascades(ladder(candle(8, 101, 100.3, 10, 100.4, 100.8)), raw)
+    expect(out.h).toEqual([])
+  })
+
+  it('shrinks the ladder from the bottom when only the first rung is crossed', () => {
+    const candles = [
+      candle(1, 99, 97, 10),
+      candle(2, 100, 98, 10),
+      candle(3, 99.5, 97.5, 10),
+      candle(4, 100.3, 98.3, 10),
+      candle(5, 99.6, 97.6, 10),
+      candle(6, 100.6, 98.6, 10),
+      candle(7, 99.7, 97.7, 10),
+      candle(8, 100.9, 98.9, 10),
+      candle(9, 100.2, 98.2, 10),
+      // closes above 100 (rung 1) but below 100.3 — the rest hold
+      candle(10, 100.45, 98.45, 10, 100.2, 100.1),
+    ]
+    const out = computeCascades(candles, raw)
+    expect(out.h.length).toBe(1)
+    expect(out.h[0].map(p => p.e)).toEqual([100.3, 100.6, 100.9])
+    expect(out.h[0].map(p => p.t)).toEqual([4, 6, 8])
+    expect(out.h[0][1].d).toBeCloseTo(0.2991, 3)
+    expect(out.h[0][2].d).toBeCloseTo(0.2982, 3)
+  })
+
+  it('consumes an l-ladder once a later candle closes through it', () => {
+    // alternating H/L ladder: l-peaks at 98.5 / 98.2 / 97.9
+    const ladder = [
+      candle(1, 101, 99.2, 10),
+      candle(2, 100.5, 98.5, 10),
+      candle(3, 101.2, 98.8, 10),
+      candle(4, 100.8, 98.2, 10),
+      candle(5, 101.4, 98.5, 10),
+      candle(6, 101, 97.9, 10),
+      candle(7, 101.6, 98.2, 10),
+      // closes at 96.8 — below every support rung
+      candle(8, 100.5, 96.5, 10, 99, 96.8),
+    ]
+    const out = computeCascades(ladder, raw)
+    expect(out.l).toEqual([])
+  })
+
+  it('keeps an l-ladder while no later candle closes through it', () => {
+    const ladder = [
+      candle(1, 101, 99.2, 10),
+      candle(2, 100.5, 98.5, 10),
+      candle(3, 101.2, 98.8, 10),
+      candle(4, 100.8, 98.2, 10),
+      candle(5, 101.4, 98.5, 10),
+      candle(6, 101, 97.9, 10),
+      candle(7, 101.6, 98.2, 10),
+      candle(8, 100.8, 98.6, 10),
+    ]
+    const out = computeCascades(ladder, raw)
+    expect(out.l.map(ch => ch.map(p => p.e))).toEqual([[98.5, 98.2, 97.9]])
+  })
+})
+
 describe('computeOverlays', () => {
   const ladder = (): UnifiedCandle[] => {
     const candles: UnifiedCandle[] = []
