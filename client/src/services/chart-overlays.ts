@@ -22,8 +22,12 @@ import type { CascadesConfig, UnifiedCandle } from '../types'
  *  - crossing: scalpboard's server deletes a peak once price trades through
  *    its level and cascades are recomputed from the survivors, so a cascade
  *    disappears when price crosses it. Candle data has no such lifecycle, so
- *    filterCrossedPeaks() drops every peak a LATER candle has closed through
- *    before chaining — crossed ladders vanish, live ones stay.
+ *    filterCrossedPeaks() drops every peak a LATER candle has traded through
+ *    (high above an h-level, low under an l-level) before chaining — crossed
+ *    ladders vanish, live ones stay.
+ *  - touches: filterByTouches() hides cascades that price did not approach
+ *    often enough — a cascade is drawn only after minTouches candles came
+ *    within touchDistancePct% of one of its levels (0 disables the filter).
  */
 
 export const DEFAULT_CASCADES_CONFIG: CascadesConfig = {
@@ -36,6 +40,8 @@ export const DEFAULT_CASCADES_CONFIG: CascadesConfig = {
   lookback: 0,
   maxCascades: 0,
   maxChainLen: 0,
+  minTouches: 0,
+  touchDistancePct: 0.15,
   showLabels: true,
   lineWidth: 1,
   opacity: 100,
@@ -161,11 +167,12 @@ export function calcCascades(
 }
 
 /**
- * Drop peaks whose level a later candle has closed through (scalpboard parity:
- * the server deletes a peak once price trades through it). An 'h' peak is dead
- * when some LATER candle's close exceeds it, an 'l' peak when a later close
- * goes under it — wicks alone don't consume a level, a confirmed close does.
- * Survivors keep their order, so chains recompute from the still-valid levels.
+ * Drop peaks whose level a later candle has traded through (scalpboard parity:
+ * the server deletes a peak once price crosses it). An 'h' peak is dead when
+ * some LATER candle's high exceeds it, an 'l' peak when a later candle's low
+ * goes under it — any candle crossing the level consumes it, wicks included.
+ * Survivors keep their order, so chains recompute from the still-valid levels
+ * and a cascade disappears once price has crossed it.
  */
 export function filterCrossedPeaks(
   candles: UnifiedCandle[],
@@ -174,15 +181,15 @@ export function filterCrossedPeaks(
 ): OverlayPeak[] {
   const n = candles.length
   if (peaks.length === 0 || n < 2) return peaks
-  // suffix close extremes: the best/worst close reached AFTER each candle
+  // suffix extremes: the highest high / lowest low reached AFTER each candle
   const suffHigh = new Array<number>(n)
   const suffLow = new Array<number>(n)
-  suffHigh[n - 1] = candles[n - 1].close
-  suffLow[n - 1] = candles[n - 1].close
+  suffHigh[n - 1] = candles[n - 1].high
+  suffLow[n - 1] = candles[n - 1].low
   for (let i = n - 2; i >= 0; i--) {
     const c = candles[i]
-    suffHigh[i] = Math.max(c.close, suffHigh[i + 1])
-    suffLow[i] = Math.min(c.close, suffLow[i + 1])
+    suffHigh[i] = Math.max(c.high, suffHigh[i + 1])
+    suffLow[i] = Math.min(c.low, suffLow[i + 1])
   }
   const crossed = (t: number, e: number): boolean => {
     // locate the peak's candle (candles are chronological, unique times)
@@ -203,6 +210,42 @@ export function filterCrossedPeaks(
   return live
 }
 
+/**
+ * Hide cascades that price did not approach often enough: a cascade is drawn
+ * only after at least `minTouches` candles came within `touchDistancePct`% of
+ * one of its levels. A touch is the candle's extreme on the valid side of the
+ * level — an 'h' level is touched by candles whose high comes within the band
+ * below it, an 'l' level by candles whose low comes within the band above it.
+ * The cascade's own member candles ARE the level, so they never count.
+ * minTouches <= 0 disables the filter entirely.
+ */
+export function filterByTouches(
+  candles: UnifiedCandle[],
+  chains: OverlayPeak[][],
+  side: 'h' | 'l',
+  minTouches: number,
+  touchDistancePct: number,
+): OverlayPeak[][] {
+  if (minTouches <= 0 || chains.length === 0) return chains
+  const distFrac = Math.max(0, touchDistancePct) / 100
+  return chains.filter(chain => {
+    const memberTimes = new Set(chain.map(p => p.t))
+    let touches = 0
+    for (const c of candles) {
+      if (memberTimes.has(c.time)) continue
+      const near = chain.some(p => {
+        if (side === 'h') {
+          // high approaches the level from below without crossing it
+          return c.high <= p.e && (p.e - c.high) / p.e <= distFrac
+        }
+        return c.low >= p.e && (c.low - p.e) / p.e <= distFrac
+      })
+      if (near && ++touches >= minTouches) return true
+    }
+    return false
+  })
+}
+
 /** cascades for both sides of the price ladder, config-driven */
 export function computeCascades(
   candles: UnifiedCandle[],
@@ -220,6 +263,7 @@ export function computeCascades(
     // scalpboard: crossed levels are deleted server-side before chaining
     const live = filterCrossedPeaks(candles, peaks[side], side)
     let chains = calcCascades(live, side, c.minPeaks, c.maxDistance)
+    chains = filterByTouches(candles, chains, side, c.minTouches, c.touchDistancePct)
     if (c.maxChainLen > 0) chains = chains.map(ch => ch.slice(0, c.maxChainLen))
     if (c.maxCascades > 0) chains = chains.slice(0, c.maxCascades)
     return chains

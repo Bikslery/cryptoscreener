@@ -188,6 +188,10 @@ export interface CascadesConfig {
   maxCascades: number
   /** max chain members per cascade (0 = unlimited) */
   maxChainLen: number
+  /** min "touches" (candles approaching within touchDistancePct) for a cascade to be drawn (0 = no filter) */
+  minTouches: number
+  /** max % distance for a candle's extreme to count as a touch of a cascade level */
+  touchDistancePct: number
   /** draw the price/volume labels next to cascade lines */
   showLabels: boolean
   /** cascade line width in px (1–3) */

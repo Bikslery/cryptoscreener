@@ -626,6 +626,40 @@ export default function ProfileModal() {
           </div>
 
           <div className="profile-field">
+            <label>Мин. касаний уровня</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0}
+                max={10}
+                step={1}
+                value={cascades.minTouches}
+                onChange={(e) => saveCascades({ ...cascades, minTouches: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.minTouches || 'без'}</span>
+            </div>
+            <div className="profile-scale-hint">Каскад рисуется, только если его уровень касались минимум N раз (0 — без фильтра)</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Дистанция касания, %</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0.05}
+                max={0.5}
+                step={0.05}
+                value={cascades.touchDistancePct}
+                onChange={(e) => saveCascades({ ...cascades, touchDistancePct: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">{cascades.touchDistancePct}%</span>
+            </div>
+            <div className="profile-scale-hint">Насколько близко должна пройти свеча, чтобы это считалось касанием</div>
+          </div>
+
+          <div className="profile-field">
             <div className="profile-notify-row">
               <label>Подписи уровней</label>
               <label className="profile-switch">
