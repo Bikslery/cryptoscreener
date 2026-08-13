@@ -294,7 +294,7 @@ function StaleDataOverlay({ visible }: { visible: boolean }) {
     <div className="stale-data-overlay absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-[#0a0a0a]/60 backdrop-blur-[3px]">
       <div className="rounded-[6px] border border-[#e74c3c]/40 bg-[#1a1010]/95 px-4 py-3 text-[12px] font-medium shadow-[0_12px_30px_rgba(0,0,0,0.35)] flex items-center gap-3">
         <div className="w-[14px] h-[14px] border-2 border-[#e74c3c]/40 border-t-[#e74c3c] rounded-full animate-spin" />
-        <span className="text-[#f0b0aa]">РџРµСЂРµРїРѕРґРєР»СЋС‡РµРЅРёРµ Рє СЃРµСЂРІРµСЂСѓ...</span>
+        <span className="text-[#f0b0aa]">Переподключение к серверу...</span>
       </div>
     </div>
   )
@@ -757,7 +757,7 @@ function useLiveIndicator(
 
 function useStaleDataDetection(
   lastUpdateRef: React.RefObject<number>,
-  threshold = 30000 // РЈРІРµР»РёС‡РµРЅРѕ РґРѕ 30 СЃРµРєСѓРЅРґ РґР»СЏ РЅРёР·РєРѕР»РёРєРІРёРґРЅС‹С… РїР°СЂ
+  threshold = 30000 // Увеличено до 30 секунд для низколиквидных пар
 ): boolean {
   const [isStale, setIsStale] = useState(false)
 
@@ -1307,8 +1307,8 @@ const MiniChart = memo(function MiniChart({
         <div className="w-[18px] h-[18px] border-2 border-[#333] border-t-[#999] rounded-full animate-spin" />
       </div>
     )}
-    {status === 'empty' && <ChartMessageOverlay label="РќРµС‚ РґР°РЅРЅС‹С… РґР»СЏ С‚Р°Р№РјС„СЂРµР№РјР°" />}
-    {status === 'error' && <ChartMessageOverlay label="РћС€РёР±РєР° Р·Р°РіСЂСѓР·РєРё РґР°РЅРЅС‹С…" tone="error" />}
+    {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
+    {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
   </div>
 )
 })
@@ -1343,11 +1343,11 @@ function formatDuration(sec: number): string {
 const TF_SETTINGS: Timeframe[] = ['1s', '5s', '15s', '1m', '5m', '15m', '1h', '4h', '1d', '1w']
 
 const WM_PLACE_OPTIONS: { value: WatermarkPlace; label: string }[] = [
-  { value: 'center-center', label: 'Р¦РµРЅС‚СЂ' },
-  { value: 'center-top', label: 'РЎРІРµСЂС…Сѓ' },
-  { value: 'center-bottom', label: 'РЎРЅРёР·Сѓ' },
-  { value: 'left-center', label: 'РЎР»РµРІР°' },
-  { value: 'right-center', label: 'РЎРїСЂР°РІР°' },
+  { value: 'center-center', label: 'Центр' },
+  { value: 'center-top', label: 'Сверху' },
+  { value: 'center-bottom', label: 'Снизу' },
+  { value: 'left-center', label: 'Слева' },
+  { value: 'right-center', label: 'Справа' },
 ]
 
 function SettingsRow({ label, children }: { label: string; children: React.ReactNode }) {
@@ -1402,16 +1402,16 @@ function ChartSettingsPanel() {
   return (
     <div className="fixed right-[12px] top-[100px] z-40 w-[320px] max-h-[70vh] overflow-y-auto rounded-[6px] border border-[#2a2a2a] bg-[#141414] shadow-[0_20px_50px_rgba(0,0,0,0.6)] p-3">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-[12px] font-bold text-[#e0e0e0]">Р’РёРґ</span>
+        <span className="text-[12px] font-bold text-[#e0e0e0]">Вид</span>
         <button
           className="text-[10px] text-[#888] hover:text-[#ccc] px-[6px] py-[2px] rounded-[3px] border border-[#2a2a2a]"
           onClick={resetChartSettings}
         >
-          РЎР±СЂРѕСЃРёС‚СЊ
+          Сбросить
         </button>
       </div>
 
-      <SettingsRow label="РРЅС‚РµСЂРІР°Р»">
+      <SettingsRow label="Интервал">
         <div className="flex gap-[2px]">
           {TF_SETTINGS.map(tf => (
             <button
@@ -1427,56 +1427,56 @@ function ChartSettingsPanel() {
         </div>
       </SettingsRow>
 
-      <SettingsRow label="РЎРІРµС‡Рё">
+      <SettingsRow label="Свечи">
         <div className="flex gap-[2px]">
           {(['default', 'hollow', 'bars', 'line'] as const).map(t => (
             <Toggle
               key={t}
               checked={s.candlesType === t}
               onChange={() => setSetting('candlesType', t)}
-              label={t === 'default' ? 'РЎРІРµС‡Рё' : t === 'hollow' ? 'РџРѕР»С‹Рµ' : t === 'bars' ? 'Р‘Р°СЂС‹' : 'Р›РёРЅРёСЏ'}
+              label={t === 'default' ? 'Свечи' : t === 'hollow' ? 'Полые' : t === 'bars' ? 'Бары' : 'Линия'}
             />
           ))}
         </div>
       </SettingsRow>
 
-      <SettingsRow label="РћР±СЉС‘Рј">
+      <SettingsRow label="Объём">
         <SettingsSlider value={s.volumesHeight} min={3} max={50} step={1} onChange={v => setSetting('volumesHeight', v)} />
       </SettingsRow>
 
-      <SettingsRow label="РћС‚СЃС‚СѓРї">
+      <SettingsRow label="Отступ">
         <SettingsSlider value={s.rightOffset} min={0} max={100} step={1} onChange={v => setSetting('rightOffset', v)} />
       </SettingsRow>
 
-      <SettingsRow label="РџР»РѕС‚РЅРѕСЃС‚СЊ">
+      <SettingsRow label="Плотность">
         <SettingsSlider value={s.barSpace} min={0.5} max={10} step={0.1} onChange={v => setSetting('barSpace', v)} />
       </SettingsRow>
 
-      <SettingsRow label="РЁРєР°Р»Р°">
+      <SettingsRow label="Шкала">
         <div className="flex gap-[2px]">
-          <Toggle checked={s.priceScaleMode === 'default'} onChange={() => setSetting('priceScaleMode', 'default')} label="РћР±С‹С‡РЅР°СЏ" />
+          <Toggle checked={s.priceScaleMode === 'default'} onChange={() => setSetting('priceScaleMode', 'default')} label="Обычная" />
           <Toggle checked={s.priceScaleMode === 'log'} onChange={() => setSetting('priceScaleMode', 'log')} label="Log" />
         </div>
       </SettingsRow>
 
-      <SettingsRow label="РЎРµС‚РєР°">
+      <SettingsRow label="Сетка">
         <>
-          <Toggle checked={s.vertGrid} onChange={v => setSetting('vertGrid', v)} label="Р’РµСЂ" />
-          <Toggle checked={s.horzGrid} onChange={v => setSetting('horzGrid', v)} label="Р“РѕСЂ" />
+          <Toggle checked={s.vertGrid} onChange={v => setSetting('vertGrid', v)} label="Вер" />
+          <Toggle checked={s.horzGrid} onChange={v => setSetting('horzGrid', v)} label="Гор" />
         </>
       </SettingsRow>
 
       <div className="my-2 border-t border-[#222]" />
 
-      <SettingsRow label="Р—РЅР°Рє">
+      <SettingsRow label="Знак">
         <SettingsSlider value={s.watermark} min={0} max={1} step={0.05} onChange={v => setSetting('watermark', v)} />
       </SettingsRow>
 
-      <SettingsRow label="Р Р°Р·РјРµСЂ">
+      <SettingsRow label="Размер">
         <SettingsSlider value={s.watermarkSize} min={12} max={96} step={1} onChange={v => setSetting('watermarkSize', v)} />
       </SettingsRow>
 
-      <SettingsRow label="РџРѕР·РёС†РёСЏ">
+      <SettingsRow label="Позиция">
         <select
           value={s.watermarkPlace}
           onChange={e => setSetting('watermarkPlace', e.target.value as WatermarkPlace)}
@@ -1486,7 +1486,7 @@ function ChartSettingsPanel() {
         </select>
       </SettingsRow>
 
-      <SettingsRow label="РўРµРєСЃС‚">
+      <SettingsRow label="Текст">
         <input
           value={s.watermarkPattern}
           onChange={e => setSetting('watermarkPattern', e.target.value)}
@@ -1496,14 +1496,14 @@ function ChartSettingsPanel() {
 
       <div className="mt-2 border-t border-[#222] pt-2">
         <div className="text-[10px] text-[#666] leading-[1.5]">
-          РљР°СЃРєР°РґС‹ — РїРѕР»РЅР°СЏ РЅР°СЃС‚СЂРѕР№РєР° РІ Р»РёС‡РЅРѕРј РєР°Р±РёРЅРµС‚Рµ
+          Каскады — полная настройка в личном кабинете
         </div>
       </div>
       <div className="mt-2 flex items-center gap-3">
-        <Toggle checked={s.showTriggeredAlerts} onChange={v => setSetting('showTriggeredAlerts', v)} label="РђР»РµСЂС‚С‹" />
+        <Toggle checked={s.showTriggeredAlerts} onChange={v => setSetting('showTriggeredAlerts', v)} label="Алерты" />
       </div>
 
-      <div className="mt-1 text-[10px] text-[#666]">{'{ticker}'} — С‚РёРєРµСЂ РІ С‚РµРєСЃС‚Рµ Р·РЅР°РєР°</div>
+      <div className="mt-1 text-[10px] text-[#666]">{'{ticker}'} — тикер в тексте знака</div>
     </div>
   )
 }
@@ -1535,7 +1535,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
       <button
         className="clinic-btn clinic-btn-sm flex items-center justify-center w-[28px] h-[28px] p-0"
         onClick={onBack}
-        title="РќР°Р·Р°Рґ Рє СЃРµС‚РєРµ"
+        title="Назад к сетке"
       >
         <ArrowLeft size={15} />
       </button>
@@ -1576,10 +1576,10 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
         <button
           className={`clinic-btn clinic-btn-sm flex items-center gap-1 text-[11px] ${settingsOpen ? 'clinic-btn-active' : 'clinic-btn-secondary'}`}
           onClick={() => setSettingsOpen(o => !o)}
-          title="РќР°СЃС‚СЂРѕР№РєРё РІРёРґР°"
+          title="Настройки вида"
         >
           <Settings2 size={13} />
-          <span>Р’РёРґ</span>
+          <span>Вид</span>
         </button>
         {settingsOpen && (
           <>
@@ -1589,11 +1589,11 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
         )}
         {activeTool !== null && (
           <span className="text-[10px] text-[#ccc] font-mono bg-[#333] px-[6px] py-[2px] rounded-[3px] border border-[#444]">
-            {activeTool === 'h-ray' ? 'Р“РѕСЂРёР·. Р»СѓС‡' : activeTool === 't-ray' ? 'РўСЂРµРЅРґ. Р»СѓС‡' : activeTool === 'alert' ? 'Р¦РµРЅРѕРІРѕР№ Р°Р»РµСЂС‚' : 'РћС‚СЂРµР·РѕРє'} — РєР»РёРє РЅР° РіСЂР°С„РёРєРµ | Esc — РѕС‚РјРµРЅР°
+            {activeTool === 'h-ray' ? 'Гориз. луч' : activeTool === 't-ray' ? 'Тренд. луч' : activeTool === 'alert' ? 'Ценовой алерт' : 'Отрезок'} — клик на графике | Esc — отмена
           </span>
         )}
         <span className="text-[10px] text-[#666] font-mono">
-          Shift + Р›РљРњ / РљРѕР»С‘СЃРёРєРѕ — РёР·РјРµСЂРёС‚СЊ %
+          Shift + ЛКМ / Колёсико — измерить %
         </span>
       </div>
     </div>
@@ -1996,13 +1996,13 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
           <div className="absolute top-[8px] left-[8px] z-30 pointer-events-none">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-[4px] bg-[#1a1a1a]/95 border border-[#2a2a2a] shadow-lg">
               <div className="w-[12px] h-[12px] border-2 border-[#555] border-t-[#ccc] rounded-full animate-spin" />
-              <span className="text-[11px] text-[#aaa] font-medium">Р—Р°РіСЂСѓР·РєР° РёСЃС‚РѕСЂРёРё...</span>
+              <span className="text-[11px] text-[#aaa] font-medium">Загрузка истории...</span>
             </div>
           </div>
         )}
         {isStale && <StaleDataOverlay visible={true} />}
-        {status === 'empty' && <ChartMessageOverlay label="РќРµС‚ РґР°РЅРЅС‹С… РґР»СЏ СЌС‚РѕРіРѕ С‚Р°Р№РјС„СЂРµР№РјР°" />}
-        {status === 'error' && <ChartMessageOverlay label="РћС€РёР±РєР° Р·Р°РіСЂСѓР·РєРё РґР°РЅРЅС‹С…. РџРѕРїСЂРѕР±СѓР№С‚Рµ РґСЂСѓРіРѕР№ С‚Р°Р№РјС„СЂРµР№Рј." tone="error" />}
+        {status === 'empty' && <ChartMessageOverlay label="Нет данных для этого таймфрейма" />}
+        {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных. Попробуйте другой таймфрейм." tone="error" />}
 
         <DrawingToolsPanel
           activeTool={activeTool}
@@ -2056,7 +2056,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
                   </div>
                 </>
               ) : (
-                <span>Р’С‹РґРµР»РёС‚Рµ РґРёР°РїР°Р·РѕРЅ</span>
+                <span>Выделите диапазон</span>
               )}
             </div>
           </div>
