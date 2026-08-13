@@ -36,11 +36,42 @@ export function formatPrice(price: number, precision: number): string {
   return price.toFixed(precision)
 }
 
+const COMPACT_UNITS: [number, string][] = [
+  [1e12, 'T'],
+  [1e9, 'B'],
+  [1e6, 'M'],
+  [1e3, 'K'],
+]
+
+/**
+ * Compact number for volumes (24h quote volume in the coin list and chart
+ * headers). Rounds to 1 decimal below 100 ("1.5K", "12.3M") and to whole
+ * units at 100+ ("123K"), trims a trailing ".0", and carries over the unit
+ * boundary when rounding would overflow it — no "1000K" / "2K"-for-1500
+ * artifacts, no "1234.6B" where "1.2T" fits.
+ */
 export function formatCompact(n: number): string {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`
-  if (n >= 1e6) return `${(n / 1e6).toFixed(0)}M`
-  if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`
-  return String(Math.round(n))
+  if (!isFinite(n)) return String(n)
+  if (n < 0) return `-${formatCompact(-n)}`
+  let div = 1
+  let suffix = ''
+  for (const [d, s] of COMPACT_UNITS) {
+    if (n >= d) { div = d; suffix = s; break }
+  }
+  // Round first, then carry over the boundary if rounding fills a unit
+  // (999.999K rounds to 1000 -> "1M").
+  let v = n / div
+  let rounded = v >= 100 ? Math.round(v) : Math.round(v * 10) / 10
+  if (rounded >= 1000 && suffix) {
+    const i = COMPACT_UNITS.findIndex(u => u[1] === suffix)
+    if (i === 0) return String(Math.round(n)) // T overflows — raw number
+    div = COMPACT_UNITS[i - 1][0]
+    suffix = COMPACT_UNITS[i - 1][1]
+    v = n / div
+    rounded = v >= 100 ? Math.round(v) : Math.round(v * 10) / 10
+  }
+  const s = v >= 100 ? String(rounded) : rounded.toFixed(1)
+  return s.replace(/\.0$/, '') + suffix
 }
 
 const QUOTE_ASSETS = ['USDT', 'USDC', 'BUSD', 'FDUSD', 'BTC', 'ETH', 'BNB', 'TUSD', 'DAI']
