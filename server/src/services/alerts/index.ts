@@ -4,7 +4,7 @@ import { broadcast } from '../../ws/hub.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 import { prisma } from '../../db/index.js'
 import { sendTelegramMessage } from '../telegram/bot.js'
-import { pickExchangeTicker, lastCandleIndex, matchesImpulseCandle, normalizeImpulseCondition } from './impulse.js'
+import { pickExchangeTicker, lastCandleIndex, matchesImpulseCandle, normalizeImpulseCondition, isImpulseMuted, isCandleStale, IMPULSE_MUTE_MS } from './impulse.js'
 import type { PriceAlertCondition, ImpulseAlertCondition, UnifiedCandle, UnifiedTicker } from '../../types.js'
 import { formatPriceByPrecision, extractBaseAsset } from '../../utils/format.js'
 
@@ -51,7 +51,10 @@ export function startAlertEngine() {
             await fireAlert(alert, ticker.price, undefined, ticker.pricePrecision)
           }
         } else if (alert.type === 'impulse') {
-          const match = await findImpulseMatch(alert.symbol, normalizeImpulseCondition(cond))
+          const impulseCond = normalizeImpulseCondition(cond as ImpulseAlertCondition)
+          // Scalpboard parity: after a firing the alert is silent for 5 minutes.
+          if (isImpulseMuted(impulseCond)) continue
+          const match = await findImpulseMatch(alert.symbol, impulseCond)
           if (match) {
             await fireAlert(alert, match.ticker.price, match.ticker.symbol, match.ticker.pricePrecision, {
               keepActive: true,
@@ -79,12 +82,17 @@ export function stopAlertEngine() {
 }
 
 /**
- * Scan the top coins for the first symbol satisfying ALL impulse conditions:
+ * Scan for the first symbol satisfying ALL impulse conditions:
  * exchange priority + min 24h volume from the ticker, the LAST candle (may
  * still be forming — alerts fire as soon as the data shows the move, not at
  * candle close), movement >= percent% with the right direction, and a volume
  * spike vs the 30-candle baseline (when enabled). lastFiredCandleTime stops
  * refiring on the same candle.
+ *
+ * A specific symbol is looked up directly (any volume rank); 'ANY' scans the
+ * top-200 by 24h volume. Candles are fetched on demand whenever the cache is
+ * missing or stale, so symbols not open in any chart still get evaluated on
+ * fresh data every check tick.
  */
 async function findImpulseMatch(symbol: string, cond: ImpulseAlertCondition): Promise<{ ticker: UnifiedTicker; candle: UnifiedCandle; movePct: number } | null> {
   const allTickers = getAllTickers()
@@ -98,19 +106,30 @@ async function findImpulseMatch(symbol: string, cond: ImpulseAlertCondition): Pr
     m.set(t.exchange, t)
   }
 
-  const top = getTickers()
-    .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
-    .slice(0, IMPULSE_SCAN_LIMIT)
+  const candidates: string[] = symbol !== 'ANY'
+    ? (bySymbol.has(symbol) ? [symbol] : [])
+    : getTickers()
+        .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+        .slice(0, IMPULSE_SCAN_LIMIT)
+        .map(t => t.symbol)
 
-  for (const coin of top) {
-    if (symbol !== 'ANY' && coin.symbol !== symbol) continue
-
+  for (const coinSymbol of candidates) {
     // Exchange choice follows the condition's array order (priority).
-    const ticker = pickExchangeTicker(bySymbol, coin.symbol, cond.exchanges)
+    const ticker = pickExchangeTicker(bySymbol, coinSymbol, cond.exchanges)
     if (!ticker) continue
 
-    const candles = getCachedCandles(coin.symbol, cond.timeframe, ticker.exchange)
-    if (!candles || candles.length < 2) continue
+    // Ensure-fresh: fetch from REST when the cache is missing or the last
+    // candle is stale (about 1.5x the timeframe old). Unwatched symbols are
+    // not fed by the WS kline lane, so without this the engine would re-check
+    // the same frozen snapshot forever.
+    let candles = getCachedCandles(coinSymbol, cond.timeframe, ticker.exchange)
+    if (!candles || candles.length < 2 || isCandleStale(candles[candles.length - 1].time, cond.timeframe)) {
+      if (anyLimiterOverThreshold()) continue
+      const fresh = await fetchCandles(coinSymbol, cond.timeframe, WARM_CANDLE_LIMIT, ticker.exchange).catch(() => [])
+      if (fresh.length < 2) continue
+      setCachedCandles(coinSymbol, cond.timeframe, fresh, ticker.exchange)
+      candles = fresh
+    }
 
     // The last candle qualifies even while forming — the alert fires the
     // moment the data shows the move; the dedupe below (per candle time)
@@ -146,7 +165,9 @@ async function warmCandleCache(tfs: Set<string>): Promise<void> {
     for (let i = 0; i < top.length && fetched < WARM_BATCH; i++) {
       const coin = top[(warmCursor + i) % top.length]
       const cached = getCachedCandles(coin.symbol, tf, coin.exchange)
-      if (cached && cached.length >= 2) continue
+      // Refresh when the cache is missing or its last candle went stale —
+      // otherwise the 'ANY' scan would re-check a frozen snapshot forever.
+      if (cached && cached.length >= 2 && !isCandleStale(cached[cached.length - 1].time, tf)) continue
       const candles = await fetchCandles(coin.symbol, tf, WARM_CANDLE_LIMIT, coin.exchange).catch(() => [])
       if (candles.length > 0) {
         setCachedCandles(coin.symbol, tf, candles, coin.exchange)
@@ -175,6 +196,8 @@ async function fireAlert(alert: any, price: number, overrideSymbol?: string, pri
   const condition = JSON.parse(alert.condition)
   if (opts.impulseCandleTime !== undefined) {
     condition.lastFiredCandleTime = opts.impulseCandleTime
+    // Scalpboard parity: no impulse refires for this alert for 5 minutes.
+    condition.mutedUntil = Date.now() + IMPULSE_MUTE_MS
   }
 
   await prisma.alert.update({

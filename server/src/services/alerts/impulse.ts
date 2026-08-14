@@ -18,7 +18,31 @@ export function normalizeImpulseCondition(cond: ImpulseAlertCondition): ImpulseA
     // Telegram stays opt-in — legacy rows never had the flag.
     telegram: cond.telegram === true,
     lastFiredCandleTime: cond.lastFiredCandleTime,
+    mutedUntil: cond.mutedUntil,
   }
+}
+
+/** Scalpboard parity: after an impulse fires, the alert stays silent for 5 minutes. */
+export const IMPULSE_MUTE_MS = 300_000
+
+export function isImpulseMuted(cond: ImpulseAlertCondition, now = Date.now()): boolean {
+  return typeof cond.mutedUntil === 'number' && cond.mutedUntil > now
+}
+
+/** Record a firing: per-candle dedupe + the 5-minute mute window. */
+export function markImpulseFired(cond: ImpulseAlertCondition, candleTime: number, now = Date.now()): ImpulseAlertCondition {
+  return {
+    ...cond,
+    lastFiredCandleTime: candleTime,
+    mutedUntil: now + IMPULSE_MUTE_MS,
+  }
+}
+
+/** Candle data is stale when the last row is older than ~1.5 timeframe periods. */
+export function isCandleStale(lastCandleTime: number, timeframe: string, now = Date.now()): boolean {
+  const tfSec = timeframe === '1m' ? 60 : timeframe === '5m' ? 300 : 0
+  if (tfSec === 0) return false
+  return now - lastCandleTime > tfSec * 1.5
 }
 
 /**

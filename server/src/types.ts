@@ -62,6 +62,8 @@ export interface ImpulseAlertCondition {
   /** Opt-in Telegram delivery (default false — browser only). */
   telegram?: boolean
   lastFiredCandleTime?: number
+  /** Scalpboard-style mute: no refires for this alert until this ms epoch. */
+  mutedUntil?: number
 }
 
 export interface ListingAlertCondition {

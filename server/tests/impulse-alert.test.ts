@@ -5,6 +5,10 @@ import {
   matchesImpulseCandle,
   normalizeImpulseCondition,
   DEFAULT_IMPULSE_EXCHANGES,
+  isImpulseMuted,
+  markImpulseFired,
+  isCandleStale,
+  IMPULSE_MUTE_MS,
 } from '../src/services/alerts/impulse.js'
 import { validateImpulseCondition, validatePriceCondition, validateListingCondition } from '../src/services/alerts/validate.js'
 import type { ImpulseAlertCondition, UnifiedCandle, UnifiedTicker } from '../src/types.js'
@@ -159,14 +163,50 @@ describe('normalizeImpulseCondition', () => {
     expect(n.exchanges).toEqual(c.exchanges)
   })
 
-  it('preserves lastFiredCandleTime', () => {
-    const c = cond({ lastFiredCandleTime: 123 })
+  it('preserves lastFiredCandleTime and mutedUntil', () => {
+    const c = cond({ lastFiredCandleTime: 123, mutedUntil: 456 })
     expect(normalizeImpulseCondition(c).lastFiredCandleTime).toBe(123)
+    expect(normalizeImpulseCondition(c).mutedUntil).toBe(456)
   })
 
   it('telegram stays opt-in: absent flag becomes false, true survives', () => {
     expect(normalizeImpulseCondition(cond()).telegram).toBe(false)
     expect(normalizeImpulseCondition(cond({ telegram: true })).telegram).toBe(true)
+  })
+})
+
+describe('isImpulseMuted / markImpulseFired — scalpboard 5-minute mute', () => {
+  const now = 1_000_000
+
+  it('is not muted when no mute was ever set', () => {
+    expect(isImpulseMuted(cond(), now)).toBe(false)
+  })
+
+  it('is muted inside the 5-minute window and unmuted after it expires', () => {
+    const fired = markImpulseFired(cond(), 500, now)
+    expect(isImpulseMuted(fired, now)).toBe(true)
+    expect(isImpulseMuted(fired, now + IMPULSE_MUTE_MS - 1)).toBe(true)
+    expect(isImpulseMuted(fired, now + IMPULSE_MUTE_MS)).toBe(false)
+  })
+
+  it('records the fired candle time and the mute deadline', () => {
+    const fired = markImpulseFired(cond(), 500, now)
+    expect(fired.lastFiredCandleTime).toBe(500)
+    expect(fired.mutedUntil).toBe(now + IMPULSE_MUTE_MS)
+  })
+})
+
+describe('isCandleStale', () => {
+  const now = 1_000_000
+
+  it('treats the current forming candle as fresh', () => {
+    expect(isCandleStale(now - 60, '1m', now)).toBe(false)
+    expect(isCandleStale(now - 300, '5m', now)).toBe(false)
+  })
+
+  it('flags candles older than 1.5x the timeframe as stale', () => {
+    expect(isCandleStale(now - 91, '1m', now)).toBe(true)
+    expect(isCandleStale(now - 451, '5m', now)).toBe(true)
   })
 })
 
