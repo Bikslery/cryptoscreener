@@ -6,14 +6,15 @@ export type ToastPosition = 'bottom-center' | 'bottom-right' | 'bottom-left'
 
 export interface AlertToastData {
   type: Alert['type']
+  /** Header label: Импульс / Пересечение цены / Листинг. */
   label: string
+  /** Big mono ticker. */
   symbol: string
-  /** Big headline: movement % for impulse, price for crossings. */
-  headline: string
-  /** Secondary details line: TF/direction/volume or crossing direction. */
+  /** Colored suffix next to the ticker (movement % for impulse). */
+  accent: string
+  accentTone: 'up' | 'down' | 'neutral'
+  /** Details line under the ticker. */
   sub: string
-  exchange?: string
-  tone: 'up' | 'down' | 'neutral'
 }
 
 interface Toast {
@@ -39,6 +40,14 @@ const ALERT_LABELS: Record<string, string> = {
   listing: 'Листинг',
 }
 
+const EXCHANGE_NAMES: Record<string, string> = {
+  'binance-futures': 'Binance Futures',
+  'binance-spot': 'Binance Spot',
+  'bybit-futures': 'Bybit Futures',
+  'okx-spot': 'OKX Spot',
+  'okx-futures': 'OKX Futures',
+}
+
 const DEFAULT_ALERT_DURATION_MS = 20_000
 /** Soft cap per corner — older alert toasts drop off when the stack overflows. */
 const ALERT_STACK_LIMIT = 6
@@ -48,46 +57,43 @@ const timers = new Map<number, ReturnType<typeof setTimeout>>()
 
 function buildAlertData(alert: Alert): AlertToastData {
   const symbol = extractBaseAsset(alert.symbol) || 'ANY'
+  const exchangeName = alert.exchange ? EXCHANGE_NAMES[alert.exchange] ?? alert.exchange : ''
   if (alert.type === 'impulse') {
     const cond = alert.condition as { timeframe?: string; direction?: string; volumeSpike?: number; percent?: number }
     const dir = cond.direction === 'up' ? 'вверх' : cond.direction === 'down' ? 'вниз' : 'любое'
     const move = typeof alert.movePct === 'number' ? alert.movePct : cond.percent ?? 0
     const sign = move >= 0 ? '+' : ''
     const vol = (cond.volumeSpike ?? 0) > 0 ? ` · об ×${cond.volumeSpike}` : ''
-    const priceText = alert.price != null ? `$${formatPrice(alert.price, 2)}` : ''
     const tone = cond.direction === 'up' ? 'up' : cond.direction === 'down' ? 'down' : (move >= 0 ? 'up' : 'down')
     return {
       type: 'impulse',
       label: ALERT_LABELS.impulse,
       symbol,
-      headline: `${sign}${move.toFixed(1)}%`,
-      sub: `${cond.timeframe ?? '5m'} · ${dir}${vol}${priceText ? ` · ${priceText}` : ''}`,
-      exchange: alert.exchange ?? undefined,
-      tone: tone as AlertToastData['tone'],
+      accent: `${sign}${move.toFixed(1)}%`,
+      accentTone: tone as AlertToastData['accentTone'],
+      sub: `${cond.timeframe ?? '5m'} ${dir}${vol}${exchangeName ? ` · ${exchangeName}` : ''}`,
     }
   }
   if (alert.type === 'price') {
     const cond = alert.condition as { price?: number; direction?: string }
     const priceText = alert.price != null ? alert.price : cond.price ?? 0
-    const dirText = cond.direction === 'above' ? 'пересечение вверх' : 'пересечение вниз'
+    const dirText = cond.direction === 'above' ? 'выше' : 'ниже'
     return {
       type: 'price',
       label: ALERT_LABELS.price,
       symbol,
-      headline: `$${formatPrice(priceText, 2)}`,
-      sub: dirText,
-      exchange: alert.exchange ?? undefined,
-      tone: 'neutral',
+      accent: '',
+      accentTone: 'neutral',
+      sub: `$${formatPrice(priceText, 2)} · ${dirText}`,
     }
   }
   return {
     type: 'listing',
     label: ALERT_LABELS.listing,
     symbol,
-    headline: symbol,
-    sub: alert.exchange ?? 'новая монета',
-    exchange: alert.exchange ?? undefined,
-    tone: 'neutral',
+    accent: '',
+    accentTone: 'neutral',
+    sub: exchangeName || 'новая монета',
   }
 }
 

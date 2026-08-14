@@ -1,60 +1,65 @@
 import { useToastStore, type AlertToastData } from '../../store/toast'
 
-const TONE: Record<AlertToastData['tone'], { text: string; strip: string }> = {
-  up: { text: 'text-[#26a65b]', strip: 'bg-[#26a65b]' },
-  down: { text: 'text-[#e74c3c]', strip: 'bg-[#e74c3c]' },
-  neutral: { text: 'text-[#e5e5e5]', strip: 'bg-[#3b82f6]' },
+/** Left accent bar colors — scalpboard mapping: price yellow, impulse green, listing blue. */
+const BAR: Record<string, string> = {
+  price: 'bg-[#facc15]',
+  impulse: 'bg-[#4ade80]',
+  listing: 'bg-[#60a5fa]',
 }
 
-const TYPE_BADGE: Record<string, string> = {
-  price: 'bg-[#3b82f6]/15 text-[#3b82f6] border-[#3b82f6]/30',
-  impulse: 'bg-[#f59e0b]/15 text-[#f59e0b] border-[#f59e0b]/30',
-  listing: 'bg-[#26a65b]/15 text-[#26a65b] border-[#26a65b]/30',
+const ACCENT: Record<AlertToastData['accentTone'], string> = {
+  up: 'text-[#4bd24b]',
+  down: 'text-[#d24b4b]',
+  neutral: 'text-[#d4d4d4]',
 }
 
-const EXCHANGE_BADGE: Record<string, string> = {
-  'binance-futures': 'BI-F',
-  'binance-spot': 'BI-S',
-  'bybit-futures': 'BY-F',
-  'okx-spot': 'OK-S',
-  'okx-futures': 'OK-F',
-}
-
-function AlertCard({ id, data, onClose }: {
+/**
+ * Fired-alert popup styled after the scalpboard AlertCard: mono card with a
+ * thin colored left bar, small type label + X in the header, big ticker with
+ * an accent suffix, details line, and a count badge bottom-right.
+ */
+function AlertCard({ id, data, count, onClose }: {
   id: number
   data: AlertToastData
+  count: number
   onClose: (id: number, closeAll: boolean) => void
 }) {
-  const tone = TONE[data.tone] ?? TONE.neutral
   return (
-    <div className="pointer-events-auto relative w-[300px] rounded-lg border border-[#2c2c2c] bg-gradient-to-br from-[#1c1c1e] to-[#141416] shadow-[0_8px_24px_rgba(0,0,0,0.55)] p-3.5 overflow-hidden animate-in fade-in slide-in-from-bottom-2">
-      <div className={`absolute inset-x-0 top-0 h-[2px] ${tone.strip}`} />
-      <button
-        className="absolute top-2 right-2 w-5 h-5 flex items-center justify-center rounded text-[#888] hover:text-white hover:bg-white/10 transition-colors"
-        title="Закрыть (Ctrl+клик — закрыть все)"
-        data-testid="alert-toast-close"
-        onClick={(e) => {
-          e.stopPropagation()
-          onClose(id, e.ctrlKey || e.metaKey)
-        }}
-      >
-        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-          <path d="M1 1l8 8M9 1L1 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-        </svg>
-      </button>
-      <div className="flex items-center gap-1.5 pr-6">
-        <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border ${TYPE_BADGE[data.type] ?? TYPE_BADGE.price}`}>
-          {data.label.toUpperCase()}
-        </span>
-        <span className="text-[13px] font-bold text-white truncate">{data.symbol}</span>
-        {data.exchange && (
-          <span className="text-[9px] font-mono text-[#666]">{EXCHANGE_BADGE[data.exchange] ?? data.exchange}</span>
-        )}
+    <div className="pointer-events-auto relative w-[300px] font-mono rounded-[6px] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b]">
+      <div className="flex">
+        <div className={`w-[7px] self-stretch shrink-0 ${BAR[data.type] ?? BAR.price}`} />
+        <div className="flex-1 min-w-0 relative px-2.5 pt-2.5 pb-2">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[11px] text-[#d4d4d4]">{data.label}</span>
+            <button
+              className="w-6 h-6 flex items-center justify-center rounded cursor-pointer text-[#d4d4d4] transition-colors duration-150 hover:bg-white/[0.05]"
+              title="Закрыть (Ctrl+клик — закрыть все)"
+              data-testid="alert-toast-close"
+              onClick={(e) => {
+                e.stopPropagation()
+                onClose(id, e.ctrlKey || e.metaKey)
+              }}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 6 6 18" />
+                <path d="m6 6 12 12" />
+              </svg>
+            </button>
+          </div>
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-[22px] font-bold text-[#d4d4d4] leading-none">{data.symbol}</span>
+            {data.accent && (
+              <span className={`text-[14px] font-bold leading-none ${ACCENT[data.accentTone] ?? ACCENT.neutral}`}>
+                {data.accent}
+              </span>
+            )}
+          </div>
+          <div className="mt-1 pr-6 text-[11px] text-[#d4d4d4]/80 truncate">{data.sub}</div>
+        </div>
       </div>
-      <div className={`mt-1.5 font-mono font-bold text-[20px] leading-tight tracking-tight ${tone.text}`}>
-        {data.headline}
-      </div>
-      <div className="mt-0.5 text-[11px] text-[#999] truncate">{data.sub}</div>
+      {count > 1 && (
+        <span className="absolute bottom-1.5 right-2 text-[11px] text-[#525252]">{count}</span>
+      )}
     </div>
   )
 }
@@ -75,6 +80,15 @@ export function ToastContainer() {
     else dismiss(id)
   }
 
+  const typeCounts = (stack: typeof right): Map<string, number> => {
+    const m = new Map<string, number>()
+    for (const t of stack) {
+      const type = t.alertData?.type ?? 'price'
+      m.set(type, (m.get(type) ?? 0) + 1)
+    }
+    return m
+  }
+
   return (
     <>
       {messages.length > 0 && (
@@ -92,17 +106,35 @@ export function ToastContainer() {
 
       {right.length > 0 && (
         <div className="fixed bottom-5 right-5 z-[100] flex flex-col gap-2 pointer-events-none">
-          {right.map((toast) => (
-            <AlertCard key={toast.id} id={toast.id} data={toast.alertData!} onClose={handleClose} />
-          ))}
+          {(() => {
+            const counts = typeCounts(right)
+            return right.map((toast) => (
+              <AlertCard
+                key={toast.id}
+                id={toast.id}
+                data={toast.alertData!}
+                count={counts.get(toast.alertData?.type ?? 'price') ?? 1}
+                onClose={handleClose}
+              />
+            ))
+          })()}
         </div>
       )}
 
       {left.length > 0 && (
         <div className="fixed bottom-5 left-5 z-[100] flex flex-col gap-2 pointer-events-none">
-          {left.map((toast) => (
-            <AlertCard key={toast.id} id={toast.id} data={toast.alertData!} onClose={handleClose} />
-          ))}
+          {(() => {
+            const counts = typeCounts(left)
+            return left.map((toast) => (
+              <AlertCard
+                key={toast.id}
+                id={toast.id}
+                data={toast.alertData!}
+                count={counts.get(toast.alertData?.type ?? 'price') ?? 1}
+                onClose={handleClose}
+              />
+            ))
+          })()}
         </div>
       )}
     </>
