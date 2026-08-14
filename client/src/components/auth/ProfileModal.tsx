@@ -4,7 +4,7 @@ import { useAuthStore, useUIStore } from '../../store'
 import { useDrawingHotkeysStore, eventToCombo, formatCombo, DRAWING_TOOL_LABELS, DEFAULT_DRAWING_HOTKEYS, type HotkeyTool } from '../../store/drawingHotkeys'
 import api from '../../services/api'
 import { playAlertSound } from '../../services/alert-notify'
-import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3, Bell, Volume2, Layers, Table2, ChevronUp, ChevronDown, GripVertical } from 'lucide-react'
+import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3, Bell, Volume2, Layers, Table2, ChevronUp, ChevronDown } from 'lucide-react'
 import { resolveCascadesConfig } from '../../services/chart-overlays'
 import { resolveIndicators, INDICATOR_LABELS, VALID_INDICATOR_KEYS } from '../../services/indicators'
 import { useAlertStore } from '../../store'
@@ -245,43 +245,20 @@ export default function ProfileModal() {
 
   // --- Impulse alert creation (cabinet configurator) ---
 
-  interface ExchangeRow {
-    exchange: Exchange
-    minVolume24h: string
-    included: boolean
-  }
-
-  const DEFAULT_EXCHANGE_ROWS: ExchangeRow[] = [
-    { exchange: 'binance-futures', minVolume24h: '0', included: true },
-    { exchange: 'binance-spot', minVolume24h: '0', included: true },
-    { exchange: 'bybit-futures', minVolume24h: '0', included: true },
-    { exchange: 'okx-spot', minVolume24h: '0', included: true },
-  ]
-
   const [alertPercent, setAlertPercent] = useState('3')
-  const [alertTimeframe, setAlertTimeframe] = useState<'1m' | '5m'>('5m')
-  const [alertDirection, setAlertDirection] = useState<'up' | 'down' | 'both'>('both')
-  const [alertVolumeSpike, setAlertVolumeSpike] = useState('0')
+  const [alertExchange, setAlertExchange] = useState<Exchange>('binance-futures')
   const [alertTelegram, setAlertTelegram] = useState(false)
-  const [alertExchanges, setAlertExchanges] = useState<ExchangeRow[]>(DEFAULT_EXCHANGE_ROWS)
   const [alertCreating, setAlertCreating] = useState(false)
   const [alertError, setAlertError] = useState('')
   const [alertDone, setAlertDone] = useState(false)
-  const alertDragIdx = useRef<number | null>(null)
 
   const handleAlertSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setAlertError('')
     setAlertDone(false)
     const percent = parseFloat(alertPercent)
-    const volumeSpike = parseFloat(alertVolumeSpike) || 0
-    const exchanges = alertExchanges.filter(r => r.included)
     if (!isFinite(percent) || percent <= 0) {
       setAlertError('Укажите % движения')
-      return
-    }
-    if (exchanges.length === 0) {
-      setAlertError('Включите хотя бы одну биржу')
       return
     }
     setAlertCreating(true)
@@ -291,11 +268,11 @@ export default function ProfileModal() {
         symbol: 'ANY',
         condition: {
           percent,
-          timeframe: alertTimeframe,
-          direction: alertDirection,
-          volumeSpike,
+          timeframe: '5m',
+          direction: 'both',
+          volumeSpike: 0,
           telegram: alertTelegram,
-          exchanges: exchanges.map(r => ({ exchange: r.exchange, minVolume24h: parseFloat(r.minVolume24h) || 0 })),
+          exchanges: [{ exchange: alertExchange, minVolume24h: 0 }],
         },
       })
       useAlertStore.getState().addCreated(res.data as AlertType)
@@ -305,18 +282,6 @@ export default function ProfileModal() {
     } finally {
       setAlertCreating(false)
     }
-  }
-
-  const handleAlertExchangeDrop = (targetIdx: number) => {
-    const from = alertDragIdx.current
-    alertDragIdx.current = null
-    if (from === null || from === targetIdx) return
-    setAlertExchanges(prev => {
-      const next = [...prev]
-      const [moved] = next.splice(from, 1)
-      next.splice(targetIdx, 0, moved)
-      return next
-    })
   }
 
   const stopTimer = () => {
@@ -990,7 +955,7 @@ export default function ProfileModal() {
 
           <form onSubmit={handleAlertSubmit}>
             <div className="profile-field">
-              <label>Импульс-алерт — движение свечи</label>
+              <label>Импульс-алерт — % движения свечи</label>
               <div className="profile-notify-row">
                 <input
                   className="profile-alert-input"
@@ -1002,43 +967,24 @@ export default function ProfileModal() {
                   onChange={(e) => setAlertPercent(e.target.value)}
                 />
                 <span className="profile-alert-suffix">%</span>
-                <select
-                  className="profile-alert-select"
-                  value={alertTimeframe}
-                  onChange={(e) => setAlertTimeframe(e.target.value as '1m' | '5m')}
-                >
-                  <option value="1m">1m</option>
-                  <option value="5m">5m</option>
-                </select>
-                <select
-                  className="profile-alert-select"
-                  value={alertDirection}
-                  onChange={(e) => setAlertDirection(e.target.value as 'up' | 'down' | 'both')}
-                >
-                  <option value="up">вверх</option>
-                  <option value="down">вниз</option>
-                  <option value="both">любое</option>
-                </select>
               </div>
               <div className="profile-scale-hint">
-                (high−low)/low свечи ≥ порога на закрытой свече выбранного ТФ
+                (high−low)/low свечи ≥ порога — алерт сработает, как только движение превысит его
               </div>
             </div>
 
             <div className="profile-field">
-              <label>Всплеск объёма (× к среднему 30 свечей, 0 — выкл)</label>
-              <div className="profile-notify-row">
-                <input
-                  className="profile-alert-input"
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  placeholder="0"
-                  value={alertVolumeSpike}
-                  onChange={(e) => setAlertVolumeSpike(e.target.value)}
-                />
-                <span className="profile-alert-suffix">×</span>
-              </div>
+              <label>Биржа, с которой приходит алерт</label>
+              <select
+                className="profile-alert-select"
+                value={alertExchange}
+                onChange={(e) => setAlertExchange(e.target.value as Exchange)}
+                data-testid="alert-exchange-select"
+              >
+                {Object.keys(EXCHANGE_LABELS).map((ex) => (
+                  <option key={ex} value={ex}>{EXCHANGE_LABELS[ex as Exchange]}</option>
+                ))}
+              </select>
             </div>
 
             <div className="profile-field">
@@ -1059,56 +1005,8 @@ export default function ProfileModal() {
               </div>
             </div>
 
-            <div className="profile-field">
-              <label>Биржи (порядок = приоритет, перетащите строку)</label>
-              {alertExchanges.map((row, i) => (
-                <div
-                  key={row.exchange}
-                  className={`indicator-order-row alert-exchange-row ${!row.included ? 'excluded' : ''}`}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => {
-                    e.preventDefault()
-                    handleAlertExchangeDrop(i)
-                  }}
-                >
-                  <label className="profile-switch">
-                    <input
-                      type="checkbox"
-                      checked={row.included}
-                      onChange={() => setAlertExchanges(prev => prev.map((r, j) => j === i ? { ...r, included: !r.included } : r))}
-                      data-testid={`alert-exchange-${row.exchange}`}
-                    />
-                    <span className="track" />
-                  </label>
-                  <span className="indicator-order-label">{EXCHANGE_LABELS[row.exchange]}</span>
-                  <div className="indicator-order-actions">
-                    <input
-                      className="profile-alert-minvol"
-                      type="number"
-                      min="0"
-                      step="100000"
-                      title="Мин. объём 24ч в USDT"
-                      value={row.minVolume24h}
-                      onChange={(e) => setAlertExchanges(prev => prev.map((r, j) => j === i ? { ...r, minVolume24h: e.target.value } : r))}
-                    />
-                    <span
-                      className="profile-alert-grip"
-                      draggable
-                      title="Перетащить"
-                      onDragStart={(e) => {
-                        alertDragIdx.current = i
-                        e.dataTransfer.effectAllowed = 'move'
-                      }}
-                    >
-                      <GripVertical size={13} />
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-
             {alertError && <div className="profile-reset-error">{alertError}</div>}
-            {alertDone && <div className="profile-alert-done">Алерт создан — сработает на ближайшей закрытой свече</div>}
+            {alertDone && <div className="profile-alert-done">Алерт создан — сработает на ближайшем резком движении</div>}
 
             <button type="submit" className="profile-action-btn" disabled={alertCreating}>
               <Bell size={15} />
