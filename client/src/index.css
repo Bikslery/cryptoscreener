@@ -98,15 +98,17 @@
   --foreground-alt: #333333;
 }
 
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  font-family: 'Noto Sans Variable', ui-sans-serif, system-ui, sans-serif;
-  font-variant-numeric: tabular-nums;
-  font-weight: 400;
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: 'Noto Sans Variable', ui-sans-serif, system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+    font-weight: 400;
+  }
 }
 
 html, body, #root {
