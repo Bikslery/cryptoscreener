@@ -1,5 +1,6 @@
 import type { UnifiedCandle, Exchange } from '../types'
 import { isFiniteOHLCV } from './candle-utils'
+import { recordDiag } from './candle-diag'
 
 /**
  * Chart-time conversion (scalpboard `we()` equivalent).
@@ -12,11 +13,15 @@ import { isFiniteOHLCV } from './candle-utils'
  * RAW UTC seconds — only the values handed to lightweight-charts are
  * shifted. A constant shift never changes the relative spacing, so logical
  * ranges and window guards stay exact.
+ *
+ * The offset is recomputed on EVERY call instead of cached once at module
+ * load. `getTimezoneOffset()` is effectively free, and a tab left open
+ * across a DST transition must not keep painting with a stale hour-off
+ * shift until the page is reloaded.
  */
-const TZ_OFFSET_SEC = new Date().getTimezoneOffset() * 60
-
 export function toChartTime(tSec: number): number {
-  return tSec - TZ_OFFSET_SEC
+  const tzOffsetSec = new Date().getTimezoneOffset() * 60
+  return tSec - tzOffsetSec
 }
 
 export interface TickPayload {
@@ -40,9 +45,28 @@ export interface ChartEventPatch {
   prepend?: UnifiedCandle[]
   livePrice?: number
   cacheWrites?: UnifiedCandle[]
+  /**
+   * Klines that arrived for a period OLDER than the tail (out-of-order
+   * correction candidates). This layer's own tail window is bounded
+   * (MAX_TAIL) so it cannot tell whether the bar still exists further back
+   * in the caller's full candle array — the caller checks `candlesDataRef`
+   * and, if the bar is found there, repaints it in place (lightweight-charts
+   * v5 `series.update(bar, true)` — historical update, no setData/viewport
+   * reset needed). If the bar isn't found there either, there is nothing
+   * left to correct and it's just dropped (already logged by this layer).
+   * An array because a single buffered-replay flush can surface more than
+   * one late correction at once.
+   */
+  outOfOrder?: { time: number; bar: UnifiedCandle }[]
 }
 
 const EMPTY_PATCH = (): ChartEventPatch => ({ updates: [] })
+
+/** Read-only snapshot of one tail entry — for the invariant logger only. */
+export interface TailSnapshot {
+  time: number
+  close: number
+}
 
 export interface CandleEventsOpts {
   symbol: string
@@ -80,7 +104,17 @@ export interface CandleEvents {
   /** Reset the tail to match a freshly loaded full history. */
   applyHistory(candles: UnifiedCandle[]): void
   applyOlderPage?(candles: UnifiedCandle[]): void
+  /**
+   * Nested-safe buffering. `on=true` increments a depth counter; `on=false`
+   * decrements it. The buffer is only flushed (replayed) when depth returns
+   * to 0 — while ANY caller still holds it open (reconnect history reload
+   * racing a lazy-scroll prepend, for example), events keep queuing instead
+   * of one caller's `setBuffered(false)` prematurely releasing the other's
+   * hold. Returns EMPTY_PATCH while depth stays above 0.
+   */
   setBuffered(on: boolean): ChartEventPatch
+  /** Read-only tail snapshot for the invariant logger (last N bars). */
+  peekTail(n?: number): TailSnapshot[]
   destroy(): void
 }
 
@@ -97,15 +131,23 @@ interface BufferedEvent {
   kind: 'kline' | 'tick'
   kline?: UnifiedCandle
   tick?: TickPayload
+  /** Monotonic arrival sequence — tiebreaker when two events share a time. */
+  seq: number
+}
+
+function bufferedEventTime(ev: BufferedEvent): number {
+  return ev.kind === 'kline' ? (ev.kline?.time ?? 0) : (ev.tick?.timeSec ?? 0)
 }
 
 export function createCandleEvents(opts: CandleEventsOpts): CandleEvents {
   const { symbol, exchange, tf, tfSeconds } = opts
 
   let tail: TailEntry[] = []
-  let buffered = false
+  // Depth counter (generation-style), not a boolean: see setBuffered doc.
+  let bufferDepth = 0
   let destroyed = false
   let bufferedEvents: BufferedEvent[] = []
+  let bufferSeq = 0
 
   function current(): TailEntry | null {
     return tail.length > 0 ? tail[tail.length - 1] : null
@@ -130,18 +172,34 @@ export function createCandleEvents(opts: CandleEventsOpts): CandleEvents {
     if (destroyed) return EMPTY_PATCH()
     if (!isFiniteOHLCV(kline) || kline.time <= 0) return EMPTY_PATCH()
 
-    if (buffered) {
-      bufferedEvents.push({ kind: 'kline', kline })
+    if (bufferDepth > 0) {
+      bufferedEvents.push({ kind: 'kline', kline, seq: bufferSeq++ })
       if (bufferedEvents.length > MAX_BUFFERED_EVENTS) bufferedEvents.shift()
       return EMPTY_PATCH()
     }
 
     const cur = current()
     if (cur && kline.time < cur.candle.time) {
-      // Stale/late kline for an old period — lightweight-charts rejects an
-      // update older than the series' last bar, and scalpboard drops it too.
-      // The period keeps whatever snapshot was painted when it was current.
-      return EMPTY_PATCH()
+      // Stale/late kline for an old period. lightweight-charts' `update()`
+      // rejects a time older than the series' last bar, so this can never
+      // repaint the live series directly — but the bar may still be sitting
+      // further back in the caller's full candle array (outside this
+      // layer's bounded MAX_TAIL window). Surface it as an out-of-order
+      // correction candidate instead of a silent drop: the caller looks it
+      // up in candlesDataRef and, if found, repaints it in place via
+      // `series.update(bar, true)` (historicalUpdate) — no setData, no
+      // viewport reset.
+      const stamped: UnifiedCandle = { ...kline, symbol, exchange, timeframe: tf }
+      recordDiag('kline_out_of_order', {
+        symbol, exchange, tf,
+        from: kline.time,
+        to: cur.candle.time,
+        detail: `late kline for closed period (tail=${cur.candle.time})`,
+      })
+      // Still worth persisting to the candle cache (which supports a sorted
+      // upsert for exactly this backfill case — see candle-cache.ts
+      // updateCandle) even though it can't be live-painted by `update()`.
+      return { updates: [], outOfOrder: [{ time: kline.time, bar: stamped }], cacheWrites: [stamped] }
     }
 
     // Full replace: if the period already exists in the tail, the opening
@@ -161,8 +219,8 @@ export function createCandleEvents(opts: CandleEventsOpts): CandleEvents {
     if (destroyed) return EMPTY_PATCH()
     if (!isFinite(tick.price) || tick.price <= 0) return EMPTY_PATCH()
 
-    if (buffered) {
-      bufferedEvents.push({ kind: 'tick', tick })
+    if (bufferDepth > 0) {
+      bufferedEvents.push({ kind: 'tick', tick, seq: bufferSeq++ })
       if (bufferedEvents.length > MAX_BUFFERED_EVENTS) bufferedEvents.shift()
       return EMPTY_PATCH()
     }
@@ -220,36 +278,76 @@ export function createCandleEvents(opts: CandleEventsOpts): CandleEvents {
     if (destroyed) return EMPTY_PATCH()
 
     if (on) {
-      if (!buffered) {
-        buffered = true
+      if (bufferDepth === 0) {
         bufferedEvents = []
       }
+      bufferDepth++
       return EMPTY_PATCH()
     }
 
-    buffered = false
+    // Guard against an unmatched setBuffered(false) (defensive — depth
+    // should never go negative, but a stray extra call must not corrupt it).
+    if (bufferDepth === 0) return EMPTY_PATCH()
+    bufferDepth--
+    if (bufferDepth > 0) {
+      // Another caller is still holding the buffer open (e.g. a WS-reconnect
+      // history reload racing a lazy-scroll prepend) — do NOT replay yet.
+      return EMPTY_PATCH()
+    }
+
+    // Depth reached 0: replay strictly sorted by event time (arrival order
+    // as a tiebreaker) so a reconnect-buffered kline and a lazy-scroll
+    // buffered tick that raced in arrival order still apply in true
+    // chronological order against the freshly-settled tail.
+    const toReplay = bufferedEvents.slice().sort((a, b) => {
+      const dt = bufferedEventTime(a) - bufferedEventTime(b)
+      return dt !== 0 ? dt : a.seq - b.seq
+    })
+    bufferedEvents = []
+
     const patch: ChartEventPatch = { updates: [] }
-    for (const ev of bufferedEvents) {
+    const tailTimeAtFlushStart = current()?.candle.time
+    let droppedStale = 0
+    for (const ev of toReplay) {
+      const evTime = bufferedEventTime(ev)
       const p = ev.kind === 'kline' && ev.kline
         ? applyKline(ev.kline)
         : ev.kind === 'tick' && ev.tick
           ? applyTick(ev.tick)
           : EMPTY_PATCH()
+      if (p.updates.length === 0 && !p.outOfOrder && tailTimeAtFlushStart != null && evTime < tailTimeAtFlushStart) {
+        droppedStale++
+      }
       patch.updates.push(...p.updates)
       if (p.livePrice != null) patch.livePrice = p.livePrice
       if (p.cacheWrites) {
         if (!patch.cacheWrites) patch.cacheWrites = []
         patch.cacheWrites.push(...p.cacheWrites)
       }
+      if (p.outOfOrder) {
+        if (!patch.outOfOrder) patch.outOfOrder = []
+        patch.outOfOrder.push(...p.outOfOrder)
+      }
     }
-    bufferedEvents = []
+    if (droppedStale > 0) {
+      recordDiag('buffer_replay_drop_stale', {
+        symbol, exchange, tf,
+        detail: `${droppedStale} buffered event(s) older than the settled tail dropped on replay`,
+      })
+    }
     return patch
+  }
+
+  function peekTail(n: number = MAX_TAIL): TailSnapshot[] {
+    const start = Math.max(0, tail.length - n)
+    return tail.slice(start).map(t => ({ time: t.candle.time, close: t.candle.close }))
   }
 
   function destroy() {
     destroyed = true
     tail = []
     bufferedEvents = []
+    bufferDepth = 0
   }
 
   return {
@@ -258,6 +356,7 @@ export function createCandleEvents(opts: CandleEventsOpts): CandleEvents {
     applyHistory,
     applyOlderPage,
     setBuffered,
+    peekTail,
     destroy,
   }
 }
