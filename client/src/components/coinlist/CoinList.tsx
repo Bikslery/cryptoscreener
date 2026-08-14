@@ -88,20 +88,20 @@ export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage,
       onMouseDown={() => onPrefetch(coin.symbol)}
       onClick={() => onClick(coin.symbol)}
     >
-      <div className={`flex items-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
+      <div className={`flex items-center justify-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
         <WatchFlag watched={isWatched} onClick={(e) => { e.stopPropagation(); onToggleWatch(coin.symbol) }} />
         {formatVal('symbol', coin)}
       </div>
-      <div className={`flex items-center justify-end px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+      <div className={`flex items-center justify-center px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
         {formatVal('change24h', coin)}%
       </div>
-      <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
+      <div className="flex items-center justify-center px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
         {formatVal('range1m', coin)}
       </div>
-      <div className="flex items-center justify-end px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
+      <div className="flex items-center justify-center px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
         {formatVal('natr5m', coin)}
       </div>
-      <div data-testid="vol-cell" className={`flex items-center justify-end px-2 text-[11px] ${coin.quoteVolume24h >= VOLUME_HIGH_THRESHOLD ? 'text-[#fff] font-medium' : 'text-[#a0a0a0]'}`}>
+      <div data-testid="vol-cell" className={`flex items-center justify-center px-2 text-[11px] ${coin.quoteVolume24h >= VOLUME_HIGH_THRESHOLD ? 'text-[#fff] font-medium' : 'text-[#a0a0a0]'}`}>
         {formatVal('quoteVolume24h', coin)}
       </div>
     </div>
