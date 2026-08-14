@@ -626,6 +626,8 @@ interface AlertStore {
   init: () => () => void
   /** Show an alert the user just created (from the form or the chart bell tool). */
   addCreated: (alert: AlertType) => void
+  /** Replace an alert with the server PATCH result (settings/active change). */
+  updateAlert: (alert: AlertType) => void
   dismissAlert: (id: string) => void
 }
 
@@ -668,6 +670,12 @@ export const useAlertStore = create<AlertStore>((set) => ({
     if (s.alerts.some(a => a.id === alert.id)) return s
     return { alerts: [alert, ...s.alerts].slice(0, 100) }
   }),
+
+  updateAlert: (alert) => set((s) => ({
+    alerts: s.alerts.some(a => a.id === alert.id)
+      ? s.alerts.map(a => a.id === alert.id ? alert : a)
+      : s.alerts,
+  })),
 
   dismissAlert: (id) => {
     set((s) => ({

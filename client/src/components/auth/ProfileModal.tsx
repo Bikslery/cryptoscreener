@@ -243,7 +243,7 @@ export default function ProfileModal() {
     updateSettings({ indicators: undefined }).catch(() => {})
   }
 
-  // --- Impulse alert creation (cabinet configurator) ---
+  // --- Impulse alert master toggle (one ANY-alert per user) ---
 
   const EXCHANGE_OPTIONS: { value: Exchange | 'all'; label: string }[] = [
     { value: 'all', label: 'Все биржи' },
@@ -253,12 +253,101 @@ export default function ProfileModal() {
   const [alertPercent, setAlertPercent] = useState('3')
   const [alertExchange, setAlertExchange] = useState<Exchange | 'all'>('all')
   const [alertTelegram, setAlertTelegram] = useState(false)
-  const [alertCreating, setAlertCreating] = useState(false)
+  const [alertsEnabled, setAlertsEnabled] = useState(false)
+  const [alertSaving, setAlertSaving] = useState(false)
   const [alertError, setAlertError] = useState('')
-  const [alertDone, setAlertDone] = useState(false)
+  const [managedAlertId, setManagedAlertId] = useState<string | null>(null)
+  const alertSettingsTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [exchangeMenuOpen, setExchangeMenuOpen] = useState(false)
   const [exchangeMenuPos, setExchangeMenuPos] = useState<{ top: number; left: number; width: number } | null>(null)
   const exchangeBtnRef = useRef<HTMLButtonElement | null>(null)
+
+  const buildImpulseCondition = () => ({
+    percent: parseFloat(alertPercent),
+    timeframe: '5m',
+    direction: 'both',
+    volumeSpike: 0,
+    telegram: alertTelegram,
+    exchanges: alertExchange === 'all'
+      ? (Object.keys(EXCHANGE_LABELS) as Exchange[]).map((exchange) => ({ exchange, minVolume24h: 0 }))
+      : [{ exchange: alertExchange, minVolume24h: 0 }],
+  })
+
+  // The gate mounts this modal fresh on every open — load the user's ANY
+  // impulse alert (latest) and mirror its state into the form.
+  useEffect(() => {
+    let cancelled = false
+    api.get('/alerts')
+      .then((res) => {
+        if (cancelled) return
+        const list = res.data as AlertType[]
+        const impulse = list
+          .filter(a => a.type === 'impulse' && a.symbol === 'ANY')
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]
+        setManagedAlertId(impulse?.id ?? null)
+        setAlertsEnabled(impulse?.active === true)
+        if (impulse?.condition) {
+          const cond = impulse.condition as { percent?: number; exchanges?: { exchange: Exchange }[]; telegram?: boolean }
+          if (typeof cond.percent === 'number') setAlertPercent(String(cond.percent))
+          if (Array.isArray(cond.exchanges)) {
+            if (cond.exchanges.length === 1) setAlertExchange(cond.exchanges[0].exchange)
+            else setAlertExchange('all')
+          }
+          setAlertTelegram(cond.telegram === true)
+        }
+      })
+      .catch(() => { /* keep defaults */ })
+    return () => { cancelled = true }
+  }, [])
+
+  const handleAlertsToggle = async (on: boolean) => {
+    setAlertError('')
+    if (on) {
+      const percent = parseFloat(alertPercent)
+      if (!isFinite(percent) || percent <= 0) {
+        setAlertError('Укажите % движения')
+        return
+      }
+    }
+    setAlertSaving(true)
+    try {
+      if (on) {
+        if (managedAlertId) {
+          const res = await api.patch(`/alerts/${managedAlertId}`, { active: true, condition: buildImpulseCondition() })
+          useAlertStore.getState().updateAlert(res.data as AlertType)
+        } else {
+          const res = await api.post('/alerts', { type: 'impulse', symbol: 'ANY', condition: buildImpulseCondition() })
+          setManagedAlertId(res.data.id)
+          useAlertStore.getState().addCreated(res.data as AlertType)
+        }
+        setAlertsEnabled(true)
+      } else {
+        if (managedAlertId) {
+          const res = await api.patch(`/alerts/${managedAlertId}`, { active: false })
+          useAlertStore.getState().updateAlert(res.data as AlertType)
+        }
+        setAlertsEnabled(false)
+      }
+    } catch (err: any) {
+      setAlertError(err.response?.data?.error || 'Не удалось изменить состояние алертов')
+    } finally {
+      setAlertSaving(false)
+    }
+  }
+
+  // Settings apply to the enabled alert automatically (debounced PATCH).
+  const queueAlertSettingsSave = () => {
+    if (!alertsEnabled || !managedAlertId) return
+    if (alertSettingsTimer.current) clearTimeout(alertSettingsTimer.current)
+    alertSettingsTimer.current = setTimeout(async () => {
+      const percent = parseFloat(alertPercent)
+      if (!isFinite(percent) || percent <= 0) return
+      try {
+        const res = await api.patch(`/alerts/${managedAlertId}`, { condition: buildImpulseCondition() })
+        useAlertStore.getState().updateAlert(res.data as AlertType)
+      } catch { /* keep local state */ }
+    }, 400)
+  }
 
   const toggleExchangeMenu = () => {
     if (exchangeMenuOpen) {
@@ -288,41 +377,6 @@ export default function ProfileModal() {
       document.removeEventListener('keydown', onKey)
     }
   }, [exchangeMenuOpen])
-
-  const handleAlertSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setAlertError('')
-    setAlertDone(false)
-    const percent = parseFloat(alertPercent)
-    if (!isFinite(percent) || percent <= 0) {
-      setAlertError('Укажите % движения')
-      return
-    }
-    const exchanges = alertExchange === 'all'
-      ? (Object.keys(EXCHANGE_LABELS) as Exchange[]).map((exchange) => ({ exchange, minVolume24h: 0 }))
-      : [{ exchange: alertExchange, minVolume24h: 0 }]
-    setAlertCreating(true)
-    try {
-      const res = await api.post('/alerts', {
-        type: 'impulse',
-        symbol: 'ANY',
-        condition: {
-          percent,
-          timeframe: '5m',
-          direction: 'both',
-          volumeSpike: 0,
-          telegram: alertTelegram,
-          exchanges,
-        },
-      })
-      useAlertStore.getState().addCreated(res.data as AlertType)
-      setAlertDone(true)
-    } catch (err: any) {
-      setAlertError(err.response?.data?.error || 'Не удалось создать алерт')
-    } finally {
-      setAlertCreating(false)
-    }
-  }
 
   const stopTimer = () => {
     if (timerRef.current) {
@@ -990,94 +1044,109 @@ export default function ProfileModal() {
           </button>
         </ProfileSection>
 
-        {/* Alerts section — impulse alert creation (fires on closed candles) */}
+        {/* Alerts section — master toggle + impulse settings */}
         <ProfileSection icon={<Bell size={14} />} title="Алерты">
 
-          <form onSubmit={handleAlertSubmit}>
-            <div className="profile-field">
-              <label>Импульс-алерт — % движения свечи</label>
-              <div className="profile-notify-row">
-                <input
-                  className="profile-alert-input"
-                  type="number"
-                  step="0.1"
-                  min="0.1"
-                  placeholder="3"
-                  value={alertPercent}
-                  onChange={(e) => setAlertPercent(e.target.value)}
-                />
-                <span className="profile-alert-suffix">%</span>
-              </div>
+          <div className="alert-master-row">
+            <div className="alert-master-info">
+              <div className="alert-master-title">Включить алерты</div>
               <div className="profile-scale-hint">
-                (high−low)/low свечи ≥ порога — алерт сработает, как только движение превысит его
+                Импульс-алерт: движение (high−low)/low свечи ≥ порога
               </div>
             </div>
+            <label className="alert-master-switch">
+              <input
+                type="checkbox"
+                checked={alertsEnabled}
+                disabled={alertSaving}
+                onChange={(e) => handleAlertsToggle(e.target.checked)}
+                data-testid="alerts-master-toggle"
+              />
+              <span className="track" />
+            </label>
+          </div>
 
-            <div className="profile-field">
-              <label>Биржа, с которой приходит алерт</label>
-              <div className="alert-exchange-wrap">
-                <button
-                  ref={exchangeBtnRef}
-                  type="button"
-                  className="alert-exchange-btn"
-                  onClick={toggleExchangeMenu}
-                  data-testid="alert-exchange-select"
+          <div className="profile-field">
+            <label>Импульс — % движения свечи</label>
+            <div className="profile-notify-row">
+              <input
+                className="profile-alert-input"
+                type="number"
+                step="0.1"
+                min="0.1"
+                placeholder="3"
+                value={alertPercent}
+                onChange={(e) => {
+                  setAlertPercent(e.target.value)
+                  queueAlertSettingsSave()
+                }}
+              />
+              <span className="profile-alert-suffix">%</span>
+            </div>
+          </div>
+
+          <div className="profile-field">
+            <label>Биржа, с которой приходит алерт</label>
+            <div className="alert-exchange-wrap">
+              <button
+                ref={exchangeBtnRef}
+                type="button"
+                className="alert-exchange-btn"
+                onClick={toggleExchangeMenu}
+                data-testid="alert-exchange-select"
+              >
+                <span>{alertExchange === 'all' ? 'Все биржи' : EXCHANGE_LABELS[alertExchange]}</span>
+                <ChevronDown size={14} className={`alert-exchange-chevron ${exchangeMenuOpen ? 'open' : ''}`} />
+              </button>
+              {exchangeMenuOpen && exchangeMenuPos && (
+                <div
+                  className="alert-exchange-menu"
+                  style={{ top: exchangeMenuPos.top, left: exchangeMenuPos.left, width: exchangeMenuPos.width }}
                 >
-                  <span>{alertExchange === 'all' ? 'Все биржи' : EXCHANGE_LABELS[alertExchange]}</span>
-                  <ChevronDown size={14} className={`alert-exchange-chevron ${exchangeMenuOpen ? 'open' : ''}`} />
-                </button>
-                {exchangeMenuOpen && exchangeMenuPos && (
-                  <div
-                    className="alert-exchange-menu"
-                    style={{ top: exchangeMenuPos.top, left: exchangeMenuPos.left, width: exchangeMenuPos.width }}
-                  >
-                    {EXCHANGE_OPTIONS.map((opt) => (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        className={`alert-exchange-option ${alertExchange === opt.value ? 'selected' : ''}`}
-                        onClick={() => {
-                          setAlertExchange(opt.value)
-                          setExchangeMenuOpen(false)
-                        }}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="profile-scale-hint">
-                Все биржи — проверка по всем рынкам; конкретная — только с неё
-              </div>
+                  {EXCHANGE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      className={`alert-exchange-option ${alertExchange === opt.value ? 'selected' : ''}`}
+                      onClick={() => {
+                        setAlertExchange(opt.value)
+                        setExchangeMenuOpen(false)
+                        queueAlertSettingsSave()
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-
-            <div className="profile-field">
-              <div className="profile-notify-row">
-                <label>Уведомлять в Telegram</label>
-                <label className="profile-switch">
-                  <input
-                    type="checkbox"
-                    checked={alertTelegram}
-                    onChange={(e) => setAlertTelegram(e.target.checked)}
-                    data-testid="alert-telegram-toggle"
-                  />
-                  <span className="track" />
-                </label>
-              </div>
-              <div className="profile-scale-hint">
-                Выключено по умолчанию — уведомления приходят только в браузере
-              </div>
+            <div className="profile-scale-hint">
+              Все биржи — проверка по всем рынкам; конкретная — только с неё
             </div>
+          </div>
 
-            {alertError && <div className="profile-reset-error">{alertError}</div>}
-            {alertDone && <div className="profile-alert-done">Алерт создан — сработает на ближайшем резком движении</div>}
+          <div className="profile-field">
+            <div className="profile-notify-row">
+              <label>Уведомлять в Telegram</label>
+              <label className="profile-switch">
+                <input
+                  type="checkbox"
+                  checked={alertTelegram}
+                  onChange={(e) => {
+                    setAlertTelegram(e.target.checked)
+                    queueAlertSettingsSave()
+                  }}
+                  data-testid="alert-telegram-toggle"
+                />
+                <span className="track" />
+              </label>
+            </div>
+            <div className="profile-scale-hint">
+              Выключено по умолчанию — уведомления приходят только в браузере
+            </div>
+          </div>
 
-            <button type="submit" className="profile-action-btn" disabled={alertCreating}>
-              <Bell size={15} />
-              {alertCreating ? 'создание…' : 'создать импульс-алерт'}
-            </button>
-          </form>
+          {alertError && <div className="profile-reset-error">{alertError}</div>}
         </ProfileSection>
 
         {/* Notifications section */}

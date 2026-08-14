@@ -75,11 +75,49 @@ router.post('/', writeLimiter, async (req, res) => {
 router.patch('/:id', writeLimiter, async (req, res) => {
   const { userId } = (req as any).user
   const id = String(req.params.id)
-  const { active, muted } = req.body
-  const alert = await prisma.alert.update({
-    where: { id, userId },
-    data: { active, muted, triggeredAt: active ? null : undefined },
-  })
+  const { active, muted, condition: rawCondition } = req.body
+
+  const existing = await prisma.alert.findFirst({ where: { id, userId } })
+  if (!existing) {
+    res.status(404).json({ error: 'Алерт не найден' })
+    return
+  }
+
+  const data: { active?: boolean; muted?: boolean; condition?: string; triggeredAt?: Date | null } = {}
+  if (active !== undefined) {
+    data.active = Boolean(active)
+    data.triggeredAt = active ? null : undefined
+  }
+  if (muted !== undefined) data.muted = Boolean(muted)
+
+  if (rawCondition !== undefined) {
+    let condition: unknown
+    if (existing.type === 'impulse') {
+      const parsed = validateImpulseCondition(rawCondition)
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error })
+        return
+      }
+      condition = parsed.condition
+    } else if (existing.type === 'price') {
+      const parsed = validatePriceCondition(rawCondition)
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error })
+        return
+      }
+      condition = parsed.condition
+    } else {
+      const parsed = validateListingCondition(rawCondition)
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error })
+        return
+      }
+      condition = parsed.condition
+    }
+    data.condition = JSON.stringify(condition)
+  }
+
+  const alert = await prisma.alert.update({ where: { id, userId }, data })
   res.json({ ...alert, condition: JSON.parse(alert.condition) })
 })
 

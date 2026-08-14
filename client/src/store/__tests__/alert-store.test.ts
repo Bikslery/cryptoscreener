@@ -66,3 +66,22 @@ describe('useAlertStore — dismissAlert', () => {
     }
   })
 })
+
+describe('useAlertStore — updateAlert', () => {
+  beforeEach(() => {
+    useAlertStore.setState({ alerts: [] })
+  })
+
+  it('replaces the stored alert with the server PATCH result', () => {
+    useAlertStore.getState().addCreated(makeAlert('a1'))
+    useAlertStore.getState().updateAlert(makeAlert('a1', { active: false, condition: { price: 70000, direction: 'below' } }))
+    const updated = useAlertStore.getState().alerts[0]
+    expect(updated.active).toBe(false)
+    expect(updated.condition).toEqual({ price: 70000, direction: 'below' })
+  })
+
+  it('is a no-op when the alert is not in the list', () => {
+    useAlertStore.getState().updateAlert(makeAlert('ghost'))
+    expect(useAlertStore.getState().alerts).toHaveLength(0)
+  })
+})
