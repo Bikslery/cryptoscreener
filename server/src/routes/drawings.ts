@@ -1,7 +1,11 @@
 import { Router } from 'express'
 import { prisma } from '../db/index.js'
+import { writeRateLimit } from '../utils/rate-limit.js'
 
 const router = Router()
+
+// Wider budget: the client saves drawings with a debounce after every drag.
+const writeLimiter = writeRateLimit(120)
 
 router.get('/', async (req, res) => {
   const { userId } = (req as any).user
@@ -12,7 +16,7 @@ router.get('/', async (req, res) => {
   res.json(drawings.map(d => ({ ...d, data: JSON.parse(d.data) })))
 })
 
-router.post('/', async (req, res) => {
+router.post('/', writeLimiter, async (req, res) => {
   const { userId } = (req as any).user
   const { symbol, type, data, timeframe } = req.body
   const drawing = await prisma.drawing.create({
@@ -21,9 +25,9 @@ router.post('/', async (req, res) => {
   res.json({ ...drawing, data: JSON.parse(drawing.data) })
 })
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', writeLimiter, async (req, res) => {
   const { userId } = (req as any).user
-  const { id } = req.params
+  const id = String(req.params.id)
   const { data, timeframe } = req.body
   const drawing = await prisma.drawing.update({
     where: { id, userId },
@@ -32,9 +36,9 @@ router.put('/:id', async (req, res) => {
   res.json({ ...drawing, data: JSON.parse(drawing.data) })
 })
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', writeLimiter, async (req, res) => {
   const { userId } = (req as any).user
-  const { id } = req.params
+  const id = String(req.params.id)
   await prisma.drawing.delete({ where: { id, userId } })
   res.json({ ok: true })
 })

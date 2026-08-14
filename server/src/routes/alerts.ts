@@ -1,8 +1,11 @@
 import { Router } from 'express'
 import { prisma } from '../db/index.js'
-import { validateImpulseCondition, validatePriceCondition, validateListingCondition } from '../services/alerts/validate.js'
+import { validateImpulseCondition, validatePriceCondition, validateListingCondition, VALID_EXCHANGES } from '../services/alerts/validate.js'
+import { writeRateLimit } from '../utils/rate-limit.js'
 
 const router = Router()
+
+const writeLimiter = writeRateLimit(60)
 
 router.get('/', async (req, res) => {
   const { userId } = (req as any).user
@@ -10,7 +13,7 @@ router.get('/', async (req, res) => {
   res.json(alerts.map(a => ({ ...a, condition: JSON.parse(a.condition) })))
 })
 
-router.post('/', async (req, res) => {
+router.post('/', writeLimiter, async (req, res) => {
   const { userId } = (req as any).user
   const { type, symbol, exchange, condition: rawCondition } = req.body
 
@@ -47,6 +50,16 @@ router.post('/', async (req, res) => {
     condition = parsed.condition
   }
 
+  // Top-level exchange goes through the same whitelist as condition.exchange.
+  if (exchange !== undefined && exchange !== null && typeof exchange !== 'string') {
+    res.status(400).json({ error: 'exchange: строка' })
+    return
+  }
+  if (typeof exchange === 'string' && !VALID_EXCHANGES.includes(exchange as any)) {
+    res.status(400).json({ error: 'exchange: неизвестная биржа' })
+    return
+  }
+
   const alert = await prisma.alert.create({
     data: {
       userId,
@@ -59,9 +72,9 @@ router.post('/', async (req, res) => {
   res.json({ ...alert, condition: JSON.parse(alert.condition) })
 })
 
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', writeLimiter, async (req, res) => {
   const { userId } = (req as any).user
-  const { id } = req.params
+  const id = String(req.params.id)
   const { active, muted } = req.body
   const alert = await prisma.alert.update({
     where: { id, userId },
@@ -70,9 +83,9 @@ router.patch('/:id', async (req, res) => {
   res.json({ ...alert, condition: JSON.parse(alert.condition) })
 })
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', writeLimiter, async (req, res) => {
   const { userId } = (req as any).user
-  const { id } = req.params
+  const id = String(req.params.id)
   await prisma.alert.delete({ where: { id, userId } })
   res.json({ ok: true })
 })

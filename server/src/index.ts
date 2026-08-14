@@ -90,8 +90,10 @@ async function main() {
   })
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    // Log the full error server-side, never leak internals (Prisma messages,
+    // stack traces) to the client.
     console.error('[Error]', err)
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Internal server error' })
+    res.status(500).json({ error: 'Internal server error' })
   })
 
   const server = createServer(app)
