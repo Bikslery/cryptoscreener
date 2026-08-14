@@ -250,7 +250,7 @@ export default function ProfileModal() {
     ...(Object.keys(EXCHANGE_LABELS) as Exchange[]).map((ex) => ({ value: ex, label: EXCHANGE_LABELS[ex] })),
   ]
 
-  const [alertPercent, setAlertPercent] = useState('3')
+  const [alertPercent, setAlertPercent] = useState(3)
   const [alertExchange, setAlertExchange] = useState<Exchange | 'all'>('all')
   const [alertTelegram, setAlertTelegram] = useState(false)
   const [alertsEnabled, setAlertsEnabled] = useState(false)
@@ -262,15 +262,16 @@ export default function ProfileModal() {
   const [exchangeMenuPos, setExchangeMenuPos] = useState<{ top: number; left: number; width: number } | null>(null)
   const exchangeBtnRef = useRef<HTMLButtonElement | null>(null)
 
-  const buildImpulseCondition = () => ({
-    percent: parseFloat(alertPercent),
+  /** Condition built from EXPLICIT values — never from a stale render closure. */
+  const buildImpulseCondition = (next: { percent: number; exchange: Exchange | 'all'; telegram: boolean }) => ({
+    percent: next.percent,
     timeframe: '5m',
     direction: 'both',
     volumeSpike: 0,
-    telegram: alertTelegram,
-    exchanges: alertExchange === 'all'
+    telegram: next.telegram,
+    exchanges: next.exchange === 'all'
       ? (Object.keys(EXCHANGE_LABELS) as Exchange[]).map((exchange) => ({ exchange, minVolume24h: 0 }))
-      : [{ exchange: alertExchange, minVolume24h: 0 }],
+      : [{ exchange: next.exchange, minVolume24h: 0 }],
   })
 
   // The gate mounts this modal fresh on every open — load the user's ANY
@@ -288,7 +289,7 @@ export default function ProfileModal() {
         setAlertsEnabled(impulse?.active === true)
         if (impulse?.condition) {
           const cond = impulse.condition as { percent?: number; exchanges?: { exchange: Exchange }[]; telegram?: boolean }
-          if (typeof cond.percent === 'number') setAlertPercent(String(cond.percent))
+          if (typeof cond.percent === 'number') setAlertPercent(Math.min(50, Math.max(0.1, cond.percent)))
           if (Array.isArray(cond.exchanges)) {
             if (cond.exchanges.length === 1) setAlertExchange(cond.exchanges[0].exchange)
             else setAlertExchange('all')
@@ -302,21 +303,19 @@ export default function ProfileModal() {
 
   const handleAlertsToggle = async (on: boolean) => {
     setAlertError('')
-    if (on) {
-      const percent = parseFloat(alertPercent)
-      if (!isFinite(percent) || percent <= 0) {
-        setAlertError('Укажите % движения')
-        return
-      }
+    if (on && (!isFinite(alertPercent) || alertPercent <= 0)) {
+      setAlertError('Укажите % движения')
+      return
     }
     setAlertSaving(true)
     try {
       if (on) {
+        const condition = buildImpulseCondition({ percent: alertPercent, exchange: alertExchange, telegram: alertTelegram })
         if (managedAlertId) {
-          const res = await api.patch(`/alerts/${managedAlertId}`, { active: true, condition: buildImpulseCondition() })
+          const res = await api.patch(`/alerts/${managedAlertId}`, { active: true, condition })
           useAlertStore.getState().updateAlert(res.data as AlertType)
         } else {
-          const res = await api.post('/alerts', { type: 'impulse', symbol: 'ANY', condition: buildImpulseCondition() })
+          const res = await api.post('/alerts', { type: 'impulse', symbol: 'ANY', condition })
           setManagedAlertId(res.data.id)
           useAlertStore.getState().addCreated(res.data as AlertType)
         }
@@ -336,14 +335,15 @@ export default function ProfileModal() {
   }
 
   // Settings apply to the enabled alert automatically (debounced PATCH).
-  const queueAlertSettingsSave = () => {
+  // Values are passed in explicitly — the timer closure must never read
+  // stale state from the render that scheduled it.
+  const queueAlertSettingsSave = (next: { percent: number; exchange: Exchange | 'all'; telegram: boolean }) => {
     if (!alertsEnabled || !managedAlertId) return
     if (alertSettingsTimer.current) clearTimeout(alertSettingsTimer.current)
     alertSettingsTimer.current = setTimeout(async () => {
-      const percent = parseFloat(alertPercent)
-      if (!isFinite(percent) || percent <= 0) return
+      if (!isFinite(next.percent) || next.percent <= 0) return
       try {
-        const res = await api.patch(`/alerts/${managedAlertId}`, { condition: buildImpulseCondition() })
+        const res = await api.patch(`/alerts/${managedAlertId}`, { condition: buildImpulseCondition(next) })
         useAlertStore.getState().updateAlert(res.data as AlertType)
       } catch { /* keep local state */ }
     }, 400)
@@ -1068,20 +1068,25 @@ export default function ProfileModal() {
 
           <div className="profile-field">
             <label>Импульс — % движения свечи</label>
-            <div className="profile-notify-row">
+            <div className="profile-scale-row">
               <input
-                className="profile-alert-input"
-                type="number"
-                step="0.1"
-                min="0.1"
-                placeholder="3"
+                type="range"
+                min={0.1}
+                max={50}
+                step={0.1}
                 value={alertPercent}
                 onChange={(e) => {
-                  setAlertPercent(e.target.value)
-                  queueAlertSettingsSave()
+                  const v = Number(e.target.value)
+                  setAlertPercent(v)
+                  queueAlertSettingsSave({ percent: v, exchange: alertExchange, telegram: alertTelegram })
                 }}
+                className="profile-scale-slider alert-scale-slider"
+                data-testid="alert-percent-slider"
               />
-              <span className="profile-alert-suffix">%</span>
+              <span className="profile-scale-value">{alertPercent}%</span>
+            </div>
+            <div className="profile-scale-hint">
+              (high−low)/low свечи ≥ порога — алерт сработает, как только движение превысит его
             </div>
           </div>
 
@@ -1111,7 +1116,7 @@ export default function ProfileModal() {
                       onClick={() => {
                         setAlertExchange(opt.value)
                         setExchangeMenuOpen(false)
-                        queueAlertSettingsSave()
+                        queueAlertSettingsSave({ percent: alertPercent, exchange: opt.value, telegram: alertTelegram })
                       }}
                     >
                       {opt.label}
@@ -1134,7 +1139,7 @@ export default function ProfileModal() {
                   checked={alertTelegram}
                   onChange={(e) => {
                     setAlertTelegram(e.target.checked)
-                    queueAlertSettingsSave()
+                    queueAlertSettingsSave({ percent: alertPercent, exchange: alertExchange, telegram: e.target.checked })
                   }}
                   data-testid="alert-telegram-toggle"
                 />
