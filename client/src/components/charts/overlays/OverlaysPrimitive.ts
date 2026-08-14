@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   IChartApi, ISeriesApi, ISeriesPrimitive, IPrimitivePaneView, IPrimitivePaneRenderer,
   SeriesAttachedParameter, SeriesType, Time,
 } from 'lightweight-charts'
@@ -8,7 +8,7 @@ import { At } from '../../../services/chart-config'
 import { toChartTime } from '../../../services/candle-events'
 
 /**
- * Peaks/cascades renderer — a verbatim port of scalpboard's `labled_line`
+ * Peaks/cascades renderer вЂ” a verbatim port of scalpboard's `labled_line`
  * painter + figures lib (extracted from their production bundle
  * `DuwwQn7y.js`):
  *
@@ -24,7 +24,7 @@ import { toChartTime } from '../../../services/candle-events'
  *        box.y = attrs.y (top) | attrs.y - (4+10+3) (bottom)
  *        box.w = 4 + round(measure(text)) + 4, box.h = 17
  *        fill = m+"20", border 1px m (centered: +0.5,-1), radius 0
- *        text at (box.x+4, box.y+4) font 300 10px Noto Sans,
+ *        text at (box.x+4, box.y+4) font 300 10px Noto Sans Variable,
  *        color = figures.text.color, maxWidth = box.w - 8
  *    - drawPrice label on hover/selected only (not implemented)
  *
@@ -33,9 +33,9 @@ import { toChartTime } from '../../../services/candle-events'
  *    baseline: cascades l->top, h->bottom
  *
  *  One deliberate deviation: scalpboard draws one line per cascade rung (the
- *  whole ladder); here each cascade draws ONE line at its trading level — the
+ *  whole ladder); here each cascade draws ONE line at its trading level вЂ” the
  *  chain's extreme (cascadeLevel): the highest rejection for resistance, the
- *  lowest support for support — starting at the first touch. The label shows
+ *  lowest support for support вЂ” starting at the first touch. The label shows
  *  the level price and the touch count instead of the peak volume.
  */
 interface LineSpec {
@@ -50,7 +50,7 @@ const BOX_PAD_TOP = 4
 const BOX_PAD_BOTTOM = 3
 const FONT_SIZE = 10
 const BOX_H = BOX_PAD_TOP + FONT_SIZE + BOX_PAD_BOTTOM
-const FONT = "'Noto Sans', ui-sans-serif, sans-serif"
+const FONT = "'Noto Sans Variable', ui-sans-serif, sans-serif"
 
 /** #rrggbb -> rgba with the given opacity (hex colors come from CSS vars) */
 function withAlpha(color: string, alpha: number): string {
@@ -154,7 +154,7 @@ class OverlaysPaneView implements IPrimitivePaneView {
       const lastDataX = (() => {
         const lt = this._primitive.lastDataTime()
         if (lt === null) return 0
-        // The series paints `toChartTime(candle.time)` — the overlay must ask
+        // The series paints `toChartTime(candle.time)` вЂ” the overlay must ask
         // for the same shifted time or the lookup misses (timeToCoordinate
         // returns null / collides with a candle N bars away).
         const x = timeScale.timeToCoordinate(toChartTime(lt) as Time)
@@ -211,15 +211,15 @@ class OverlaysPaneView implements IPrimitivePaneView {
       for (const cascade of data.cascades[side]) {
         if (cascade.length === 0) continue
         // One level line per cascade (deliberate deviation from scalpboard's
-        // per-rung ladder): the drawn price is the cascade's extreme — the
-        // highest rejection for resistance, the lowest support for support —
+        // per-rung ladder): the drawn price is the cascade's extreme вЂ” the
+        // highest rejection for resistance, the lowest support for support вЂ”
         // and the label shows the level price plus how many times price
         // tested it (chain members are the touches).
         const price = cascadeLevel(cascade, side)
         specs.push({
           time: cascade[0].t,
           price,
-          text: `${price.toFixed(this._primitive.pricePrecision())} ×${cascade.length}`,
+          text: `${price.toFixed(this._primitive.pricePrecision())} Г—${cascade.length}`,
           baseline: side === 'l' ? 'top' : 'bottom',
         })
       }

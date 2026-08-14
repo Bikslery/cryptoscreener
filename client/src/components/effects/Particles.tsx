@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+﻿import { useEffect, useRef } from 'react'
 
 const MOUSE_RADIUS = 150
 const MOUSE_FORCE = 5
@@ -42,7 +42,7 @@ function drawGlowParticle(ctx: CanvasRenderingContext2D, x: number, y: number, s
   ctx.restore()
 }
 
-/* ── White particles ── */
+/* в”Ђв”Ђ White particles в”Ђв”Ђ */
 
 interface WhiteParticle {
   x: number; y: number
@@ -139,7 +139,7 @@ function drawWhite(ctx: CanvasRenderingContext2D, particles: WhiteParticle[], mo
   }
 }
 
-/* ── Rain ── */
+/* в”Ђв”Ђ Rain в”Ђв”Ђ */
 
 interface RainDrop {
   x: number; y: number
@@ -182,7 +182,7 @@ function drawRain(ctx: CanvasRenderingContext2D, drops: RainDrop[], _mouse: { x:
   }
 }
 
-/* ── Snow ── */
+/* в”Ђв”Ђ Snow в”Ђв”Ђ */
 
 interface SnowFlake {
   x: number; y: number
@@ -226,7 +226,7 @@ function drawSnow(ctx: CanvasRenderingContext2D, flakes: SnowFlake[], _mouse: { 
   }
 }
 
-/* ── Matrix ── */
+/* в”Ђв”Ђ Matrix в”Ђв”Ђ */
 
 interface MatrixDrop {
   x: number; y: number
@@ -249,7 +249,7 @@ function initMatrixDrops(count: number, _w: number, _h: number): MatrixDrop[] {
 }
 
 function drawMatrix(ctx: CanvasRenderingContext2D, drops: MatrixDrop[], _mouse: { x: number; y: number }, _w: number, h: number) {
-  ctx.font = '14px "Noto Sans", sans-serif'
+  ctx.font = '14px "Noto Sans Variable", sans-serif'
 
   for (const d of drops) {
     d.y += d.speed
@@ -277,7 +277,7 @@ function drawMatrix(ctx: CanvasRenderingContext2D, drops: MatrixDrop[], _mouse: 
   }
 }
 
-/* ── Config ── */
+/* в”Ђв”Ђ Config в”Ђв”Ђ */
 
 type ParticleStyle = 'white' | 'rain' | 'snow' | 'matrix' | 'none'
 

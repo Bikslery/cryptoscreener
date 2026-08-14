@@ -1,4 +1,4 @@
-/* Volume filter — custom slider pill in the TopBar.
+﻿/* Volume filter вЂ” custom slider pill in the TopBar.
    Color palette matches .clinic-btn / .clinic-btn-secondary / .clinic-btn-active:
    - border: rgba(255,255,255,0.15)  (matches inactive button)
    - hover/focus border: rgba(255,255,255,0.4)  (matches active button)
@@ -26,7 +26,7 @@
     rgba(255, 255, 255, 0.02) 100%
   );
   color: var(--text-muted, #a0a0a0);
-  font-family: 'Noto Sans', ui-sans-serif, system-ui, sans-serif;
+  font-family: 'Noto Sans Variable', ui-sans-serif, system-ui, sans-serif;
   font-size: 11px;
   font-weight: 500 !important;
   letter-spacing: 0.02em;
@@ -50,7 +50,7 @@
   box-shadow: var(--glow-border);
 }
 
-/* Children don't catch pointer events — the parent div handles drag */
+/* Children don't catch pointer events вЂ” the parent div handles drag */
 .volume-filter > * {
   pointer-events: none;
 }

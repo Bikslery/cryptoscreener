@@ -11,6 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource-variable/noto-sans": "^5.3.0",
     "@tailwindcss/vite": "^4.3.0",
     "axios": "^1.16.1",
     "lightweight-charts": "^5.2.0",

@@ -1,7 +1,7 @@
-/* ═══════════════════════════════════════════════════════
-   Auth page — .clinic aesthetic
+﻿/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+   Auth page вЂ” .clinic aesthetic
    Glow borders, white accent, terminal-style placeholders
-   ═══════════════════════════════════════════════════════ */
+   в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */
 
 .auth-page {
   display: flex;
@@ -38,7 +38,7 @@
   pointer-events: none;
 }
 
-/* ── Card ── */
+/* в”Ђв”Ђ Card в”Ђв”Ђ */
 
 .auth-card {
   background: var(--bg-card);
@@ -60,7 +60,7 @@
   box-shadow: var(--shadow-card), var(--glow-border-hover);
 }
 
-/* ── Heading ── */
+/* в”Ђв”Ђ Heading в”Ђв”Ђ */
 
 .auth-heading {
   font-size: 1.5rem;
@@ -76,7 +76,7 @@
   margin-bottom: 1.8rem;
 }
 
-/* ── Tabs ── */
+/* в”Ђв”Ђ Tabs в”Ђв”Ђ */
 
 .auth-tabs {
   display: flex;
@@ -108,7 +108,7 @@
   text-shadow: var(--glow-text);
 }
 
-/* ── Form ── */
+/* в”Ђв”Ђ Form в”Ђв”Ђ */
 
 .auth-form {
   display: flex;
@@ -151,7 +151,7 @@
   box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05), var(--glow-border);
 }
 
-/* ── Button ── */
+/* в”Ђв”Ђ Button в”Ђв”Ђ */
 
 .auth-btn {
   margin-top: 0.5rem;
@@ -178,7 +178,7 @@
   cursor: not-allowed;
 }
 
-/* ── Error ── */
+/* в”Ђв”Ђ Error в”Ђв”Ђ */
 
 .auth-error {
   background: rgba(239, 68, 68, 0.06);
@@ -193,7 +193,7 @@
   text-shadow: 0 0 8px rgba(239, 68, 68, 0.3);
 }
 
-/* ── Telegram step ── */
+/* в”Ђв”Ђ Telegram step в”Ђв”Ђ */
 
 .auth-telegram-text {
   color: var(--text-muted);
@@ -238,7 +238,7 @@
   margin-top: 1rem;
 }
 
-/* ── Telegram bind error ── */
+/* в”Ђв”Ђ Telegram bind error в”Ђв”Ђ */
 
 .auth-bind-error {
   margin-top: 1.2rem;
@@ -253,7 +253,7 @@
   text-shadow: 0 0 8px rgba(255, 107, 107, 0.2);
 }
 
-/* ── Success step ── */
+/* в”Ђв”Ђ Success step в”Ђв”Ђ */
 
 .auth-success-heading {
   font-size: 1.3rem;
@@ -269,7 +269,7 @@
   margin-bottom: 1.5rem;
 }
 
-/* ── Divider ── */
+/* в”Ђв”Ђ Divider в”Ђв”Ђ */
 
 .auth-divider {
   display: flex;
@@ -288,7 +288,7 @@
   background: rgba(255, 255, 255, 0.06);
 }
 
-/* ── Animations ── */
+/* в”Ђв”Ђ Animations в”Ђв”Ђ */
 
 @keyframes auth-fade-in-up {
   from {
@@ -310,7 +310,7 @@
   animation: auth-fade-in 0.3s ease-out;
 }
 
-/* ── Forgot password link ── */
+/* в”Ђв”Ђ Forgot password link в”Ђв”Ђ */
 
 .auth-forgot {
   display: block;
@@ -327,17 +327,17 @@
   text-shadow: var(--glow-text);
 }
 
-/* ── Code input ── */
+/* в”Ђв”Ђ Code input в”Ђв”Ђ */
 
 .auth-code-input {
-  font-family: 'Noto Sans', ui-sans-serif, system-ui, sans-serif !important;
+  font-family: 'Noto Sans Variable', ui-sans-serif, system-ui, sans-serif !important;
   font-size: 1.6rem !important;
   letter-spacing: 0.8em !important;
   text-align: center !important;
   padding: 0.9rem 0.5rem !important;
 }
 
-/* ── Timer ── */
+/* в”Ђв”Ђ Timer в”Ђв”Ђ */
 
 .auth-timer {
   text-align: center;
@@ -346,7 +346,7 @@
   margin: 0.3rem 0 0;
 }
 
-/* ── Resend link ── */
+/* в”Ђв”Ђ Resend link в”Ђв”Ђ */
 
 .auth-resend {
   display: block;
@@ -365,7 +365,7 @@
   text-shadow: var(--glow-text);
 }
 
-/* ── Back link ── */
+/* в”Ђв”Ђ Back link в”Ђв”Ђ */
 
 .auth-back {
   display: block;

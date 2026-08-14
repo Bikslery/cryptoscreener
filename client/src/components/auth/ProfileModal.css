@@ -1,7 +1,7 @@
-/* ═══════════════════════════════════════════════════════
-   ProfileModal — .clinic aesthetic
+﻿/* в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+   ProfileModal вЂ” .clinic aesthetic
    Glow borders, sections, uppercase labels, avatar glow
-   ═══════════════════════════════════════════════════════ */
+   в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ */
 
 .profile-overlay {
   position: fixed;
@@ -13,7 +13,7 @@
 
 }
 
-/* ── Blurred backdrop ── */
+/* в”Ђв”Ђ Blurred backdrop в”Ђв”Ђ */
 
 .profile-backdrop {
   position: absolute;
@@ -24,7 +24,7 @@
   animation: profile-backdrop-in 0.28s ease-out;
 }
 
-/* ── Modal card ── */
+/* в”Ђв”Ђ Modal card в”Ђв”Ђ */
 
 .profile-modal {
   background: var(--bg-card);
@@ -61,7 +61,7 @@
   box-shadow: var(--shadow-card), var(--glow-border-hover);
 }
 
-/* ── Header: avatar + name + close ── */
+/* в”Ђв”Ђ Header: avatar + name + close в”Ђв”Ђ */
 
 .profile-header {
   display: flex;
@@ -134,7 +134,7 @@
   box-shadow: var(--glow-border);
 }
 
-/* ── Section (reusable, like .clinic .section / .card) ── */
+/* в”Ђв”Ђ Section (reusable, like .clinic .section / .card) в”Ђв”Ђ */
 
 .profile-section {
   background: var(--bg-card);
@@ -182,7 +182,7 @@
   text-shadow: var(--glow-text);
 }
 
-/* ── Fields ── */
+/* в”Ђв”Ђ Fields в”Ђв”Ђ */
 
 .profile-field {
   margin-bottom: 0.8rem;
@@ -207,7 +207,7 @@
   color: var(--text-secondary);
 }
 
-/* ── Badge (telegram status) ── */
+/* в”Ђв”Ђ Badge (telegram status) в”Ђв”Ђ */
 
 .profile-badge {
   display: inline-flex;
@@ -251,7 +251,7 @@
   box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
 }
 
-/* ── Change password button ── */
+/* в”Ђв”Ђ Change password button в”Ђв”Ђ */
 
 .profile-action-btn {
   width: 100%;
@@ -290,7 +290,7 @@
   font-weight: 400;
 }
 
-/* ── Inline reset flow ── */
+/* в”Ђв”Ђ Inline reset flow в”Ђв”Ђ */
 
 .profile-reset-inline {
   margin-bottom: 0.6rem;
@@ -319,7 +319,7 @@
 .profile-reset-code-input {
   width: 100%;
   padding: 0.75rem 0.5rem;
-  font-family: 'Noto Sans', ui-sans-serif, system-ui, sans-serif;
+  font-family: 'Noto Sans Variable', ui-sans-serif, system-ui, sans-serif;
   font-size: 1.5rem;
   letter-spacing: 0.8em;
   text-align: center;
@@ -339,7 +339,7 @@
 .profile-hotkey-input {
   width: 140px;
   padding: 0.4rem 0.5rem;
-  font-family: 'Noto Sans', ui-sans-serif, system-ui, sans-serif;
+  font-family: 'Noto Sans Variable', ui-sans-serif, system-ui, sans-serif;
   font-size: 0.85rem;
   text-align: center;
   background: rgba(255, 255, 255, 0.04);
@@ -472,7 +472,7 @@
   font-weight: 600;
 }
 
-/* ── Logout button ── */
+/* в”Ђв”Ђ Logout button в”Ђв”Ђ */
 
 .profile-logout-btn {
   width: 100%;
@@ -498,7 +498,7 @@
   text-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
 }
 
-/* ── Chart scale slider ── */
+/* в”Ђв”Ђ Chart scale slider в”Ђв”Ђ */
 
 .profile-scale-row {
   display: flex;
@@ -529,7 +529,7 @@
   color: rgba(255, 255, 255, 0.25);
 }
 
-/* ── Notifications settings ── */
+/* в”Ђв”Ђ Notifications settings в”Ђв”Ђ */
 
 .profile-notify-row {
   display: flex;
@@ -623,7 +623,7 @@
   background: rgba(255, 255, 255, 0.1);
 }
 
-/* ── Animations ── */
+/* в”Ђв”Ђ Animations в”Ђв”Ђ */
 
 @keyframes profile-fade-in-up {
   from {

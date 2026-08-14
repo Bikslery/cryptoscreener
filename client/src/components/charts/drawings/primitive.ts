@@ -1,4 +1,4 @@
-import { LineStyle } from 'lightweight-charts'
+﻿import { LineStyle } from 'lightweight-charts'
 import type {
   IChartApi,
   ISeriesApi,
@@ -251,7 +251,7 @@ class DrawingsRenderer implements IPrimitivePaneRenderer {
       context.strokeStyle = '#ffffff'
       context.fillStyle = '#ffffff'
       context.lineWidth = 1
-      context.font = "10px 'Noto Sans', sans-serif"
+      context.font = "10px 'Noto Sans Variable', sans-serif"
 
       for (const item of this._items) {
         const isHovered = this._hoveredId === item.id
@@ -332,7 +332,7 @@ class DrawingsRenderer implements IPrimitivePaneRenderer {
 
             context.globalAlpha = 1
             context.fillStyle = strokeColor
-            context.font = "9px 'Noto Sans', sans-serif"
+            context.font = "9px 'Noto Sans Variable', sans-serif"
             context.textAlign = 'right'
             context.fillText(price.toFixed(this._pricePrecision), this._cw - 6, ly - 3)
             context.textAlign = 'start'
@@ -533,7 +533,7 @@ export class DrawingsPrimitive implements ISeriesPrimitive {
   }
 
   updateAllViews?() {
-    // Sync container dims from the chart on EVERY view update — the cached
+    // Sync container dims from the chart on EVERY view update вЂ” the cached
     // _cw/_ch from setDrawings go stale on window resize / panel collapse,
     // making h-rays stop at the old right edge and t-rays clip at the old
     // bottom. chart.options().width/height are always current in v5.
