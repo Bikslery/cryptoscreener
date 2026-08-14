@@ -461,42 +461,6 @@ function ChartCornerSpinner() {
   )
 }
 
-function LiveIndicator({ isLive, lastUpdate, hasReceivedData }: { isLive: boolean; lastUpdate: number; hasReceivedData: boolean }) {
-  // Staleness is re-derived on a 1s tick instead of Date.now() during render
-  // (component purity) — the indicator still reacts within a second of the
-  // feed going stale.
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(t)
-  }, [])
-  const timeSinceUpdate = now - lastUpdate
-  const showWarning = timeSinceUpdate > 3000
-
-  const connecting = !hasReceivedData
-
-  return (
-    <div className="absolute top-[8px] right-[8px] z-30 pointer-events-none flex items-center gap-[6px] px-[8px] py-[4px] rounded-[4px] bg-[#141414]/95 border border-[#2a2a2a] shadow-lg">
-      <div
-        className={`w-[6px] h-[6px] rounded-full ${
-          connecting
-            ? 'bg-[#e8a838] connecting-indicator-pulse'
-            : isLive && !showWarning
-            ? 'bg-[#26a65b] live-indicator-pulse'
-            : 'bg-[#666]'
-        }`}
-      />
-      <span className={`text-[9px] font-bold tracking-wide ${
-        connecting
-          ? 'text-[#e8a838]'
-          : isLive && !showWarning ? 'text-[#26a65b]' : 'text-[#666]'
-      }`}>
-        {connecting ? 'CONNECTING' : isLive && !showWarning ? 'LIVE' : 'PAUSED'}
-      </span>
-    </div>
-  )
-}
-
 function StaleDataOverlay({ visible }: { visible: boolean }) {
   if (!visible) return null
 
@@ -942,34 +906,6 @@ function useLazyScroll(
   }, [symbol, tf, isInitialLoading, onRange, chartRef])
 }
 
-function useLiveIndicator(
-  lastUpdateRef: React.RefObject<number>
-): { isLive: boolean; lastUpdate: number; hasReceivedData: boolean } {
-  const [state, setState] = useState({ isLive: true, lastUpdate: 0, hasReceivedData: false })
-  const mountTimeRef = useRef(0)
-
-  useEffect(() => {
-    mountTimeRef.current = Date.now()
-    const tick = () => {
-      const now = Date.now()
-      const timeSinceUpdate = now - lastUpdateRef.current
-      const hasReceivedData = lastUpdateRef.current > mountTimeRef.current
-      setState({
-        isLive: timeSinceUpdate < 3000,
-        lastUpdate: lastUpdateRef.current,
-        hasReceivedData
-      })
-    }
-    // Tick immediately so the very first paint reflects real feed state.
-    tick()
-    const interval = setInterval(tick, 500)
-
-    return () => clearInterval(interval)
-  }, [lastUpdateRef])
-
-  return state
-}
-
 function useStaleDataDetection(
   lastUpdateRef: React.RefObject<number>,
   threshold = 30000 // Увеличено до 30 секунд для низколиквидных пар
@@ -1353,6 +1289,7 @@ const MiniChart = memo(function MiniChart({
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const lastUpdateRef = useRef(0)
   const [chartVersion, setChartVersion] = useState(0)
+  const [selection, setSelection] = useState<RangeSelection | null>(null)
 
   const eventsRef = useRef<CandleEvents | null>(null)
 
@@ -1366,7 +1303,6 @@ const MiniChart = memo(function MiniChart({
     return () => { eventsRef.current?.destroy() }
   }, [symbol, exchange, tf])
 
-  const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
 
   const baseSettings = useChartSettings()
@@ -1506,6 +1442,10 @@ const MiniChart = memo(function MiniChart({
     let mouseDownX = 0
     let mouseDownY = 0
     let restoreOpts: { handleScroll?: boolean; handleScale?: boolean } | null = null
+    let selDragging = false
+    let selStartX = 0
+    let selStartY = 0
+    let selRaf: number | null = null
 
     const disableScroll = () => {
       const chart = chartRef.current
@@ -1522,8 +1462,77 @@ const MiniChart = memo(function MiniChart({
       }
     }
 
+    const computeSelection = (curX: number, curY: number): RangeSelection => {
+      const chart = chartRef.current
+      const series = candleRef.current
+      const x1 = Math.min(selStartX, curX)
+      const x2 = Math.max(selStartX, curX)
+      let startPrice = 0
+      let endPrice = 0
+      let changePct = 0
+      let durationSec = 0
+      let valid = false
+
+      if (chart && series) {
+        const pStart = series.coordinateToPrice(selStartY) as number | null
+        const pEnd = series.coordinateToPrice(curY) as number | null
+
+        if (pStart !== null && pEnd !== null && isFinite(pStart) && isFinite(pEnd) && pStart > 0) {
+          startPrice = pStart
+          endPrice = pEnd
+          changePct = ((endPrice - startPrice) / startPrice) * 100
+          valid = true
+        }
+
+        const t1Raw = chart.timeScale().coordinateToTime(x1) as number | null
+        const t2Raw = chart.timeScale().coordinateToTime(x2) as number | null
+        const t1Num = (t1Raw == null || typeof t1Raw === 'number')
+          ? t1Raw as number | null
+          : null
+        const t2Num = (t2Raw == null || typeof t2Raw === 'number')
+          ? t2Raw as number | null
+          : null
+
+        if (t1Num !== null && t2Num !== null) {
+          durationSec = Math.abs(t2Num - t1Num)
+        }
+      }
+
+      const box = containerRef.current
+      const boxW = box?.clientWidth ?? 9999
+      const boxH = box?.clientHeight ?? 9999
+      const tooltipLeft = Math.min(Math.max(curX + 10, 0), boxW - 180)
+      const tooltipTop = Math.min(Math.max(curY + 10, 0), boxH - 70)
+
+      return {
+        startX: selStartX,
+        startY: selStartY,
+        endX: curX,
+        endY: curY,
+        startPrice,
+        endPrice,
+        changePct,
+        durationSec,
+        valid,
+        tooltipLeft,
+        tooltipTop,
+      }
+    }
+
     const onMouseDown = (e: MouseEvent) => {
       if (e.button !== 0) return
+
+      // Ctrl/Cmd+ЛКМ — select a region (same as the expanded chart's drag).
+      if (e.ctrlKey || e.metaKey) {
+        const rect = container.getBoundingClientRect()
+        selStartX = e.clientX - rect.left
+        selStartY = e.clientY - rect.top
+        selDragging = true
+        e.preventDefault()
+        disableScroll()
+        setSelection(computeSelection(selStartX, selStartY))
+        return
+      }
 
       if (activeTool !== null) {
         mouseDownX = e.clientX - container.getBoundingClientRect().left
@@ -1539,9 +1548,28 @@ const MiniChart = memo(function MiniChart({
 
     const onMouseMove = (e: MouseEvent) => {
       drawingMouseMoveHandler(e)
+
+      if (!selDragging) return
+      const rect = container.getBoundingClientRect()
+      const curX = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
+      const curY = Math.max(0, Math.min(e.clientY - rect.top, rect.height))
+      if (selRaf != null) return
+      selRaf = requestAnimationFrame(() => {
+        selRaf = null
+        if (!selDragging) return
+        setSelection(computeSelection(curX, curY))
+      })
     }
 
     const onMouseUp = (e: MouseEvent) => {
+      if (selDragging) {
+        selDragging = false
+        if (selRaf != null) { cancelAnimationFrame(selRaf); selRaf = null }
+        restoreDrawingScroll()
+        setSelection(null)
+        return
+      }
+
       if (e.button !== 0) return
 
       const wasDragging = isDraggingRef.current
@@ -1567,6 +1595,9 @@ const MiniChart = memo(function MiniChart({
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        setSelection(null)
+        selDragging = false
+        if (selRaf != null) { cancelAnimationFrame(selRaf); selRaf = null }
         restoreDrawingScroll()
         deactivateTool()
       }
@@ -1583,6 +1614,8 @@ const MiniChart = memo(function MiniChart({
       window.removeEventListener('mouseup', onMouseUp)
       window.removeEventListener('keydown', onKeyDown)
       restoreDrawingScroll()
+      selDragging = false
+      if (selRaf != null) cancelAnimationFrame(selRaf)
     }
   }, [activeTool, drawingClickHandler, drawingMouseDownHandler, drawingMouseMoveHandler, drawingMouseUpHandler, deactivateTool, isDraggingRef, CLICK_THRESHOLD])
 
@@ -1619,8 +1652,56 @@ const MiniChart = memo(function MiniChart({
         isInitialLoading ? 'opacity-0' : 'opacity-100'
       }`}
     >
-      {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
       {isStale && <StaleDataOverlay visible={true} />}
+      {selection && Math.abs(selection.endX - selection.startX) > 2 && (
+        <div className="pointer-events-none absolute inset-0 z-30">
+          <div
+            className={`absolute border ${
+              selection.valid && selection.changePct >= 0
+                ? 'border-[#26a65b]/70 bg-[#26a65b]/10'
+                : selection.valid
+                  ? 'border-[#e74c3c]/70 bg-[#e74c3c]/10'
+                  : 'border-[#f9b600]/70 bg-[#f9b600]/10'
+            }`}
+            style={{
+              left: Math.min(selection.startX, selection.endX),
+              top: Math.min(selection.startY, selection.endY),
+              width: Math.abs(selection.endX - selection.startX),
+              height: Math.max(2, Math.abs(selection.endY - selection.startY)),
+            }}
+          />
+          <div
+            className={`absolute px-[8px] py-[5px] rounded-[4px] text-[11px] font-mono bg-[#141414] border shadow-lg whitespace-nowrap ${
+              !selection.valid
+                ? 'border-[#3a3a3a] text-[#888]'
+                : selection.changePct >= 0
+                  ? 'border-[#26a65b] text-[#26a65b]'
+                  : 'border-[#e74c3c] text-[#e74c3c]'
+            }`}
+            style={{
+              left: selection.tooltipLeft,
+              top: selection.tooltipTop,
+            }}
+          >
+            {selection.valid ? (
+              <>
+                <div className="text-[13px] font-bold">
+                  {selection.changePct >= 0 ? '+' : ''}
+                  {selection.changePct.toFixed(2)}%
+                </div>
+                <div className="text-[10px] text-[#888] mt-[2px]">
+                  ${formatPrice(selection.startPrice, pricePrecision)} → ${formatPrice(selection.endPrice, pricePrecision)}
+                </div>
+                <div className="text-[10px] text-[#666]">
+                  О” {formatDuration(selection.durationSec)}
+                </div>
+              </>
+            ) : (
+              <span>Выделите диапазон</span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
     {isInitialLoading && (
       <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
@@ -2068,7 +2149,6 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
 
   useChartOverlays(candleRef, candlesDataRef, dataVersion, chartVersion, pricePrecision)
 
-  const liveIndicator = useLiveIndicator(lastUpdateRef)
   const isStale = useStaleDataDetection(lastUpdateRef)
 
   const aggregatorRef = useSecondCandleAggregator(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
@@ -2315,7 +2395,6 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
       <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} chartExchange={chartExchange} />
       <div ref={containerRef} className="relative flex-1 min-h-0 [transform:translateZ(0)] [backface-visibility:hidden] [contain:paint]">
         {isInitialLoading && <ChartCornerSpinner />}
-        {!isInitialLoading && <LiveIndicator isLive={liveIndicator.isLive} lastUpdate={liveIndicator.lastUpdate} hasReceivedData={liveIndicator.hasReceivedData} />}
         {!isInitialLoading && isLoadingMore && (
           <div className="absolute top-[8px] left-[8px] z-30 pointer-events-none">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-[4px] bg-[#1a1a1a]/95 border border-[#2a2a2a] shadow-lg">
