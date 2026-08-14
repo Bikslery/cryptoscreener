@@ -97,7 +97,7 @@ type AnySeriesOptions = DeepPartial<CandlestickSeriesOptions> | DeepPartial<BarS
 export function candleSeriesOptions(s: ChartSettings): AnySeriesOptions {
   if (s.candlesType === 'bars') {
     return {
-      lastValueVisible: false,
+      lastValueVisible: true,
       priceLineColor: At('--chart--price', '#b3b3b3'),
       upColor: At('--chart--candle-up', '#4bd24b'),
       downColor: At('--chart--candle-down', '#d24b4b'),
@@ -105,7 +105,7 @@ export function candleSeriesOptions(s: ChartSettings): AnySeriesOptions {
   }
   if (s.candlesType === 'line') {
     return {
-      lastValueVisible: false,
+      lastValueVisible: true,
       priceLineColor: At('--foreground', '#cccccc'),
       lineColor: At('--foreground', '#cccccc'),
       topColor: At('--foreground-25', '#cccccc40'),
@@ -114,7 +114,7 @@ export function candleSeriesOptions(s: ChartSettings): AnySeriesOptions {
   }
   const hollow = s.candlesType === 'hollow'
   return {
-    lastValueVisible: false,
+    lastValueVisible: true,
     priceLineColor: At('--chart--price', '#b3b3b3'),
     upColor: hollow ? 'transparent' : At('--chart--candle-up', '#4bd24b'),
     borderUpColor: At('--chart--candle-border-up', '#4bd24b'),
