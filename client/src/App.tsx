@@ -7,6 +7,7 @@ import { RightPanel } from './components/layout/RightPanel'
 // logged-in user on first paint) only contains the chart grid, list and WS
 // plumbing. Each modal downloads its own chunk on first open.
 const AuthModal = lazy(() => import('./components/auth/AuthModal'))
+const TelegramGate = lazy(() => import('./components/auth/TelegramGate'))
 const ProfileModalGate = lazy(() => import('./components/auth/ProfileModal').then(m => ({ default: m.ProfileModalGate })))
 const ExchangeModalGate = lazy(() => import('./components/exchange/ExchangeModal').then(m => ({ default: m.ExchangeModalGate })))
 const TickerSearchModalGate = lazy(() => import('./components/search/TickerSearchModal').then(m => ({ default: m.TickerSearchModalGate })))
@@ -79,6 +80,7 @@ function App() {
   const checkSession = useAuthStore(s => s.checkSession)
   const isChecking = useAuthStore(s => s.isChecking)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
+  const telegramVerified = useAuthStore(s => s.telegramVerified)
   const settings = useAuthStore(s => s.settings)
   const initHotkeys = useDrawingHotkeysStore(s => s.initFromSettings)
 
@@ -204,6 +206,20 @@ function App() {
         </div>
       }>
         <AuthModal />
+      </Suspense>
+    )
+  }
+
+  // Logged in but Telegram not bound — hard gate (survives page reloads:
+  // the bind step lives in this component, not in modal state).
+  if (!telegramVerified) {
+    return (
+      <Suspense fallback={
+        <div className="w-full h-full flex items-center justify-center bg-[#0a0a0a]">
+          <div className="text-zinc-500 text-lg">Загрузка...</div>
+        </div>
+      }>
+        <TelegramGate />
       </Suspense>
     )
   }

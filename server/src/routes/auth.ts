@@ -2,7 +2,7 @@ import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import rateLimit from 'express-rate-limit'
 import { prisma } from '../db/index.js'
-import { generateToken, authMiddleware, setAuthCookie, clearAuthCookie, generateResetToken, verifyResetToken } from '../middleware/auth.js'
+import { generateToken, authMiddleware, requireTelegramVerified, setAuthCookie, clearAuthCookie, generateResetToken, verifyResetToken } from '../middleware/auth.js'
 import { sendTelegramMessage } from '../services/telegram/bot.js'
 
 const USERNAME_REGEX = /^[a-zA-Z0-9_]{3,20}$/
@@ -100,7 +100,7 @@ router.get('/me', authMiddleware, async (req, res) => {
   }
 })
 
-router.put('/settings', authMiddleware, async (req, res) => {
+router.put('/settings', authMiddleware, requireTelegramVerified, async (req, res) => {
   const { userId } = (req as any).user
   const { settings } = req.body
   if (settings === undefined || settings === null) {

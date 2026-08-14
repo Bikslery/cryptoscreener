@@ -145,6 +145,22 @@ export default function AuthModal() {
     setLoading(true)
     try {
       const res = await api.post('/auth/login', { username, password })
+      // Telegram is mandatory: an unverified account is sent straight to the
+      // bind screen instead of the app.
+      if (!res.data.user.telegramVerified) {
+        setUsername('')
+        setPassword('')
+        sessionStorage.setItem('pendingUser', JSON.stringify(res.data.user))
+        try {
+          const statusRes = await api.get('/auth/telegram-status')
+          setTelegramLink(statusRes.data.telegramLink)
+        } catch {
+          // Non-fatal: polling will retry and get a fresh link
+        }
+        setStep('telegram')
+        startPolling()
+        return
+      }
       setUser(res.data.user)
       setUsername('')
       setPassword('')

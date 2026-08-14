@@ -1,10 +1,7 @@
 import { Router } from 'express'
-import { authMiddleware } from '../middleware/auth.js'
 import { prisma } from '../db/index.js'
 
 const router = Router()
-
-router.use(authMiddleware)
 
 router.get('/', async (req, res) => {
   const { userId } = (req as any).user

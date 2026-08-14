@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import App from './App'
-import { useUIStore, useCoinListStore } from './store'
+import { useUIStore, useCoinListStore, useAuthStore } from './store'
 
 // Mock the store modules with fully self-contained state so we can assert on
 // state changes instead of tracking mock calls.
@@ -49,8 +49,10 @@ vi.mock('./store', () => {
   const authStore = makeStore({
     isChecking: false,
     isLoggedIn: true,
+    telegramVerified: true,
     settings: {},
     checkSession: vi.fn(),
+    logout: vi.fn(),
   })
 
   const alertStore = makeStore({
@@ -99,6 +101,7 @@ vi.mock('./components/ErrorBoundary', () => ({ ErrorBoundary: ({ children }: { c
 vi.mock('./components/layout/TopBar', () => ({ TopBar: () => <div data-testid="top-bar" /> }))
 vi.mock('./components/layout/RightPanel', () => ({ RightPanel: () => <div data-testid="right-panel" /> }))
 vi.mock('./components/auth/AuthModal', () => ({ default: () => <div data-testid="auth-modal" /> }))
+vi.mock('./components/auth/TelegramGate', () => ({ default: () => <div data-testid="telegram-gate" /> }))
 vi.mock('./components/auth/ProfileModal', () => ({ ProfileModalGate: () => null }))
 vi.mock('./components/exchange/ExchangeModal', () => ({ ExchangeModalGate: () => null }))
 vi.mock('./components/search/TickerSearchModal', () => ({ TickerSearchModalGate: () => null }))
@@ -127,6 +130,24 @@ function resetStores() {
   useUIStore.setState({ showTickerSearch: false, tickerSearchQuery: '', showAuth: false, showProfile: false, showExchangeModal: false })
   useCoinListStore.setState({ expandedSymbol: null, pageIndex: 0, pageCount: 5 })
 }
+
+describe('App telegram gate', () => {
+  it('renders the bind gate instead of charts when Telegram is not verified', async () => {
+    resetStores()
+    useAuthStore.setState({ telegramVerified: false })
+    render(<App />)
+    expect(await screen.findByTestId('telegram-gate')).toBeTruthy()
+    expect(screen.queryByTestId('chart-grid')).toBeNull()
+  })
+
+  it('renders charts when Telegram is verified', () => {
+    resetStores()
+    useAuthStore.setState({ telegramVerified: true })
+    render(<App />)
+    expect(screen.getByTestId('chart-grid')).toBeTruthy()
+    expect(screen.queryByTestId('telegram-gate')).toBeNull()
+  })
+})
 
 describe('App keyboard handler', () => {
   it('opens ticker search when a single letter key is pressed', () => {

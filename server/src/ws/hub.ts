@@ -1,6 +1,6 @@
 import { deflateRawSync } from 'zlib'
 import { WebSocket, WebSocketServer } from 'ws'
-import { verifyToken, type JwtPayload } from '../middleware/auth.js'
+import { verifyTokenWithTelegram, type JwtPayload } from '../middleware/auth.js'
 import type { WsMessage } from '../types.js'
 import type { UnifiedTicker, UnifiedCandle } from '../types.js'
 import { getTopCachedSymbols, getCachedCandles, updateCachedCandle } from '../services/candles/candle-cache.js'
@@ -233,10 +233,6 @@ export function setupWsHub(wss: WebSocketServer) {
       const match = req.headers.cookie.match(/(?:^|;\s*)token=([^;]+)/)
       if (match) token = match[1]
     }
-    if (token) {
-      user = verifyToken(token)
-    }
-
     const client: Client = {
       ws, user,
       subscriptions: new Set(),
@@ -247,6 +243,21 @@ export function setupWsHub(wss: WebSocketServer) {
       totalDropped: 0,
     }
     clients.set(ws, client)
+
+    if (token) {
+      // Token must belong to a Telegram-verified user — unverified accounts
+      // are locked out of the app entirely.
+      verifyTokenWithTelegram(token).then(verified => {
+        if (verified) {
+          client.user = verified
+        } else {
+          try {
+            ws.send(encodePayload({ type: 'auth-error', error: 'TELEGRAM_NOT_VERIFIED' }))
+            ws.close(4403, 'Telegram not verified')
+          } catch { /* socket already gone */ }
+        }
+      })
+    }
 
     ws.on('pong', () => { client.alive = true; client.buffered = 0 })
 
@@ -275,7 +286,16 @@ export function setupWsHub(wss: WebSocketServer) {
 
         // Support auth via first WS message (avoids token in URL which gets logged)
         if (msg.type === 'auth' && msg.token && !client.user) {
-          client.user = verifyToken(msg.token as string)
+          verifyTokenWithTelegram(msg.token as string).then(verified => {
+            if (verified) {
+              client.user = verified
+            } else {
+              try {
+                ws.send(encodePayload({ type: 'auth-error', error: 'TELEGRAM_NOT_VERIFIED' }))
+                ws.close(4403, 'Telegram not verified')
+              } catch { /* socket already gone */ }
+            }
+          })
           return
         }
 

@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken'
 import type { Request, Response, NextFunction } from 'express'
+import { prisma } from '../db/index.js'
 
 const JWT_SECRET = process.env.JWT_SECRET || (
   process.env.NODE_ENV === 'production'
@@ -31,6 +32,24 @@ export function verifyToken(token: string): JwtPayload | null {
   try {
     return jwt.verify(token, JWT_SECRET) as JwtPayload
   } catch {
+    return null
+  }
+}
+
+// Token is valid AND the user's Telegram is bound. Used by the WS hub so
+// unverified users cannot receive market data streams at all.
+export async function verifyTokenWithTelegram(token: string): Promise<JwtPayload | null> {
+  const payload = verifyToken(token)
+  if (!payload) return null
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: payload.userId },
+      select: { telegramVerified: true },
+    })
+    if (!user?.telegramVerified) return null
+    return payload
+  } catch (err) {
+    console.error('[auth] verifyTokenWithTelegram failed:', err)
     return null
   }
 }
@@ -102,4 +121,30 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   }
 
   next()
+}
+
+// Hard gate: authenticated users whose Telegram is not bound are locked out of
+// the app. The check reads the DB (source of truth), because binding happens in
+// the Telegram bot which updates the row without touching the JWT — a token
+// claim would go stale the moment the user binds.
+export async function requireTelegramVerified(req: Request, res: Response, next: NextFunction) {
+  const { userId } = (req as any).user
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { telegramVerified: true },
+    })
+    if (!user) {
+      res.status(404).json({ error: 'User not found' })
+      return
+    }
+    if (!user.telegramVerified) {
+      res.status(403).json({ error: 'TELEGRAM_NOT_VERIFIED' })
+      return
+    }
+    next()
+  } catch (err) {
+    console.error('[auth] requireTelegramVerified failed:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
 }

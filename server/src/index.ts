@@ -22,7 +22,7 @@ import debugRoutes from './routes/debug.js'
 import { prisma } from './db/index.js'
 import { disconnectRedis } from './redis.js'
 import { register } from './metrics.js'
-import { authMiddleware } from './middleware/auth.js'
+import { authMiddleware, requireTelegramVerified } from './middleware/auth.js'
 
 const PORT = parseInt(process.env.PORT || '3001')
 const ROLE = process.env.ROLE || 'all'
@@ -70,9 +70,11 @@ async function main() {
 
   app.use('/api/auth', authRoutes)
   app.use('/api/coins', coinRoutes)
-  app.use('/api/watchlists', watchlistRoutes)
-  app.use('/api/alerts', alertRoutes)
-  app.use('/api/drawings', drawingRoutes)
+  // Telegram binding is mandatory: users without a bound Telegram account are
+  // locked out of every app feature (watchlists, alerts, drawings, settings).
+  app.use('/api/watchlists', authMiddleware, requireTelegramVerified, watchlistRoutes)
+  app.use('/api/alerts', authMiddleware, requireTelegramVerified, alertRoutes)
+  app.use('/api/drawings', authMiddleware, requireTelegramVerified, drawingRoutes)
   app.use('/api/debug', authMiddleware, debugRoutes)
 
   app.use('/api/health', (_req, res) => res.json({ ok: true, role: ROLE }))
