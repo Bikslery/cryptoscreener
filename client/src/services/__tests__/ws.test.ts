@@ -21,7 +21,10 @@ class FakeWebSocket {
   onerror: (() => void) | null = null
   onmessage: ((e: { data: string }) => void) | null = null
 
-  constructor(public url: string) {
+  url: string
+
+  constructor(url: string) {
+    this.url = url
     FakeWebSocket.instances.push(this)
   }
 
