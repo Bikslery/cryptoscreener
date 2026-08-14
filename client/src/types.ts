@@ -69,6 +69,8 @@ export interface ImpulseAlertCondition {
   direction: 'up' | 'down' | 'both'
   volumeSpike: number
   exchanges: ImpulseExchangeCondition[]
+  /** Opt-in Telegram delivery (default false — browser only). */
+  telegram?: boolean
   lastFiredCandleTime?: number
 }
 

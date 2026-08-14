@@ -151,12 +151,22 @@ describe('normalizeImpulseCondition', () => {
 
   it('passes valid conditions through unchanged', () => {
     const c = cond({ percent: 3, direction: 'down', volumeSpike: 2 })
-    expect(normalizeImpulseCondition(c)).toEqual(c)
+    const n = normalizeImpulseCondition(c)
+    expect(n.percent).toBe(3)
+    expect(n.timeframe).toBe('5m')
+    expect(n.direction).toBe('down')
+    expect(n.volumeSpike).toBe(2)
+    expect(n.exchanges).toEqual(c.exchanges)
   })
 
   it('preserves lastFiredCandleTime', () => {
     const c = cond({ lastFiredCandleTime: 123 })
     expect(normalizeImpulseCondition(c).lastFiredCandleTime).toBe(123)
+  })
+
+  it('telegram stays opt-in: absent flag becomes false, true survives', () => {
+    expect(normalizeImpulseCondition(cond()).telegram).toBe(false)
+    expect(normalizeImpulseCondition(cond({ telegram: true })).telegram).toBe(true)
   })
 })
 
@@ -179,6 +189,18 @@ describe('validateImpulseCondition', () => {
       expect(res.condition.percent).toBe(3)
       expect(res.condition.lastFiredCandleTime).toBeUndefined()
     }
+  })
+
+  it('defaults telegram to false and rejects non-boolean values', () => {
+    const res = validateImpulseCondition(valid)
+    if ('condition' in res) expect(res.condition.telegram).toBe(false)
+    else expect.unreachable()
+
+    const on = validateImpulseCondition({ ...valid, telegram: true })
+    if ('condition' in on) expect(on.condition.telegram).toBe(true)
+    else expect.unreachable()
+
+    expect('error' in validateImpulseCondition({ ...valid, telegram: 'yes' })).toBe(true)
   })
 
   it('dedupes repeated exchanges keeping the first occurrence', () => {

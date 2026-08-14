@@ -15,6 +15,8 @@ export function normalizeImpulseCondition(cond: ImpulseAlertCondition): ImpulseA
     direction: cond.direction === 'up' || cond.direction === 'down' || cond.direction === 'both' ? cond.direction : 'both',
     volumeSpike: typeof cond.volumeSpike === 'number' && cond.volumeSpike > 0 ? cond.volumeSpike : 0,
     exchanges: Array.isArray(cond.exchanges) && cond.exchanges.length > 0 ? cond.exchanges : DEFAULT_IMPULSE_EXCHANGES,
+    // Telegram stays opt-in — legacy rows never had the flag.
+    telegram: cond.telegram === true,
     lastFiredCandleTime: cond.lastFiredCandleTime,
   }
 }

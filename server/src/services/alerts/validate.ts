@@ -32,6 +32,7 @@ export function validateImpulseCondition(raw: unknown): { condition: ImpulseAler
     exchanges.push({ exchange: item.exchange as Exchange, minVolume24h: item.minVolume24h as number })
   }
   if (exchanges.length === 0) return { error: 'exchanges: массив 1–10 бирж' }
+  if (raw.telegram !== undefined && typeof raw.telegram !== 'boolean') return { error: 'telegram: булево значение' }
   return {
     condition: {
       percent: raw.percent,
@@ -39,6 +40,8 @@ export function validateImpulseCondition(raw: unknown): { condition: ImpulseAler
       direction: raw.direction as ImpulseAlertCondition['direction'],
       volumeSpike: raw.volumeSpike,
       exchanges,
+      // Telegram delivery is opt-in — absent means browser notifications only.
+      telegram: raw.telegram === true,
       // lastFiredCandleTime is engine bookkeeping — never accepted from the client.
     },
   }

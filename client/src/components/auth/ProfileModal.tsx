@@ -262,6 +262,7 @@ export default function ProfileModal() {
   const [alertTimeframe, setAlertTimeframe] = useState<'1m' | '5m'>('5m')
   const [alertDirection, setAlertDirection] = useState<'up' | 'down' | 'both'>('both')
   const [alertVolumeSpike, setAlertVolumeSpike] = useState('0')
+  const [alertTelegram, setAlertTelegram] = useState(false)
   const [alertExchanges, setAlertExchanges] = useState<ExchangeRow[]>(DEFAULT_EXCHANGE_ROWS)
   const [alertCreating, setAlertCreating] = useState(false)
   const [alertError, setAlertError] = useState('')
@@ -293,6 +294,7 @@ export default function ProfileModal() {
           timeframe: alertTimeframe,
           direction: alertDirection,
           volumeSpike,
+          telegram: alertTelegram,
           exchanges: exchanges.map(r => ({ exchange: r.exchange, minVolume24h: parseFloat(r.minVolume24h) || 0 })),
         },
       })
@@ -1036,6 +1038,24 @@ export default function ProfileModal() {
                   onChange={(e) => setAlertVolumeSpike(e.target.value)}
                 />
                 <span className="profile-alert-suffix">×</span>
+              </div>
+            </div>
+
+            <div className="profile-field">
+              <div className="profile-notify-row">
+                <label>Уведомлять в Telegram</label>
+                <label className="profile-switch">
+                  <input
+                    type="checkbox"
+                    checked={alertTelegram}
+                    onChange={(e) => setAlertTelegram(e.target.checked)}
+                    data-testid="alert-telegram-toggle"
+                  />
+                  <span className="track" />
+                </label>
+              </div>
+              <div className="profile-scale-hint">
+                Выключено по умолчанию — уведомления приходят только в браузере
               </div>
             </div>
 
