@@ -245,12 +245,49 @@ export default function ProfileModal() {
 
   // --- Impulse alert creation (cabinet configurator) ---
 
+  const EXCHANGE_OPTIONS: { value: Exchange | 'all'; label: string }[] = [
+    { value: 'all', label: 'Все биржи' },
+    ...(Object.keys(EXCHANGE_LABELS) as Exchange[]).map((ex) => ({ value: ex, label: EXCHANGE_LABELS[ex] })),
+  ]
+
   const [alertPercent, setAlertPercent] = useState('3')
-  const [alertExchange, setAlertExchange] = useState<Exchange>('binance-futures')
+  const [alertExchange, setAlertExchange] = useState<Exchange | 'all'>('all')
   const [alertTelegram, setAlertTelegram] = useState(false)
   const [alertCreating, setAlertCreating] = useState(false)
   const [alertError, setAlertError] = useState('')
   const [alertDone, setAlertDone] = useState(false)
+  const [exchangeMenuOpen, setExchangeMenuOpen] = useState(false)
+  const [exchangeMenuPos, setExchangeMenuPos] = useState<{ top: number; left: number; width: number } | null>(null)
+  const exchangeBtnRef = useRef<HTMLButtonElement | null>(null)
+
+  const toggleExchangeMenu = () => {
+    if (exchangeMenuOpen) {
+      setExchangeMenuOpen(false)
+      return
+    }
+    const el = exchangeBtnRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    setExchangeMenuPos({ top: r.bottom + 6, left: r.left, width: r.width })
+    setExchangeMenuOpen(true)
+  }
+
+  useEffect(() => {
+    if (!exchangeMenuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (exchangeBtnRef.current?.contains(e.target as Node)) return
+      setExchangeMenuOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setExchangeMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [exchangeMenuOpen])
 
   const handleAlertSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -261,6 +298,9 @@ export default function ProfileModal() {
       setAlertError('Укажите % движения')
       return
     }
+    const exchanges = alertExchange === 'all'
+      ? (Object.keys(EXCHANGE_LABELS) as Exchange[]).map((exchange) => ({ exchange, minVolume24h: 0 }))
+      : [{ exchange: alertExchange, minVolume24h: 0 }]
     setAlertCreating(true)
     try {
       const res = await api.post('/alerts', {
@@ -272,7 +312,7 @@ export default function ProfileModal() {
           direction: 'both',
           volumeSpike: 0,
           telegram: alertTelegram,
-          exchanges: [{ exchange: alertExchange, minVolume24h: 0 }],
+          exchanges,
         },
       })
       useAlertStore.getState().addCreated(res.data as AlertType)
@@ -975,16 +1015,41 @@ export default function ProfileModal() {
 
             <div className="profile-field">
               <label>Биржа, с которой приходит алерт</label>
-              <select
-                className="profile-alert-select"
-                value={alertExchange}
-                onChange={(e) => setAlertExchange(e.target.value as Exchange)}
-                data-testid="alert-exchange-select"
-              >
-                {Object.keys(EXCHANGE_LABELS).map((ex) => (
-                  <option key={ex} value={ex}>{EXCHANGE_LABELS[ex as Exchange]}</option>
-                ))}
-              </select>
+              <div className="alert-exchange-wrap">
+                <button
+                  ref={exchangeBtnRef}
+                  type="button"
+                  className="alert-exchange-btn"
+                  onClick={toggleExchangeMenu}
+                  data-testid="alert-exchange-select"
+                >
+                  <span>{alertExchange === 'all' ? 'Все биржи' : EXCHANGE_LABELS[alertExchange]}</span>
+                  <ChevronDown size={14} className={`alert-exchange-chevron ${exchangeMenuOpen ? 'open' : ''}`} />
+                </button>
+                {exchangeMenuOpen && exchangeMenuPos && (
+                  <div
+                    className="alert-exchange-menu"
+                    style={{ top: exchangeMenuPos.top, left: exchangeMenuPos.left, width: exchangeMenuPos.width }}
+                  >
+                    {EXCHANGE_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        className={`alert-exchange-option ${alertExchange === opt.value ? 'selected' : ''}`}
+                        onClick={() => {
+                          setAlertExchange(opt.value)
+                          setExchangeMenuOpen(false)
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="profile-scale-hint">
+                Все биржи — проверка по всем рынкам; конкретная — только с неё
+              </div>
             </div>
 
             <div className="profile-field">
