@@ -206,9 +206,9 @@ async function fireAlert(alert: any, price: number, overrideSymbol?: string, pri
     select: { telegramChatId: true },
   })
 
-  // Telegram delivery is OPT-IN per alert (condition.telegram === true) —
-  // by default notifications arrive only in the browser.
-  if (user?.telegramChatId && condition.telegram === true) {
+  // Telegram delivery rules: impulse alerts are opt-in (condition.telegram),
+  // regular price/listing alerts always notify in Telegram once bound.
+  if (user?.telegramChatId && (condition.telegram === true || alert.type !== 'impulse')) {
     const icon = alert.type === 'price' ? '📈' : alert.type === 'impulse' ? '⚡' : '🆕'
     const typeLabel = alert.type === 'price' ? 'Пересечение цены' : alert.type === 'impulse' ? 'Импульс' : 'Листинг'
     const formattedPrice = formatPriceByPrecision(price, pricePrecision ?? 2)
