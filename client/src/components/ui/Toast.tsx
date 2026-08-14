@@ -28,7 +28,7 @@ function AlertCard({ id, data, count, onClose }: {
   return (
     <div className="pointer-events-auto relative w-[280px] text-[16px] font-mono rounded-[0.4em] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden aspect-[21/8] grid grid-cols-[0.4em_auto] animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b]">
       <div className={`w-full h-full rounded-l-[1rem] ${BAR[data.type] ?? BAR.price}`} />
-      <div className="relative flex flex-col justify-between p-[0.6em_0.6em_0.5em_1.5em] min-w-0 text-[#d4d4d4]">
+      <div className="relative flex flex-col justify-between p-[0.6em_0.6em_0.5em_60px] min-w-0 text-[#d4d4d4]">
         <div className="flex items-center justify-between mb-[0.5em]">
           <span className="text-[0.85em] text-[#d4d4d4] truncate">{data.label}</span>
           <button
