@@ -208,7 +208,7 @@ export interface UserSettings {
   }
   defaultTimeframe?: string
   chartBlocks?: string[]
-  drawingHotkeys?: Record<DrawingTool, string>
+  drawingHotkeys?: Partial<Record<DrawingTool, string>>
   // Initial visible bars when opening the expanded chart (50–1000).
   chartVisibleBars?: number
   // Alert notifications: play a sound on fire (default true) and its volume (0–1).

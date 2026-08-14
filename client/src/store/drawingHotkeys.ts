@@ -3,33 +3,34 @@ import type { DrawingTool } from '../types.js'
 import { useAuthStore } from './index.js'
 import { getEnglishLetterFromKeyCode } from '../utils/keyboard.js'
 
-export const DEFAULT_DRAWING_HOTKEYS: Record<DrawingTool, string> = {
+// Tools exposed in the UI + hotkey system. `fib`/`circle` remain valid
+// DrawingTool values for legacy saved drawings, but they are no longer
+// creatable: no panel button and no hotkey binding.
+export type HotkeyTool = Exclude<DrawingTool, 'fib' | 'circle'>
+
+export const DEFAULT_DRAWING_HOTKEYS: Record<HotkeyTool, string> = {
   'h-ray': 'shift+d',
   't-ray': 'shift+s',
   segment: 'shift+a',
   rect: 'shift+r',
-  fib: 'shift+f',
-  circle: 'shift+c',
   alert: 'shift+e',
 }
 
-export const DRAWING_TOOL_LABELS: Record<DrawingTool, string> = {
+export const DRAWING_TOOL_LABELS: Record<HotkeyTool, string> = {
   'h-ray': 'Горизонтальный луч',
   't-ray': 'Трендовый луч',
   segment: 'Отрезок',
   rect: 'Прямоугольник',
-  fib: 'Фибоначчи',
-  circle: 'Окружность',
   alert: 'Ценовой алерт',
 }
 
 interface DrawingHotkeysState {
-  bindings: Record<DrawingTool, string>
+  bindings: Record<HotkeyTool, string>
   activeTool: DrawingTool | null
 
-  initFromSettings: (settings?: { drawingHotkeys?: Record<DrawingTool, string> }) => void
-  setBindings: (bindings: Record<DrawingTool, string>) => Promise<void>
-  setBinding: (tool: DrawingTool, combo: string) => Promise<void>
+  initFromSettings: (settings?: { drawingHotkeys?: Partial<Record<DrawingTool, string>> }) => void
+  setBindings: (bindings: Record<HotkeyTool, string>) => Promise<void>
+  setBinding: (tool: HotkeyTool, combo: string) => Promise<void>
   resetDefaults: () => Promise<void>
   activateTool: (tool: DrawingTool | null) => void
   deactivate: () => void
@@ -91,9 +92,9 @@ export const useDrawingHotkeysStore = create<DrawingHotkeysState>((set, get) => 
   activeTool: null,
 
   initFromSettings: (settings) => {
-    const merged: Record<DrawingTool, string> = { ...DEFAULT_DRAWING_HOTKEYS }
+    const merged: Record<HotkeyTool, string> = { ...DEFAULT_DRAWING_HOTKEYS }
     if (settings?.drawingHotkeys) {
-      for (const tool of Object.keys(DEFAULT_DRAWING_HOTKEYS) as DrawingTool[]) {
+      for (const tool of Object.keys(DEFAULT_DRAWING_HOTKEYS) as HotkeyTool[]) {
         const value = settings.drawingHotkeys[tool]
         if (typeof value === 'string') {
           merged[tool] = normalizeCombo(value)
@@ -104,8 +105,8 @@ export const useDrawingHotkeysStore = create<DrawingHotkeysState>((set, get) => 
   },
 
   setBindings: async (bindings) => {
-    const normalized: Record<DrawingTool, string> = { ...DEFAULT_DRAWING_HOTKEYS }
-    for (const tool of Object.keys(DEFAULT_DRAWING_HOTKEYS) as DrawingTool[]) {
+    const normalized: Record<HotkeyTool, string> = { ...DEFAULT_DRAWING_HOTKEYS }
+    for (const tool of Object.keys(DEFAULT_DRAWING_HOTKEYS) as HotkeyTool[]) {
       normalized[tool] = normalizeCombo(bindings[tool] ?? '')
     }
     set({ bindings: normalized })
@@ -135,7 +136,7 @@ export const useDrawingHotkeysStore = create<DrawingHotkeysState>((set, get) => 
   },
 }))
 
-async function persistHotkeys(bindings: Record<DrawingTool, string>) {
+async function persistHotkeys(bindings: Record<HotkeyTool, string>) {
   const authState = useAuthStore.getState()
   if (!authState.isLoggedIn) return
   const settings = { ...(authState.settings ?? {}), drawingHotkeys: bindings }

@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useAuthStore, useUIStore } from '../../store'
-import { useDrawingHotkeysStore, eventToCombo, formatCombo, DRAWING_TOOL_LABELS, DEFAULT_DRAWING_HOTKEYS } from '../../store/drawingHotkeys'
-import type { DrawingTool } from '../../types'
+import { useDrawingHotkeysStore, eventToCombo, formatCombo, DRAWING_TOOL_LABELS, DEFAULT_DRAWING_HOTKEYS, type HotkeyTool } from '../../store/drawingHotkeys'
 import api from '../../services/api'
 import { playAlertSound } from '../../services/alert-notify'
 import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3, Bell, Volume2, Layers } from 'lucide-react'
@@ -30,7 +29,7 @@ export default function ProfileModal() {
   const bindings = useDrawingHotkeysStore(s => s.bindings)
   const setBinding = useDrawingHotkeysStore(s => s.setBinding)
   const resetDefaults = useDrawingHotkeysStore(s => s.resetDefaults)
-  const [recording, setRecording] = useState<DrawingTool | null>(null)
+  const [recording, setRecording] = useState<HotkeyTool | null>(null)
   const [hotkeyError, setHotkeyError] = useState('')
 
   // Chart scale setting — slider with debounced save (range inputs fire many
@@ -225,7 +224,7 @@ export default function ProfileModal() {
     setCodeTimer(0)
   }
 
-  const handleHotkeyDown = (tool: DrawingTool, e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleHotkeyDown = (tool: HotkeyTool, e: React.KeyboardEvent<HTMLInputElement>) => {
     e.preventDefault()
     setHotkeyError('')
     if (e.key === 'Escape') {
@@ -236,7 +235,7 @@ export default function ProfileModal() {
     const combo = eventToCombo(e.nativeEvent)
     if (!combo) return
 
-    const otherTool = (Object.keys(bindings) as DrawingTool[]).find(
+    const otherTool = (Object.keys(bindings) as HotkeyTool[]).find(
       t => t !== tool && bindings[t] === combo,
     )
     if (otherTool) {
@@ -777,7 +776,7 @@ export default function ProfileModal() {
 
           {hotkeyError && <div className="profile-reset-error">{hotkeyError}</div>}
 
-          {(Object.keys(DEFAULT_DRAWING_HOTKEYS) as DrawingTool[]).map((tool) => (
+          {(Object.keys(DEFAULT_DRAWING_HOTKEYS) as HotkeyTool[]).map((tool) => (
             <div key={tool} className="profile-field">
               <label>{DRAWING_TOOL_LABELS[tool]}</label>
               <input

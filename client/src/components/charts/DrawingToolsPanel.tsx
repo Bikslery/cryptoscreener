@@ -1,7 +1,7 @@
 import { memo } from 'react'
-import { Minus, TrendingUp, Slash, Trash2, Square, TrendingDown, Circle, Bell } from 'lucide-react'
+import { Minus, TrendingUp, Slash, Trash2, Square, Bell } from 'lucide-react'
 import type { DrawingTool } from '../../types'
-import { useDrawingHotkeysStore, formatCombo } from '../../store/drawingHotkeys'
+import { useDrawingHotkeysStore, formatCombo, type HotkeyTool } from '../../store/drawingHotkeys'
 
 interface DrawingToolsPanelProps {
   activeTool: DrawingTool | null
@@ -11,13 +11,11 @@ interface DrawingToolsPanelProps {
   pendingPoint: { price: number; time: number } | null
 }
 
-const TOOLS: { id: DrawingTool; icon: typeof Minus; label: string }[] = [
+const TOOLS: { id: HotkeyTool; icon: typeof Minus; label: string }[] = [
   { id: 'h-ray', icon: Minus, label: 'Гориз. луч' },
   { id: 't-ray', icon: TrendingUp, label: 'Тренд. луч' },
   { id: 'segment', icon: Slash, label: 'Отрезок' },
   { id: 'rect', icon: Square, label: 'Прямоугольник' },
-  { id: 'fib', icon: TrendingDown, label: 'Фибоначчи' },
-  { id: 'circle', icon: Circle, label: 'Окружность' },
   { id: 'alert', icon: Bell, label: 'Ценовой алерт' },
 ]
 
