@@ -78,8 +78,19 @@ export function prependCandles(exchange: Exchange, symbol: string, tf: string, o
   const current = cache.get(k) || []
   totalCandleCount -= current.length
 
+  // Filter invalid candles from the incoming older page — dedupSort/setCandles
+  // already do this for the initial-history and bulk paths; prependCandles
+  // used to skip it, which let a malformed API candle slip into the cache
+  // silently AND made `merged.length` disagree with what useFullHistory's
+  // renderCandles ends up putting in candlesDataRef (which always filters via
+  // validateCandle). That disagreement is exactly what makes the lazy-scroll
+  // `added = merged.length - prevLen` viewport-shift calc drift by however
+  // many candles got silently dropped downstream — filtering HERE keeps the
+  // cache's length authoritative and the shift calc exact.
+  const validOlder = older.filter(validateCandle)
+
   const byTime = new Map<number, UnifiedCandle>()
-  for (const c of older) byTime.set(c.time, c)
+  for (const c of validOlder) byTime.set(c.time, c)
   // current entries overwrite older at same timestamp (current is authoritative)
   // and include any in-place mutations from updateCandle
   for (const c of current) byTime.set(c.time, c)
