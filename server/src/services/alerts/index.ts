@@ -60,6 +60,8 @@ export function startAlertEngine() {
               keepActive: true,
               impulseCandleTime: match.candle.time,
               movePct: match.movePct,
+              direction: match.direction,
+              exchange: match.ticker.exchange,
             })
           }
         }
@@ -94,7 +96,7 @@ export function stopAlertEngine() {
  * missing or stale, so symbols not open in any chart still get evaluated on
  * fresh data every check tick.
  */
-async function findImpulseMatch(symbol: string, cond: ImpulseAlertCondition): Promise<{ ticker: UnifiedTicker; candle: UnifiedCandle; movePct: number } | null> {
+async function findImpulseMatch(symbol: string, cond: ImpulseAlertCondition): Promise<{ ticker: UnifiedTicker; candle: UnifiedCandle; movePct: number; direction: 'up' | 'down' } | null> {
   const allTickers = getAllTickers()
   const bySymbol = new Map<string, Map<string, UnifiedTicker>>()
   for (const t of allTickers) {
@@ -141,7 +143,12 @@ async function findImpulseMatch(symbol: string, cond: ImpulseAlertCondition): Pr
     if (!matchesImpulseCandle(cond, candle, candles.slice(Math.max(0, idx - 30), idx))) continue
 
     const movePct = candle.low > 0 ? ((candle.high - candle.low) / candle.low) * 100 : 0
-    return { ticker, candle, movePct: Math.round(movePct * 100) / 100 }
+    return {
+      ticker,
+      candle,
+      movePct: Math.round(movePct * 100) / 100,
+      direction: candle.close >= candle.open ? 'up' : 'down',
+    }
   }
   return null
 }
@@ -189,6 +196,11 @@ interface FireOptions {
   keepActive?: boolean
   impulseCandleTime?: number
   movePct?: number
+  /** Candle direction (close vs open) for impulse payloads — the toast colors
+   *  and signs the move by it. movePct itself is an unsigned range. */
+  direction?: 'up' | 'down'
+  /** Actual exchange that fired (impulse conditions pick it by priority). */
+  exchange?: string
 }
 
 async function fireAlert(alert: any, price: number, overrideSymbol?: string, pricePrecision?: number, opts: FireOptions = {}) {
@@ -213,12 +225,13 @@ async function fireAlert(alert: any, price: number, overrideSymbol?: string, pri
     id: alert.id,
     type: alert.type,
     symbol,
-    exchange: alert.exchange,
+    exchange: opts.exchange ?? alert.exchange,
     price,
     condition,
     triggeredAt: Date.now(),
     active: opts.keepActive ? true : false,
     ...(opts.movePct !== undefined ? { movePct: opts.movePct } : {}),
+    ...(opts.direction !== undefined ? { direction: opts.direction } : {}),
   }
 
   broadcast({ type: 'alert', data: alertData })

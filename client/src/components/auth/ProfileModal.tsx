@@ -257,10 +257,12 @@ export default function ProfileModal() {
   const [alertSaving, setAlertSaving] = useState(false)
   const [alertError, setAlertError] = useState('')
   const [managedAlertId, setManagedAlertId] = useState<string | null>(null)
+  const [allImpulseAlertIds, setAllImpulseAlertIds] = useState<string[]>([])
   const alertSettingsTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [exchangeMenuOpen, setExchangeMenuOpen] = useState(false)
   const [exchangeMenuPos, setExchangeMenuPos] = useState<{ top: number; left: number; width: number } | null>(null)
   const exchangeBtnRef = useRef<HTMLButtonElement | null>(null)
+  const exchangeMenuRef = useRef<HTMLDivElement | null>(null)
 
   /** Condition built from EXPLICIT values — never from a stale render closure. */
   const buildImpulseCondition = (next: { percent: number; exchange: Exchange | 'all'; telegram: boolean }) => ({
@@ -274,21 +276,35 @@ export default function ProfileModal() {
       : [{ exchange: next.exchange, minVolume24h: 0 }],
   })
 
+  /** Fire-and-forget deactivation; keeps the list in sync with the result. */
+  const deactivateAlert = (id: string) => {
+    api.patch(`/alerts/${id}`, { active: false })
+      .then((res) => useAlertStore.getState().updateAlert(res.data as AlertType))
+      .catch(() => { /* already gone */ })
+  }
+
   // The gate mounts this modal fresh on every open — load the user's ANY
-  // impulse alert (latest) and mirror its state into the form.
+  // impulse alert (latest) and mirror its state into the form. Legacy
+  // duplicates (many "create" clicks under the old form) are deactivated
+  // here: only the latest impulse alert may stay active.
   useEffect(() => {
     let cancelled = false
     api.get('/alerts')
       .then((res) => {
         if (cancelled) return
         const list = res.data as AlertType[]
-        const impulse = list
+        const impulseAlerts = list
           .filter(a => a.type === 'impulse' && a.symbol === 'ANY')
-          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]
-        setManagedAlertId(impulse?.id ?? null)
-        setAlertsEnabled(impulse?.active === true)
-        if (impulse?.condition) {
-          const cond = impulse.condition as { percent?: number; exchanges?: { exchange: Exchange }[]; telegram?: boolean }
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        const managed = impulseAlerts[0]
+        setManagedAlertId(managed?.id ?? null)
+        setAlertsEnabled(managed?.active === true)
+        setAllImpulseAlertIds(impulseAlerts.map(a => a.id))
+        for (const other of impulseAlerts.slice(1)) {
+          if (other.active) deactivateAlert(other.id)
+        }
+        if (managed?.condition) {
+          const cond = managed.condition as { percent?: number; exchanges?: { exchange: Exchange }[]; telegram?: boolean }
           if (typeof cond.percent === 'number') setAlertPercent(Math.min(50, Math.max(0.5, cond.percent)))
           if (Array.isArray(cond.exchanges)) {
             if (cond.exchanges.length === 1) setAlertExchange(cond.exchanges[0].exchange)
@@ -319,11 +335,19 @@ export default function ProfileModal() {
           setManagedAlertId(res.data.id)
           useAlertStore.getState().addCreated(res.data as AlertType)
         }
+        // Only the managed alert may fire — silence every other impulse alert.
+        for (const id of allImpulseAlertIds) {
+          if (id !== managedAlertId) deactivateAlert(id)
+        }
         setAlertsEnabled(true)
       } else {
         if (managedAlertId) {
           const res = await api.patch(`/alerts/${managedAlertId}`, { active: false })
           useAlertStore.getState().updateAlert(res.data as AlertType)
+        }
+        // "Off" means off — no impulse alert may stay active.
+        for (const id of allImpulseAlertIds) {
+          if (id !== managedAlertId) deactivateAlert(id)
         }
         setAlertsEnabled(false)
       }
@@ -334,11 +358,12 @@ export default function ProfileModal() {
     }
   }
 
-  // Settings apply to the enabled alert automatically (debounced PATCH).
-  // Values are passed in explicitly — the timer closure must never read
-  // stale state from the render that scheduled it.
+  // Settings persist on the alert row even while it is disabled (debounced
+  // PATCH; the engine only reads active alerts, so this is safe). Values are
+  // passed in explicitly — the timer closure must never read stale state
+  // from the render that scheduled it.
   const queueAlertSettingsSave = (next: { percent: number; exchange: Exchange | 'all'; telegram: boolean }) => {
-    if (!alertsEnabled || !managedAlertId) return
+    if (!managedAlertId) return
     if (alertSettingsTimer.current) clearTimeout(alertSettingsTimer.current)
     alertSettingsTimer.current = setTimeout(async () => {
       if (!isFinite(next.percent) || next.percent <= 0) return
@@ -364,7 +389,11 @@ export default function ProfileModal() {
   useEffect(() => {
     if (!exchangeMenuOpen) return
     const onDown = (e: MouseEvent) => {
+      // Clicks inside the trigger button or the menu itself must reach the
+      // option's onClick — closing here on mousedown would unmount the menu
+      // before the browser dispatches click and the selection would be lost.
       if (exchangeBtnRef.current?.contains(e.target as Node)) return
+      if (exchangeMenuRef.current?.contains(e.target as Node)) return
       setExchangeMenuOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
@@ -1105,6 +1134,7 @@ export default function ProfileModal() {
               </button>
               {exchangeMenuOpen && exchangeMenuPos && (
                 <div
+                  ref={exchangeMenuRef}
                   className="alert-exchange-menu"
                   style={{ top: exchangeMenuPos.top, left: exchangeMenuPos.left, width: exchangeMenuPos.width }}
                 >

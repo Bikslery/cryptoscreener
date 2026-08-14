@@ -114,6 +114,18 @@ router.patch('/:id', writeLimiter, async (req, res) => {
       }
       condition = parsed.condition
     }
+
+    // Engine bookkeeping must survive settings updates — otherwise saving
+    // the % / exchange / telegram resets the 5-minute mute and the same
+    // candle can immediately refire.
+    if (existing.type === 'impulse') {
+      let old: { lastFiredCandleTime?: number; mutedUntil?: number } = {}
+      try { old = JSON.parse(existing.condition) } catch { /* keep empty */ }
+      const next = condition as { lastFiredCandleTime?: number; mutedUntil?: number }
+      if (old.lastFiredCandleTime !== undefined) next.lastFiredCandleTime = old.lastFiredCandleTime
+      if (old.mutedUntil !== undefined) next.mutedUntil = old.mutedUntil
+    }
+
     data.condition = JSON.stringify(condition)
   }
 

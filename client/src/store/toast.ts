@@ -63,14 +63,18 @@ function buildAlertData(alert: Alert): AlertToastData {
   if (alert.type === 'impulse') {
     const cond = alert.condition as { percent?: number }
     const move = typeof alert.movePct === 'number' ? alert.movePct : cond.percent ?? 0
-    const sign = move >= 0 ? '+' : ''
-    const tone = move >= 0 ? 'up' : 'down'
+    // The engine sends the candle direction; legacy payloads fall back to the
+    // move sign. movePct is an unsigned range, so the sign NEVER comes from it.
+    const dir = alert.direction
+    const tone: AlertToastData['accentTone'] = dir === 'down' ? 'down' : dir === 'up' ? 'up' : move < 0 ? 'down' : 'up'
+    const sign = dir === 'down' ? '-' : dir === 'up' ? '+' : ''
+    const displayed = dir ? Math.abs(move).toFixed(1) : move.toFixed(1)
     return {
       type: 'impulse',
       label: ALERT_LABELS.impulse,
       symbol,
-      accent: `${sign}${move.toFixed(1)}%`,
-      accentTone: tone as AlertToastData['accentTone'],
+      accent: `${sign}${displayed}%`,
+      accentTone: tone,
       sub: exchangeName,
     }
   }

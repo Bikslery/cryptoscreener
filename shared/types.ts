@@ -74,6 +74,12 @@ export interface Alert {
   symbol: string
   exchange: Exchange | null
   condition: PriceAlertCondition | ImpulseAlertCondition | ListingAlertCondition
+  /** Price at trigger time (present on fired/WS alert payloads). */
+  price?: number
+  /** Actual candle move % at trigger time (impulse fired payloads, unsigned). */
+  movePct?: number
+  /** Candle direction at trigger time (impulse fired payloads). */
+  direction?: 'up' | 'down'
   active: boolean
   muted: boolean
   triggeredAt: number | null

@@ -89,6 +89,8 @@ export interface Alert {
   price?: number
   /** Actual candle move % at trigger time (impulse fired payloads). */
   movePct?: number
+  /** Candle direction at trigger time (impulse fired payloads). */
+  direction?: 'up' | 'down'
   active: boolean
   muted: boolean
   triggeredAt: number | null

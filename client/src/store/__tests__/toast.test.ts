@@ -71,6 +71,20 @@ describe('useToastStore — showAlert', () => {
     expect(t.alertData?.accent).toBe('')
     expect(t.alertData?.sub).toBe('3,001.00')
   })
+
+  it('signs and colors the impulse by the candle direction (up)', () => {
+    useToastStore.getState().showAlert(impulseAlert({ movePct: 3.2, direction: 'up' }))
+    const t = useToastStore.getState().toasts[0]
+    expect(t.alertData?.accent).toBe('+3.2%')
+    expect(t.alertData?.accentTone).toBe('up')
+  })
+
+  it('signs and colors the impulse by the candle direction (down)', () => {
+    useToastStore.getState().showAlert(impulseAlert({ movePct: 3.2, direction: 'down' }))
+    const t = useToastStore.getState().toasts[0]
+    expect(t.alertData?.accent).toBe('-3.2%')
+    expect(t.alertData?.accentTone).toBe('down')
+  })
 })
 
 describe('useToastStore — stacking and caps', () => {
