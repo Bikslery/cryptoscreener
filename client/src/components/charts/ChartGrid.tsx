@@ -1074,12 +1074,14 @@ function useWsTrade(
   lastUpdateRef?: React.RefObject<number>,
   aggregatorRef?: React.RefObject<SecondCandleAggregator | null>,
 ) {
-  // The price lane (bookTicker mid) is the primary tick source — like
-  // scalpboard's single price stream. The trade lane only kicks in when the
-  // mid has been quiet for a second, so two prices never alternate on the
-  // same forming bar. Second timeframes (1s/5s/15s) are the exception: they
+  // The trade lane (aggTrade prints — the actual last trade price, what a
+  // trading terminal shows) is the primary tick source. The price lane
+  // (bookTicker mid) only kicks in when trades have been quiet for a second,
+  // so two prices never alternate on the same forming bar (mid sits in the
+  // spread and wobbles ±spread/2 on thin books — the source of the visible
+  // price flicker). Second timeframes (1s/5s/15s) are the exception: they
   // run on the trade lane only, exactly like scalpboard's chart.
-  const lastMidTickAtRef = useRef(0)
+  const lastTradeAtRef = useRef(0)
 
   useEffect(() => {
     if (!exchange) return
@@ -1094,6 +1096,7 @@ function useWsTrade(
       if (lastUpdateRef) {
         lastUpdateRef.current = Date.now()
       }
+      lastTradeAtRef.current = Date.now()
 
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(price)) return
@@ -1120,9 +1123,6 @@ function useWsTrade(
         aggregatorRef?.current?.addTrade(price, isFinite(volume) && volume > 0 ? volume : 0, tradeTime)
         return
       }
-
-      // The mid lane is fresher — skip the trade print entirely.
-      if (Date.now() - lastMidTickAtRef.current < 1000) return
 
       const ev = eventsRef.current
       if (!ev) return
@@ -1156,8 +1156,8 @@ function useWsTrade(
       }
     }
 
-    // Fast-lane price: bookTicker mid — the scalpboard-style "live" feel.
-    // Exchange filter: the channel is keyed by symbol only; only the
+    // Fast-lane price: bookTicker mid — fallback for pairs with sparse
+    // trades. Exchange filter: the channel is keyed by symbol only; only the
     // matching exchange's mid reaches this chart.
     const priceChannel = `price:${symbol}`
     const unsubPrice = wsOnChannel(priceChannel, (msg) => {
@@ -1165,8 +1165,11 @@ function useWsTrade(
       const d = msg.data as { symbol: string; exchange?: string; price: number } | undefined
       if (!d || typeof d.price !== 'number' || !isFinite(d.price) || d.price <= 0) return
       if (exchange && d.exchange && d.exchange !== exchange) return
-      lastMidTickAtRef.current = Date.now()
       if (lastUpdateRef) lastUpdateRef.current = Date.now()
+
+      // Trades are the true price — skip the mid entirely while prints are
+      // flowing so the mid never wobbles the forming bar within the spread.
+      if (Date.now() - lastTradeAtRef.current < 1000) return
 
       const ev = eventsRef.current
       if (!ev) return

@@ -17,6 +17,10 @@ export const adapters: ExchangeAdapter[] = [
 
 const tickerMap = new Map<string, UnifiedTicker>()
 
+// Last forwarded bookTicker mid per symbol:exchange — dedupe guard for the
+// `price:` fast lane so an unchanged mid isn't re-broadcast on every event.
+const lastMidCache = new Map<string, number>()
+
 // --- Configurable exchange priority (env overrides hardcoded defaults) ---
 
 const DEFAULT_PRIORITY: Record<string, number> = {
@@ -273,8 +277,18 @@ export function startAggregator() {
     // Best bid/ask midpoint → live price for top liquid pairs (bookTicker).
     // Optional capability — only adapters that expose it participate; others
     // keep their price updates on aggTrade/miniTicker as before.
+    //
+    // The mid must NOT overwrite the ticker map price: it sits inside the
+    // spread and wobbles ±spread/2 on thin books, making the displayed price
+    // flicker around the true last-trade price (which trading terminals show
+    // and which arrives via aggTrade + miniTicker). The mid only feeds the
+    // per-symbol `price:` fast lane — the client uses it as a fallback for
+    // pairs with sparse trades.
     adapter.onBookTicker?.((symbol, mid) => {
-      if (!updateTickerPrice(symbol, adapter.exchange, mid)) return
+      if (!isFinite(mid) || mid <= 0) return
+      const lastKey = `${symbol}:${adapter.exchange}`
+      if (lastMidCache.get(lastKey) === mid) return
+      lastMidCache.set(lastKey, mid)
       // Fast-lane: focused charts subscribe to `price:<symbol>` and get the
       // mid instantly (no 40ms batch) — the same immediacy candle/trade
       // channels already have. Redis keeps broadcast-only nodes in sync.
