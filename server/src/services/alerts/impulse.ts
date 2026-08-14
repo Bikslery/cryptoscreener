@@ -1,5 +1,24 @@
 import type { UnifiedCandle, UnifiedTicker, ImpulseAlertCondition, ImpulseExchangeCondition } from '../../types.js'
 
+export const DEFAULT_IMPULSE_EXCHANGES: ImpulseExchangeCondition[] = [
+  { exchange: 'binance-futures', minVolume24h: 0 },
+  { exchange: 'binance-spot', minVolume24h: 0 },
+  { exchange: 'bybit-futures', minVolume24h: 0 },
+  { exchange: 'okx-spot', minVolume24h: 0 },
+]
+
+/** Legacy pre-upgrade rows {percent, within} get the new defaults in memory. */
+export function normalizeImpulseCondition(cond: ImpulseAlertCondition): ImpulseAlertCondition {
+  return {
+    percent: typeof cond.percent === 'number' ? cond.percent : 1,
+    timeframe: cond.timeframe === '1m' || cond.timeframe === '5m' ? cond.timeframe : '5m',
+    direction: cond.direction === 'up' || cond.direction === 'down' || cond.direction === 'both' ? cond.direction : 'both',
+    volumeSpike: typeof cond.volumeSpike === 'number' && cond.volumeSpike > 0 ? cond.volumeSpike : 0,
+    exchanges: Array.isArray(cond.exchanges) && cond.exchanges.length > 0 ? cond.exchanges : DEFAULT_IMPULSE_EXCHANGES,
+    lastFiredCandleTime: cond.lastFiredCandleTime,
+  }
+}
+
 /**
  * Pick the ticker for a symbol following the condition's exchange order:
  * the first exchange in the array that has a ticker for the symbol AND whose

@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { useAlertStore, useCoinListStore, useUIStore } from '../../store'
 import { formatPrice, extractBaseAsset } from '../../utils/format'
-import { Bell, TrendingUp, List, BellOff, X, Plus } from 'lucide-react'
+import { Bell, TrendingUp, List, X, Plus } from 'lucide-react'
 
 const ALERT_STYLES: Record<string, { bg: string; border: string; text: string; label: string; icon: any }> = {
   price: { bg: 'bg-[#3b82f6]/12', border: 'border-[#3b82f6]/30', text: 'text-[#3b82f6]', label: 'Пересечение цены', icon: Bell },
@@ -19,7 +19,7 @@ function impulseConditionLine(condition: any): string {
 }
 
 export function AlertStack() {
-  const { alerts, dismissAlert, muteAlert } = useAlertStore()
+  const { alerts, dismissAlert } = useAlertStore()
   const coinMap = useCoinListStore(s => s.coinMap)
   const setShowProfile = useUIStore(s => s.setShowProfile)
 
@@ -90,13 +90,8 @@ export function AlertStack() {
                   {count}
                 </span>
                 <button
-                  className="clinic-btn clinic-btn-ghost p-1"
-                  onClick={(e) => { e.stopPropagation(); muteAlert(alert.id) }}
-                >
-                  <BellOff size={12} />
-                </button>
-                <button
                   className="clinic-btn clinic-btn-danger p-1"
+                  title="Удалить алерт"
                   onClick={(e) => { e.stopPropagation(); dismissAlert(alert.id) }}
                 >
                   <X size={12} />

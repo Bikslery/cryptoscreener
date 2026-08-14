@@ -4,8 +4,8 @@ import { broadcast } from '../../ws/hub.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 import { prisma } from '../../db/index.js'
 import { sendTelegramMessage } from '../telegram/bot.js'
-import { pickExchangeTicker, lastFinalCandleIndex, matchesImpulseCandle } from './impulse.js'
-import type { PriceAlertCondition, ImpulseAlertCondition, ImpulseExchangeCondition, UnifiedCandle, UnifiedTicker } from '../../types.js'
+import { pickExchangeTicker, lastFinalCandleIndex, matchesImpulseCandle, normalizeImpulseCondition } from './impulse.js'
+import type { PriceAlertCondition, ImpulseAlertCondition, UnifiedCandle, UnifiedTicker } from '../../types.js'
 import { formatPriceByPrecision, extractBaseAsset } from '../../utils/format.js'
 
 let checkInterval: ReturnType<typeof setInterval> | null = null
@@ -16,30 +16,14 @@ const WARM_BATCH = 15
 const WARM_CANDLE_LIMIT = 40
 let warmCursor = 0
 
-const DEFAULT_IMPULSE_EXCHANGES: ImpulseExchangeCondition[] = [
-  { exchange: 'binance-futures', minVolume24h: 0 },
-  { exchange: 'binance-spot', minVolume24h: 0 },
-  { exchange: 'bybit-futures', minVolume24h: 0 },
-  { exchange: 'okx-spot', minVolume24h: 0 },
-]
-
-/** Legacy pre-upgrade rows {percent, within} get the new defaults in memory. */
-function normalizeImpulseCondition(cond: ImpulseAlertCondition): ImpulseAlertCondition {
-  return {
-    percent: typeof cond.percent === 'number' ? cond.percent : 1,
-    timeframe: cond.timeframe === '1m' || cond.timeframe === '5m' ? cond.timeframe : '5m',
-    direction: cond.direction === 'up' || cond.direction === 'down' || cond.direction === 'both' ? cond.direction : 'both',
-    volumeSpike: typeof cond.volumeSpike === 'number' && cond.volumeSpike > 0 ? cond.volumeSpike : 0,
-    exchanges: Array.isArray(cond.exchanges) && cond.exchanges.length > 0 ? cond.exchanges : DEFAULT_IMPULSE_EXCHANGES,
-    lastFiredCandleTime: cond.lastFiredCandleTime,
-  }
-}
-
 export function startAlertEngine() {
   checkInterval = setInterval(async () => {
     try {
+      // Every active alert fires on every match — there is no mute/off switch
+      // in the product: an alert is always armed once created, and impulse
+      // alerts re-arm after each firing (price alerts are one-shot by design).
       const activeAlerts = await prisma.alert.findMany({
-        where: { active: true, muted: false },
+        where: { active: true },
         take: 500,
       })
 

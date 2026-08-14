@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { pickExchangeTicker, lastFinalCandleIndex, matchesImpulseCandle } from '../src/services/alerts/impulse.js'
+import {
+  pickExchangeTicker,
+  lastFinalCandleIndex,
+  matchesImpulseCandle,
+  normalizeImpulseCondition,
+  DEFAULT_IMPULSE_EXCHANGES,
+} from '../src/services/alerts/impulse.js'
 import { validateImpulseCondition, validatePriceCondition, validateListingCondition } from '../src/services/alerts/validate.js'
 import type { ImpulseAlertCondition, UnifiedCandle, UnifiedTicker } from '../src/types.js'
 
@@ -123,6 +129,28 @@ describe('matchesImpulseCandle', () => {
     const baseline = Array.from({ length: 10 }, (_, i) => candle(i, 1, 1, 1, 1, 100))
     const big = candle(40, 100, 104, 100, 102, 250)
     expect(matchesImpulseCandle(cond({ percent: 2, volumeSpike: 2 }), big, baseline)).toBe(false)
+  })
+})
+
+describe('normalizeImpulseCondition', () => {
+  it('fills defaults for legacy {percent, within} rows so they keep firing', () => {
+    const legacy = { percent: 5, within: '5m' } as unknown as ImpulseAlertCondition
+    const n = normalizeImpulseCondition(legacy)
+    expect(n.percent).toBe(5)
+    expect(n.timeframe).toBe('5m')
+    expect(n.direction).toBe('both')
+    expect(n.volumeSpike).toBe(0)
+    expect(n.exchanges).toEqual(DEFAULT_IMPULSE_EXCHANGES)
+  })
+
+  it('passes valid conditions through unchanged', () => {
+    const c = cond({ percent: 3, direction: 'down', volumeSpike: 2 })
+    expect(normalizeImpulseCondition(c)).toEqual(c)
+  })
+
+  it('preserves lastFiredCandleTime', () => {
+    const c = cond({ lastFiredCandleTime: 123 })
+    expect(normalizeImpulseCondition(c).lastFiredCandleTime).toBe(123)
   })
 })
 

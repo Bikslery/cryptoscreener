@@ -626,7 +626,6 @@ interface AlertStore {
   /** Show an alert the user just created (from the form or the chart bell tool). */
   addCreated: (alert: AlertType) => void
   dismissAlert: (id: string) => void
-  muteAlert: (id: string) => void
 }
 
 export const useAlertStore = create<AlertStore>((set) => ({
@@ -672,10 +671,6 @@ export const useAlertStore = create<AlertStore>((set) => ({
     emitAlertRemoved(id)
     api.delete(`/alerts/${id}`).catch(() => { /* already gone */ })
   },
-
-  muteAlert: (id) => set((s) => ({
-    alerts: s.alerts.map(a => a.id === id ? { ...a, muted: true } : a),
-  })),
 }))
 
 interface AuthStore {
