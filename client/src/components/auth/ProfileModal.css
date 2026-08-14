@@ -160,7 +160,7 @@
   align-items: center;
   gap: 0.6rem;
   width: 100%;
-  margin-bottom: 1rem;
+  margin-bottom: 0;
   padding: 0;
   background: none;
   border: none;
@@ -174,8 +174,26 @@
   color: #fff;
 }
 
-.profile-section.collapsed .section-header {
+/* Smooth open/close: grid-template-rows 0fr→1fr animates any content height
+   without a magic max-height. Visibility flips at the end of the collapse so
+   hidden inputs are not focusable; content stays mounted (form state kept). */
+.section-body {
+  display: grid;
+  grid-template-rows: 0fr;
   margin-bottom: 0;
+  visibility: hidden;
+  transition: grid-template-rows 0.25s ease, margin-bottom 0.25s ease, visibility 0.25s;
+}
+
+.section-body-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.profile-section.open .section-body {
+  grid-template-rows: 1fr;
+  margin-bottom: 1rem;
+  visibility: visible;
 }
 
 .section-chevron {

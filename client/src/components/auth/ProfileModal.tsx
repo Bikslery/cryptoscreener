@@ -14,9 +14,10 @@ import './ProfileModal.css'
 type ResetStep = 'idle' | 'code' | 'password' | 'done'
 
 /**
- * Collapsible cabinet section: the header is a full-width button — content
- * renders only while open. Every section is independent (plain toggle, not
- * an accordion) and starts collapsed.
+ * Collapsible cabinet section: the header is a full-width button; the body
+ * animates open/closed via a grid-rows transition (dynamic content height,
+ * no magic max-height). Content stays mounted, so form state survives
+ * collapsing. Every section is independent (plain toggle) and starts closed.
  */
 function ProfileSection({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
   const [open, setOpen] = useState(false)
@@ -27,7 +28,9 @@ function ProfileSection({ icon, title, children }: { icon: React.ReactNode; titl
         <h2>{title}</h2>
         <ChevronDown size={14} className="section-chevron" />
       </button>
-      {open && children}
+      <div className="section-body">
+        <div className="section-body-inner">{children}</div>
+      </div>
     </div>
   )
 }
