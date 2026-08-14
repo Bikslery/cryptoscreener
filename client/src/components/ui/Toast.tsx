@@ -25,14 +25,14 @@ function AlertCard({ id, data, count, onClose }: {
   onClose: (id: number, closeAll: boolean) => void
 }) {
   return (
-    <div className="pointer-events-auto relative w-[300px] font-mono rounded-[6px] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b]">
+    <div className="pointer-events-auto relative w-[320px] font-mono rounded-[6px] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b]">
       <div className="flex">
-        <div className={`w-[7px] self-stretch shrink-0 ${BAR[data.type] ?? BAR.price}`} />
-        <div className="flex-1 min-w-0 relative pl-[15px] pr-2.5 pt-6 pb-5">
-          <div className="flex items-center justify-between mb-5">
-            <span className="text-[13px] text-[#d4d4d4]">{data.label}</span>
+        <div className={`w-2 self-stretch shrink-0 ${BAR[data.type] ?? BAR.price}`} />
+        <div className="flex-1 min-w-0 relative pl-4 pr-4 pt-7 pb-6">
+          <div className="flex items-center justify-between mb-6">
+            <span className="text-[14px] text-[#d4d4d4]">{data.label}</span>
             <button
-              className="w-6 h-6 flex items-center justify-center rounded cursor-pointer text-[#d4d4d4] transition-colors duration-150 hover:bg-white/[0.05]"
+              className="w-7 h-7 flex items-center justify-center rounded cursor-pointer text-[#d4d4d4] transition-colors duration-150 hover:bg-white/[0.05]"
               title="Закрыть (Ctrl+клик — закрыть все)"
               data-testid="alert-toast-close"
               onClick={(e) => {
@@ -40,25 +40,25 @@ function AlertCard({ id, data, count, onClose }: {
                 onClose(id, e.ctrlKey || e.metaKey)
               }}
             >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M18 6 6 18" />
                 <path d="m6 6 12 12" />
               </svg>
             </button>
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-[32px] font-bold text-[#d4d4d4] leading-none">{data.symbol}</span>
+          <div className="flex items-baseline gap-2.5">
+            <span className="text-[36px] font-bold text-[#d4d4d4] leading-none">{data.symbol}</span>
             {data.accent && (
-              <span className={`text-[18px] font-bold leading-none ${ACCENT[data.accentTone] ?? ACCENT.neutral}`}>
+              <span className={`text-[20px] font-bold leading-none ${ACCENT[data.accentTone] ?? ACCENT.neutral}`}>
                 {data.accent}
               </span>
             )}
           </div>
-          <div className="mt-2 pr-6 text-[13px] text-[#d4d4d4]/80 truncate">{data.sub}</div>
+          <div className="mt-3 pr-7 text-[14px] text-[#d4d4d4]/80 truncate">{data.sub}</div>
         </div>
       </div>
       {count > 1 && (
-        <span className="absolute bottom-2.5 right-2.5 text-[12px] text-[#525252]">{count}</span>
+        <span className="absolute bottom-3 right-3 text-[13px] text-[#525252]">{count}</span>
       )}
     </div>
   )
