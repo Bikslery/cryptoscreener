@@ -833,7 +833,7 @@
 }
 
 .alert-exchange-option.selected {
-  background: rgba(111, 77, 179, 0.18);
+  background: rgba(255, 255, 255, 0.15);
   color: #ffffff;
 }
 
@@ -853,8 +853,8 @@
 }
 
 .alert-master-row:has(input:checked) {
-  border-color: rgba(111, 77, 179, 0.4);
-  box-shadow: 0 0 14px rgba(111, 77, 179, 0.12);
+  border-color: rgba(255, 255, 255, 0.35);
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.12);
 }
 
 .alert-master-info {
@@ -907,9 +907,9 @@
 }
 
 .alert-master-switch input:checked + .track {
-  background: rgba(111, 77, 179, 0.75);
-  border-color: rgba(111, 77, 179, 0.9);
-  box-shadow: 0 0 14px rgba(111, 77, 179, 0.35);
+  background: rgba(255, 255, 255, 0.85);
+  border-color: #ffffff;
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.35);
 }
 
 .alert-master-switch input:checked + .track::after {
