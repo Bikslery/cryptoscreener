@@ -36,11 +36,15 @@ export function pickExchangeTicker(
   return null
 }
 
-/** Index of the last CLOSED candle (forming candles are not eligible), -1 if none. */
-export function lastFinalCandleIndex(candles: UnifiedCandle[]): number {
-  let idx = candles.length - 1
-  while (idx >= 0 && !candles[idx].isFinal) idx--
-  return idx
+/**
+ * Index of the last candle. Forming candles are eligible — the alert fires
+ * as soon as the moving candle meets the conditions, not when it closes.
+ * The WS kline lane (watched symbols) and the REST warm loop (unwatched)
+ * both refresh the last cache row continuously, and lastFiredCandleTime
+ * prevents refiring on the same candle.
+ */
+export function lastCandleIndex(candles: UnifiedCandle[]): number {
+  return candles.length - 1
 }
 
 /**

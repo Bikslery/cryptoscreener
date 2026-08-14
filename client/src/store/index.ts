@@ -4,6 +4,7 @@ import type { UnifiedTicker, Timeframe, ChartBlock, Exchange, Alert as AlertType
 import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/ws.js'
 import { notifyNewAlert } from '../services/alert-notify.js'
 import { emitAlertRemoved } from '../services/alert-drawing-sync.js'
+import { useToastStore } from './toast.js'
 import { getOrFetchHistory, EXPANDED_CANDLE_LIMIT } from '../services/candle-prefetch.js'
 import api from '../services/api.js'
 import { VOLUME_HIGH_THRESHOLD, VOLUME_FILTER_DEFAULT } from '../constants/volume.js'
@@ -652,6 +653,12 @@ export const useAlertStore = create<AlertStore>((set) => ({
       notifyNewAlert(alert, {
         sound: settings?.notifySound !== false,
         volume: settings?.notifyVolume ?? 1,
+      })
+      // Corner toast with the ticker and movement/price line (stacked,
+      // auto-closes after the configured duration, Ctrl+click closes all).
+      useToastStore.getState().showAlert(alert, {
+        position: settings?.notifyToastPosition ?? 'bottom-right',
+        duration: (settings?.notifyToastDurationSec ?? 20) * 1000,
       })
     })
     return unsub

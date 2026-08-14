@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   pickExchangeTicker,
-  lastFinalCandleIndex,
+  lastCandleIndex,
   matchesImpulseCandle,
   normalizeImpulseCondition,
   DEFAULT_IMPULSE_EXCHANGES,
@@ -85,18 +85,19 @@ describe('pickExchangeTicker', () => {
   })
 })
 
-describe('lastFinalCandleIndex', () => {
-  it('returns the last closed candle, skipping forming ones', () => {
+describe('lastCandleIndex', () => {
+  it('always returns the last candle — forming candles are eligible', () => {
     const candles = [
       candle(1, 1, 1, 1, 1, 1),
       candle(2, 1, 1, 1, 1, 1),
       candle(3, 1, 1, 1, 1, 1, false),
     ]
-    expect(lastFinalCandleIndex(candles)).toBe(1)
+    expect(lastCandleIndex(candles)).toBe(2)
   })
 
-  it('returns -1 when there is no closed candle', () => {
-    expect(lastFinalCandleIndex([candle(1, 1, 1, 1, 1, 1, false)])).toBe(-1)
+  it('returns the last index for closed-only series too', () => {
+    const candles = [candle(1, 1, 1, 1, 1, 1), candle(2, 1, 1, 1, 1, 1)]
+    expect(lastCandleIndex(candles)).toBe(1)
   })
 })
 
@@ -123,6 +124,11 @@ describe('matchesImpulseCandle', () => {
     const big = candle(40, 100, 104, 100, 102, 250)
     expect(matchesImpulseCandle(cond({ percent: 2, volumeSpike: 2 }), big, baseline)).toBe(true)
     expect(matchesImpulseCandle(cond({ percent: 2, volumeSpike: 3 }), big, baseline)).toBe(false)
+  })
+
+  it('matches a forming candle the same way as a closed one', () => {
+    const forming = candle(10, 100, 104, 100, 102, 1, false)
+    expect(matchesImpulseCandle(cond({ percent: 2, direction: 'both' }), forming, [])).toBe(true)
   })
 
   it('fails the spike when the baseline is shorter than 30 candles', () => {

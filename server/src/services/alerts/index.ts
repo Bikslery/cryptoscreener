@@ -4,7 +4,7 @@ import { broadcast } from '../../ws/hub.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 import { prisma } from '../../db/index.js'
 import { sendTelegramMessage } from '../telegram/bot.js'
-import { pickExchangeTicker, lastFinalCandleIndex, matchesImpulseCandle, normalizeImpulseCondition } from './impulse.js'
+import { pickExchangeTicker, lastCandleIndex, matchesImpulseCandle, normalizeImpulseCondition } from './impulse.js'
 import type { PriceAlertCondition, ImpulseAlertCondition, UnifiedCandle, UnifiedTicker } from '../../types.js'
 import { formatPriceByPrecision, extractBaseAsset } from '../../utils/format.js'
 
@@ -56,6 +56,7 @@ export function startAlertEngine() {
             await fireAlert(alert, match.ticker.price, match.ticker.symbol, match.ticker.pricePrecision, {
               keepActive: true,
               impulseCandleTime: match.candle.time,
+              movePct: match.movePct,
             })
           }
         }
@@ -79,12 +80,13 @@ export function stopAlertEngine() {
 
 /**
  * Scan the top coins for the first symbol satisfying ALL impulse conditions:
- * exchange priority + min 24h volume from the ticker, a FINAL candle of the
- * configured timeframe moving >= percent% with the right direction, and a
- * volume spike vs the 30-candle baseline (when enabled). Only closed candles
- * qualify — a forming candle would fire repeatedly on every engine tick.
+ * exchange priority + min 24h volume from the ticker, the LAST candle (may
+ * still be forming — alerts fire as soon as the data shows the move, not at
+ * candle close), movement >= percent% with the right direction, and a volume
+ * spike vs the 30-candle baseline (when enabled). lastFiredCandleTime stops
+ * refiring on the same candle.
  */
-async function findImpulseMatch(symbol: string, cond: ImpulseAlertCondition): Promise<{ ticker: UnifiedTicker; candle: UnifiedCandle } | null> {
+async function findImpulseMatch(symbol: string, cond: ImpulseAlertCondition): Promise<{ ticker: UnifiedTicker; candle: UnifiedCandle; movePct: number } | null> {
   const allTickers = getAllTickers()
   const bySymbol = new Map<string, Map<string, UnifiedTicker>>()
   for (const t of allTickers) {
@@ -110,15 +112,17 @@ async function findImpulseMatch(symbol: string, cond: ImpulseAlertCondition): Pr
     const candles = getCachedCandles(coin.symbol, cond.timeframe, ticker.exchange)
     if (!candles || candles.length < 2) continue
 
-    // Last CLOSED candle only — forming candles are not eligible.
-    const idx = lastFinalCandleIndex(candles)
-    if (idx < 0) continue
+    // The last candle qualifies even while forming — the alert fires the
+    // moment the data shows the move; the dedupe below (per candle time)
+    // prevents firing again as the same candle keeps growing.
+    const idx = lastCandleIndex(candles)
     const candle = candles[idx]
     if (candle.time <= (cond.lastFiredCandleTime || 0)) continue
 
-    if (!matchesImpulseCandle(cond, candle, candles.slice(idx - 30, idx))) continue
+    if (!matchesImpulseCandle(cond, candle, candles.slice(Math.max(0, idx - 30), idx))) continue
 
-    return { ticker, candle }
+    const movePct = candle.low > 0 ? ((candle.high - candle.low) / candle.low) * 100 : 0
+    return { ticker, candle, movePct: Math.round(movePct * 100) / 100 }
   }
   return null
 }
@@ -163,6 +167,7 @@ function publishAlert(data: unknown) {
 interface FireOptions {
   keepActive?: boolean
   impulseCandleTime?: number
+  movePct?: number
 }
 
 async function fireAlert(alert: any, price: number, overrideSymbol?: string, pricePrecision?: number, opts: FireOptions = {}) {
@@ -190,6 +195,7 @@ async function fireAlert(alert: any, price: number, overrideSymbol?: string, pri
     condition,
     triggeredAt: Date.now(),
     active: opts.keepActive ? true : false,
+    ...(opts.movePct !== undefined ? { movePct: opts.movePct } : {}),
   }
 
   broadcast({ type: 'alert', data: alertData })
@@ -211,6 +217,7 @@ async function fireAlert(alert: any, price: number, overrideSymbol?: string, pri
     if (alert.type === 'impulse') {
       const dir = condition.direction === 'up' ? 'вверх' : condition.direction === 'down' ? 'вниз' : 'любое'
       text += `\nТФ: ${condition.timeframe} · направление: ${dir}` +
+        (opts.movePct !== undefined ? ` · движение: ${opts.movePct}%` : '') +
         (condition.volumeSpike > 0 ? ` · объём ×${condition.volumeSpike}` : '')
     }
     await sendTelegramMessage(user.telegramChatId, text)

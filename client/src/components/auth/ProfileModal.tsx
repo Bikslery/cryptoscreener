@@ -108,6 +108,41 @@ export default function ProfileModal() {
     }, 400)
   }
 
+  // Fired-alert toast: corner position + auto-close duration (seconds).
+  const [toastPosition, setToastPosition] = useState<'bottom-right' | 'bottom-left'>(settings?.notifyToastPosition ?? 'bottom-right')
+  const [toastDuration, setToastDuration] = useState(settings?.notifyToastDurationSec ?? 20)
+  const toastSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    setToastPosition(settings?.notifyToastPosition ?? 'bottom-right')
+  }, [settings?.notifyToastPosition])
+
+  useEffect(() => {
+    setToastDuration(settings?.notifyToastDurationSec ?? 20)
+  }, [settings?.notifyToastDurationSec])
+
+  const handleToastPositionChange = (p: 'bottom-right' | 'bottom-left') => {
+    setToastPosition(p)
+    if (toastSaveTimer.current) clearTimeout(toastSaveTimer.current)
+    toastSaveTimer.current = setTimeout(() => {
+      updateSettings({ notifyToastPosition: p }).catch(() => {})
+    }, 400)
+  }
+
+  const handleToastDurationChange = (sec: number) => {
+    setToastDuration(sec)
+    if (toastSaveTimer.current) clearTimeout(toastSaveTimer.current)
+    toastSaveTimer.current = setTimeout(() => {
+      updateSettings({ notifyToastDurationSec: sec }).catch(() => {})
+    }, 400)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (toastSaveTimer.current) clearTimeout(toastSaveTimer.current)
+    }
+  }, [])
+
   useEffect(() => {
     return () => {
       if (notifySaveTimer.current) clearTimeout(notifySaveTimer.current)
@@ -1096,6 +1131,40 @@ export default function ProfileModal() {
                 data-testid="notify-volume-slider"
               />
               <span className="profile-volume-value">{Math.round(notifyVolume * 100)}%</span>
+            </div>
+          </div>
+
+          <div className="profile-field">
+            <label>Позиция всплывающего окна</label>
+            <select
+              className="profile-alert-select"
+              style={{ width: '100%' }}
+              value={toastPosition}
+              onChange={(e) => handleToastPositionChange(e.target.value as 'bottom-right' | 'bottom-left')}
+              data-testid="toast-position-select"
+            >
+              <option value="bottom-right">справа снизу</option>
+              <option value="bottom-left">слева снизу</option>
+            </select>
+          </div>
+
+          <div className="profile-field">
+            <label>Автозакрытие окна, сек</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={5}
+                max={120}
+                step={5}
+                value={toastDuration}
+                onChange={(e) => handleToastDurationChange(Number(e.target.value))}
+                className="profile-scale-slider"
+                data-testid="toast-duration-slider"
+              />
+              <span className="profile-scale-value">{toastDuration}с</span>
+            </div>
+            <div className="profile-scale-hint">
+              Окна складываются друг над другом; Ctrl+клик по крестику закрывает все
             </div>
           </div>
 

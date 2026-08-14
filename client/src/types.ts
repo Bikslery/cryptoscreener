@@ -85,6 +85,8 @@ export interface Alert {
   condition: PriceAlertCondition | ImpulseAlertCondition | ListingAlertCondition
   /** Price at trigger time (present on fired/WS alert payloads). */
   price?: number
+  /** Actual candle move % at trigger time (impulse fired payloads). */
+  movePct?: number
   active: boolean
   muted: boolean
   triggeredAt: number | null
@@ -236,6 +238,9 @@ export interface UserSettings {
   // Alert notifications: play a sound on fire (default true) and its volume (0–1).
   notifySound?: boolean
   notifyVolume?: number
+  // Fired-alert toast: corner position and auto-close duration in seconds (default 20).
+  notifyToastPosition?: 'bottom-right' | 'bottom-left'
+  notifyToastDurationSec?: number
   // Cascade engine configuration (all parameters, cabinet UI).
   cascades?: Partial<CascadesConfig>
   // Indicator column configuration: coin list columns + chart header fields.
