@@ -249,7 +249,7 @@ function initMatrixDrops(count: number, _w: number, _h: number): MatrixDrop[] {
 }
 
 function drawMatrix(ctx: CanvasRenderingContext2D, drops: MatrixDrop[], _mouse: { x: number; y: number }, _w: number, h: number) {
-  ctx.font = '14px JetBrains Mono, monospace'
+  ctx.font = '14px "Noto Sans", sans-serif'
 
   for (const d of drops) {
     d.y += d.speed

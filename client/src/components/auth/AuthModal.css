@@ -330,7 +330,7 @@
 /* ── Code input ── */
 
 .auth-code-input {
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace !important;
+  font-family: 'Noto Sans', ui-sans-serif, system-ui, sans-serif !important;
   font-size: 1.6rem !important;
   letter-spacing: 0.8em !important;
   text-align: center !important;

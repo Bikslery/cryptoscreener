@@ -84,7 +84,7 @@ export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage,
   return (
     <div
       className={`grid cursor-pointer transition-colors duration-100 ${bg} ${borderL} ${borderB}`}
-      style={{ gridTemplateColumns: ROW_COLS, height: '32px', fontFamily: "'JetBrains Mono', monospace" }}
+      style={{ gridTemplateColumns: ROW_COLS, height: '32px' }}
       onMouseDown={() => onPrefetch(coin.symbol)}
       onClick={() => onClick(coin.symbol)}
     >
@@ -163,7 +163,7 @@ export function CoinList() {
     <div className="w-[480px] h-full flex flex-col bg-[#0a0a0a]">
       <div
         className="grid border-b border-[#1f1f1f] bg-[#0e0e0e] text-[11px] select-none flex-shrink-0"
-        style={{ gridTemplateColumns: ROW_COLS, fontFamily: "'JetBrains Mono', monospace" }}
+        style={{ gridTemplateColumns: ROW_COLS }}
       >
         {COLS.map((col, i) => (
           <div

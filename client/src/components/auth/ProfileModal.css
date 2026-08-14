@@ -319,7 +319,7 @@
 .profile-reset-code-input {
   width: 100%;
   padding: 0.75rem 0.5rem;
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-family: 'Noto Sans', ui-sans-serif, system-ui, sans-serif;
   font-size: 1.5rem;
   letter-spacing: 0.8em;
   text-align: center;
@@ -339,7 +339,7 @@
 .profile-hotkey-input {
   width: 140px;
   padding: 0.4rem 0.5rem;
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-family: 'Noto Sans', ui-sans-serif, system-ui, sans-serif;
   font-size: 0.85rem;
   text-align: center;
   background: rgba(255, 255, 255, 0.04);

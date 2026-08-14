@@ -44,7 +44,7 @@ export function TopBar() {
   return (
     <div
       className="flex items-center justify-between gap-3 pr-4 h-[48px] bg-[#0e0e0e] border-b border-[#1f1f1f] flex-shrink-0 select-none overflow-x-auto"
-      style={{ fontFamily: "'JetBrains Mono', monospace", paddingLeft: '45px' }}
+      style={{ paddingLeft: '45px' }}
     >
       {/* Лево: логотип */}
       <div className="flex items-center gap-2 shrink-0">

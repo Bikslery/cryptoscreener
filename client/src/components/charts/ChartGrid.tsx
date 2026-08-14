@@ -1294,7 +1294,7 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol, chartExchange }:
         <span className="text-[9px] font-bold leading-none text-[#b3b3b3]">
           {badge}
         </span>
-        <span className="font-bold text-[11px] text-[#e0e0e0] truncate" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+        <span className="font-bold text-[11px] text-[#e0e0e0] truncate">
           {extractBaseAsset(symbol)}
         </span>
       </div>
@@ -1584,7 +1584,7 @@ const MiniChart = memo(function MiniChart({
   return (
   <div className="relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px]">
     <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
-      <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+      <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase">
         {extractBaseAsset(symbol)}
       </span>
     </div>
@@ -1840,7 +1840,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
         <span className="text-[10px] font-bold leading-none text-[#b3b3b3]">
           {badge}
         </span>
-        <span className="font-bold text-[14px] text-[#f0f0f0] tracking-tight" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+        <span className="font-bold text-[14px] text-[#f0f0f0] tracking-tight">
           {extractBaseAsset(symbol)}
         </span>
       </div>
