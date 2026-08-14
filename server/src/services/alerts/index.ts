@@ -36,6 +36,12 @@ export function startAlertEngine() {
         impulseTfs.add(normalizeImpulseCondition(JSON.parse(alert.condition)).timeframe)
       }
 
+      // Burst guard: even if the snapshot above contains stale duplicates
+      // (created right after the query), only ONE impulse fires per user per
+      // tick — a single market move can never fan out into a dozen identical
+      // notifications.
+      const firedImpulseByUser = new Set<string>()
+
       for (const alert of activeAlerts) {
         const cond = JSON.parse(alert.condition)
 
@@ -56,6 +62,8 @@ export function startAlertEngine() {
           if (isImpulseMuted(impulseCond)) continue
           const match = await findImpulseMatch(alert.symbol, impulseCond)
           if (match) {
+            if (firedImpulseByUser.has(alert.userId)) continue
+            firedImpulseByUser.add(alert.userId)
             await fireAlert(alert, match.ticker.price, match.ticker.symbol, match.ticker.pricePrecision, {
               keepActive: true,
               impulseCandleTime: match.candle.time,

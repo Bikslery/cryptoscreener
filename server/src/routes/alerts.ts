@@ -69,6 +69,16 @@ router.post('/', writeLimiter, async (req, res) => {
       condition: JSON.stringify(condition),
     },
   })
+
+  // One active impulse alert per user — a new one replaces all others so a
+  // single market move can never produce a burst of duplicate notifications.
+  if (type === 'impulse') {
+    await prisma.alert.updateMany({
+      where: { userId, type: 'impulse', active: true, NOT: { id: alert.id } },
+      data: { active: false },
+    })
+  }
+
   res.json({ ...alert, condition: JSON.parse(alert.condition) })
 })
 
@@ -130,6 +140,16 @@ router.patch('/:id', writeLimiter, async (req, res) => {
   }
 
   const alert = await prisma.alert.update({ where: { id, userId }, data })
+
+  // Activating an impulse alert silences every other active impulse alert of
+  // the user — duplicates must never fire a burst on the same move.
+  if (existing.type === 'impulse' && active === true) {
+    await prisma.alert.updateMany({
+      where: { userId, type: 'impulse', active: true, NOT: { id } },
+      data: { active: false },
+    })
+  }
+
   res.json({ ...alert, condition: JSON.parse(alert.condition) })
 })
 
