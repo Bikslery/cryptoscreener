@@ -115,7 +115,14 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
           exchange,
           price,
           volume,
-          time: data.T / 1000,
+          // Binance `T` is milliseconds. Floor (not just divide) to whole
+          // epoch seconds — a bare `/1000` produces a fractional value
+          // (e.g. 1712345678.123) that flows straight through to the
+          // client's tick-window guard (`timeSec > candle.time`) and any
+          // future consumer that keys on `.time` for equality. Only the
+          // client's own second-candle-aggregator floors to ITS OWN bucket
+          // boundary, so nothing upstream can be relied on to normalize this.
+          time: Math.floor(data.T / 1000),
           isBuyerMaker,
         }
 
