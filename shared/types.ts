@@ -47,9 +47,18 @@ export interface PriceAlertCondition {
   direction: 'above' | 'below'
 }
 
+export interface ImpulseExchangeCondition {
+  exchange: Exchange
+  minVolume24h: number
+}
+
 export interface ImpulseAlertCondition {
   percent: number
-  within: string
+  timeframe: '1m' | '5m'
+  direction: 'up' | 'down' | 'both'
+  volumeSpike: number
+  exchanges: ImpulseExchangeCondition[]
+  lastFiredCandleTime?: number
 }
 
 export interface ListingAlertCondition {

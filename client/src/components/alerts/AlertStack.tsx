@@ -1,7 +1,5 @@
-import { useState, useMemo } from 'react'
-import { useAlertStore, useAuthStore, useCoinListStore } from '../../store'
-import type { Alert } from '../../types'
-import api from '../../services/api'
+import { useMemo } from 'react'
+import { useAlertStore, useCoinListStore, useUIStore } from '../../store'
 import { formatPrice, extractBaseAsset } from '../../utils/format'
 import { Bell, TrendingUp, List, BellOff, X, Plus } from 'lucide-react'
 
@@ -11,103 +9,19 @@ const ALERT_STYLES: Record<string, { bg: string; border: string; text: string; l
   impulse: { bg: 'bg-[#f59e0b]/12', border: 'border-[#f59e0b]/30', text: 'text-[#f59e0b]', label: 'Импульс', icon: TrendingUp },
 }
 
-function CreateAlertForm({ onClose }: { onClose: () => void }) {
-  const [type, setType] = useState<'price' | 'impulse'>('price')
-  const [symbol, setSymbol] = useState('')
-  const [price, setPrice] = useState('')
-  const [direction, setDirection] = useState<'above' | 'below'>('above')
-  const [percent, setPercent] = useState('5')
-  const { isLoggedIn } = useAuthStore()
+const IMPULSE_DIR_LABELS: Record<string, string> = { up: 'вверх', down: 'вниз', both: 'любое' }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!isLoggedIn) return
-    const condition = type === 'price'
-      ? { price: parseFloat(price), direction }
-      : { percent: parseFloat(percent), within: '5m' }
-
-    const res = await api.post('/alerts', { type, symbol: symbol.toUpperCase() || 'ANY', condition })
-    // Show the created alert in the list right away — not only when it fires.
-    useAlertStore.getState().addCreated(res.data as Alert)
-    onClose()
-  }
-
-  if (!isLoggedIn) {
-    return (
-      <div className="p-3 bg-[#141414] border border-[#1f1f1f] rounded-lg text-center">
-        <p className="text-[11px] text-[#888]">Авторизуйтесь для создания алертов</p>
-      </div>
-    )
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="p-3 bg-[#141414] border border-[#1f1f1f] rounded-lg space-y-2">
-      <div className="flex gap-1">
-        <button
-          type="button"
-          className={`clinic-btn clinic-btn-sm text-[10px] px-2 py-1 ${
-            type === 'price' ? 'clinic-btn-active' : 'clinic-btn-secondary'
-          }`}
-          onClick={() => setType('price')}
-        >
-          Цена
-        </button>
-        <button
-          type="button"
-          className={`clinic-btn clinic-btn-sm text-[10px] px-2 py-1 ${
-            type === 'impulse' ? 'clinic-btn-active' : 'clinic-btn-secondary'
-          }`}
-          onClick={() => setType('impulse')}
-        >
-          Импульс
-        </button>
-      </div>
-      <input
-        className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-2 py-1.5 text-[#e5e5e5] text-[11px] outline-none focus:border-[#555]"
-        placeholder="Тикер (например BTCUSDT)"
-        value={symbol}
-        onChange={(e) => setSymbol(e.target.value)}
-      />
-      {type === 'price' ? (
-        <div className="flex gap-1">
-          <input
-            className="flex-1 bg-[#0a0a0a] border border-[#2a2a2a] rounded px-2 py-1.5 text-[#e5e5e5] text-[11px] outline-none focus:border-[#555]"
-            placeholder="Цена"
-            type="number"
-            step="any"
-            value={price}
-            onChange={(e) => setPrice(e.target.value)}
-          />
-          <select
-            className="bg-[#0a0a0a] border border-[#2a2a2a] rounded px-1 py-1.5 text-[#e5e5e5] text-[11px] outline-none"
-            value={direction}
-            onChange={(e) => setDirection(e.target.value as any)}
-          >
-            <option value="above">Выше</option>
-            <option value="below">Ниже</option>
-          </select>
-        </div>
-      ) : (
-        <input
-          className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-2 py-1.5 text-[#e5e5e5] text-[11px] outline-none focus:border-[#555]"
-          placeholder="% изменения"
-          type="number"
-          value={percent}
-          onChange={(e) => setPercent(e.target.value)}
-        />
-      )}
-      <div className="flex gap-1 justify-end pt-1">
-        <button type="button" className="clinic-btn clinic-btn-secondary clinic-btn-sm text-[10px] px-2 py-1" onClick={onClose}>Отмена</button>
-        <button type="submit" className="clinic-btn clinic-btn-sm text-[10px] px-3 py-1 clinic-btn-exchange-active">Создать</button>
-      </div>
-    </form>
-  )
+function impulseConditionLine(condition: any): string {
+  const tf = condition?.timeframe ?? '5m'
+  const dir = IMPULSE_DIR_LABELS[condition?.direction] ?? 'любое'
+  const vol = condition?.volumeSpike > 0 ? ` · объём ×${condition.volumeSpike}` : ''
+  return `${condition?.percent ?? '?'}% ${tf} ${dir}${vol}`
 }
 
 export function AlertStack() {
   const { alerts, dismissAlert, muteAlert } = useAlertStore()
   const coinMap = useCoinListStore(s => s.coinMap)
-  const [showForm, setShowForm] = useState(false)
+  const setShowProfile = useUIStore(s => s.setShowProfile)
 
   const grouped = useMemo(() => alerts.reduce((acc: any, alert: any) => {
     const type = alert.type || 'price'
@@ -122,21 +36,16 @@ export function AlertStack() {
         <span className="text-[11px] font-bold text-white">Уведомления</span>
         <button
           className="clinic-btn clinic-btn-sm clinic-btn-exchange-active flex items-center gap-1 text-[10px] px-2 py-1"
-          onClick={() => setShowForm(true)}
+          title="Алерты настраиваются в личном кабинете"
+          onClick={() => setShowProfile(true)}
         >
           <Plus size={12} />
           Новый
         </button>
       </div>
 
-      {showForm && (
-        <div className="p-2 border-b border-[#1f1f1f] flex-shrink-0">
-          <CreateAlertForm onClose={() => setShowForm(false)} />
-        </div>
-      )}
-
       <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
-        {alerts.length === 0 && !showForm && (
+        {alerts.length === 0 && (
           <div className="text-center py-8 text-[#333] text-[11px]">Нет уведомлений</div>
         )}
 
@@ -170,7 +79,7 @@ export function AlertStack() {
                     </span>
                   )}
                   {alert.type === 'impulse' && (
-                    <span className={style.text}>{alert.condition?.percent}% движение</span>
+                    <span className={style.text}>{impulseConditionLine(alert.condition)}</span>
                   )}
                   {alert.exchange && <span className="ml-2 text-[#555]">{alert.exchange}</span>}
                 </div>

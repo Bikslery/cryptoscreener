@@ -638,10 +638,11 @@ export const useAlertStore = create<AlertStore>((set) => ({
       set((s) => {
         // The same alert id is usually already in the list as a CREATED entry
         // (added right when the user made it) — upgrade it to the fired event
-        // (price + triggeredAt) instead of showing a duplicate card.
+        // (price + triggeredAt) instead of showing a duplicate card. Re-armed
+        // alerts (impulse) stay active after firing — the event carries it.
         const existing = s.alerts.find(a => a.id === alert.id)
         if (existing) {
-          return { alerts: s.alerts.map(a => a.id === alert.id ? { ...a, ...alert, active: false } : a) }
+          return { alerts: s.alerts.map(a => a.id === alert.id ? { ...a, ...alert, active: alert.active ?? false } : a) }
         }
         const next = [alert, ...s.alerts]
         // Cap at 100 to prevent unbounded growth

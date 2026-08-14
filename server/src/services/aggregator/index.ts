@@ -609,7 +609,7 @@ function startCorrelationLoop() {
   }, 30_000)
 }
 
-function anyLimiterOverThreshold(): boolean {
+export function anyLimiterOverThreshold(): boolean {
   for (const a of adapters) {
     const limiter = a.getRateLimiter?.()
     if (limiter?.isOverThreshold()) return true
