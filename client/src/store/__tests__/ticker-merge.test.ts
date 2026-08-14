@@ -15,6 +15,9 @@ function t(symbol: string, exchange: Exchange, price: number, quoteVolume24h = 1
     quoteVolume24h,
     range1m: 0,
     natr5m: 0,
+    corrBtc: null,
+    tradesSpike: null,
+    volumeSpike: null,
     pricePrecision: 2,
     timestamp: 0,
   }
@@ -66,6 +69,32 @@ describe('mergeTickerBatch', () => {
   it('returns dirty=false and the same array when nothing changed', () => {
     const a = t('BTCUSDT', 'binance-futures', 50000)
     const { next, dirty } = mergeTickerBatch([a], [t('BTCUSDT', 'binance-futures', 50000)])
+    expect(dirty).toBe(false)
+    expect(next[0]).toBe(a)
+  })
+
+  it('a metric-only change (corrBtc/spikes) still replaces the entry', () => {
+    const a = t('ETHUSDT', 'binance-futures', 3000)
+    const updated = t('ETHUSDT', 'binance-futures', 3000)
+    updated.corrBtc = 0.42
+    updated.tradesSpike = 2.5
+    updated.volumeSpike = 1.8
+    const { next, dirty } = mergeTickerBatch([a], [updated])
+    expect(dirty).toBe(true)
+    expect(next[0]).not.toBe(a)
+    expect(next[0].corrBtc).toBe(0.42)
+    expect(next[0].tradesSpike).toBe(2.5)
+    expect(next[0].volumeSpike).toBe(1.8)
+  })
+
+  it('identical indicator values keep the entry reference', () => {
+    const a = t('BTCUSDT', 'binance-futures', 50000)
+    a.corrBtc = 0.99
+    a.tradesSpike = null
+    const updated = t('BTCUSDT', 'binance-futures', 50000)
+    updated.corrBtc = 0.99
+    updated.tradesSpike = null
+    const { next, dirty } = mergeTickerBatch([a], [updated])
     expect(dirty).toBe(false)
     expect(next[0]).toBe(a)
   })

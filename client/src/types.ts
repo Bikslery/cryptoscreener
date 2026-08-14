@@ -12,9 +12,22 @@ export interface UnifiedTicker {
   quoteVolume24h: number
   range1m: number
   natr5m: number
+  corrBtc: number | null
+  tradesSpike: number | null
+  volumeSpike: number | null
   pricePrecision: number
   timestamp: number
 }
+
+/**
+ * Indicator columns configurable from the cabinet: coin list columns and
+ * mini-chart header fields. `symbol` is always pinned first in the list.
+ */
+export type IndicatorKey = 'change24h' | 'range1m' | 'natr5m' | 'quoteVolume24h' | 'corrBtc' | 'tradesSpike' | 'volumeSpike'
+
+export type CoinListColKey = 'symbol' | IndicatorKey
+
+export const ALL_INDICATOR_KEYS: readonly IndicatorKey[] = ['change24h', 'range1m', 'natr5m', 'quoteVolume24h', 'corrBtc', 'tradesSpike', 'volumeSpike']
 
 export interface UnifiedCandle {
   symbol: string
@@ -216,6 +229,8 @@ export interface UserSettings {
   notifyVolume?: number
   // Cascade engine configuration (all parameters, cabinet UI).
   cascades?: Partial<CascadesConfig>
+  // Indicator column configuration: coin list columns + chart header fields.
+  indicators?: { coinList: CoinListColKey[]; chartHeader: IndicatorKey[] }
 }
 
 export type Timeframe = '1s' | '5s' | '15s' | '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'

@@ -4,9 +4,10 @@ import { useAuthStore, useUIStore } from '../../store'
 import { useDrawingHotkeysStore, eventToCombo, formatCombo, DRAWING_TOOL_LABELS, DEFAULT_DRAWING_HOTKEYS, type HotkeyTool } from '../../store/drawingHotkeys'
 import api from '../../services/api'
 import { playAlertSound } from '../../services/alert-notify'
-import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3, Bell, Volume2, Layers } from 'lucide-react'
+import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3, Bell, Volume2, Layers, Table2, ChevronUp, ChevronDown } from 'lucide-react'
 import { resolveCascadesConfig } from '../../services/chart-overlays'
-import type { CascadesConfig } from '../../types'
+import { resolveIndicators, INDICATOR_LABELS, VALID_INDICATOR_KEYS } from '../../services/indicators'
+import type { CascadesConfig, IndicatorKey, CoinListColKey } from '../../types'
 import './ProfileModal.css'
 
 type ResetStep = 'idle' | 'code' | 'password' | 'done'
@@ -112,10 +113,68 @@ export default function ProfileModal() {
     }
   }, [])
 
+  useEffect(() => {
+    return () => {
+      if (indicatorsSaveTimer.current) clearTimeout(indicatorsSaveTimer.current)
+    }
+  }, [])
+
   const handleCascadesReset = () => {
     setCascades(resolveCascadesConfig(undefined))
     if (cascadesSaveTimer.current) clearTimeout(cascadesSaveTimer.current)
     updateSettings({ cascades: undefined }).catch(() => {})
+  }
+
+  // Indicator column configuration — coin list columns + mini-chart header
+  // fields. Ordered lists with up/down arrows, add/remove chips below.
+  const [indicators, setIndicators] = useState<{ coinList: CoinListColKey[]; chartHeader: IndicatorKey[] }>(() =>
+    resolveIndicators(settings?.indicators),
+  )
+  const indicatorsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    setIndicators(resolveIndicators(settings?.indicators))
+  }, [settings?.indicators])
+
+  const saveIndicators = (next: { coinList: CoinListColKey[]; chartHeader: IndicatorKey[] }) => {
+    setIndicators(next)
+    if (indicatorsSaveTimer.current) clearTimeout(indicatorsSaveTimer.current)
+    indicatorsSaveTimer.current = setTimeout(() => {
+      updateSettings({ indicators: next }).catch(() => {})
+    }, 400)
+  }
+
+  const saveIndicatorField = (field: 'coinList' | 'chartHeader', list: CoinListColKey[] | IndicatorKey[]) => {
+    if (field === 'coinList') saveIndicators({ ...indicators, coinList: list as CoinListColKey[] })
+    else saveIndicators({ ...indicators, chartHeader: list as IndicatorKey[] })
+  }
+
+  const moveIndicatorsItem = (field: 'coinList' | 'chartHeader', index: number, dir: -1 | 1) => {
+    const list = indicators[field]
+    const target = index + dir
+    if (target < 0 || target >= list.length) return
+    // `symbol` is pinned at position 0 in the coin list.
+    if (field === 'coinList' && (list[index] === 'symbol' || list[target] === 'symbol')) return
+    const next = [...list]
+    ;[next[index], next[target]] = [next[target], next[index]]
+    saveIndicatorField(field, next)
+  }
+
+  const removeIndicator = (field: 'coinList' | 'chartHeader', key: IndicatorKey) => {
+    const list = indicators[field]
+    if (field === 'chartHeader' && list.length <= 1) return
+    saveIndicatorField(field, list.filter(k => k !== key))
+  }
+
+  const addIndicator = (field: 'coinList' | 'chartHeader', key: IndicatorKey) => {
+    if (indicators[field].includes(key)) return
+    saveIndicatorField(field, [...indicators[field], key])
+  }
+
+  const handleIndicatorsReset = () => {
+    setIndicators(resolveIndicators(undefined))
+    if (indicatorsSaveTimer.current) clearTimeout(indicatorsSaveTimer.current)
+    updateSettings({ indicators: undefined }).catch(() => {})
   }
 
   const stopTimer = () => {
@@ -709,6 +768,108 @@ export default function ProfileModal() {
           <button className="profile-action-btn" onClick={handleCascadesReset}>
             <Layers size={15} />
             сбросить каскады по умолчанию
+          </button>
+        </div>
+
+        {/* Indicators section — coin list columns + chart header fields */}
+        <div className="profile-section">
+          <div className="section-header">
+            <div className="section-icon">
+              <Table2 size={14} />
+            </div>
+            <h2>Индикаторы</h2>
+          </div>
+
+          <div className="profile-field">
+            <label>Колонки списка монет</label>
+            {indicators.coinList.map((key, i) => (
+              <div key={key} className="indicator-order-row">
+                <span className={`indicator-order-label ${key === 'symbol' ? 'pinned' : ''}`}>
+                  {key === 'symbol' ? 'Тикер (закреплён)' : INDICATOR_LABELS[key as IndicatorKey]}
+                </span>
+                {key !== 'symbol' && (
+                  <div className="indicator-order-actions">
+                    <button
+                      className="indicator-order-btn"
+                      disabled={i <= 1}
+                      title="Выше"
+                      onClick={() => moveIndicatorsItem('coinList', i, -1)}
+                    >
+                      <ChevronUp size={12} />
+                    </button>
+                    <button
+                      className="indicator-order-btn"
+                      disabled={i >= indicators.coinList.length - 1}
+                      title="Ниже"
+                      onClick={() => moveIndicatorsItem('coinList', i, 1)}
+                    >
+                      <ChevronDown size={12} />
+                    </button>
+                    <button
+                      className="indicator-order-btn danger"
+                      title="Убрать колонку"
+                      onClick={() => removeIndicator('coinList', key as IndicatorKey)}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+            <div className="indicator-add-row">
+              {VALID_INDICATOR_KEYS.filter(k => !indicators.coinList.includes(k)).map(k => (
+                <button key={k} className="indicator-add-chip" onClick={() => addIndicator('coinList', k)}>
+                  + {INDICATOR_LABELS[k]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="profile-field">
+            <label>Поля шапки графиков</label>
+            {indicators.chartHeader.map((key, i) => (
+              <div key={key} className="indicator-order-row">
+                <span className="indicator-order-label">{INDICATOR_LABELS[key]}</span>
+                <div className="indicator-order-actions">
+                  <button
+                    className="indicator-order-btn"
+                    disabled={i === 0}
+                    title="Выше"
+                    onClick={() => moveIndicatorsItem('chartHeader', i, -1)}
+                  >
+                    <ChevronUp size={12} />
+                  </button>
+                  <button
+                    className="indicator-order-btn"
+                    disabled={i >= indicators.chartHeader.length - 1}
+                    title="Ниже"
+                    onClick={() => moveIndicatorsItem('chartHeader', i, 1)}
+                  >
+                    <ChevronDown size={12} />
+                  </button>
+                  <button
+                    className="indicator-order-btn danger"
+                    disabled={indicators.chartHeader.length <= 1}
+                    title="Убрать поле"
+                    onClick={() => removeIndicator('chartHeader', key)}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              </div>
+            ))}
+            <div className="indicator-add-row">
+              {VALID_INDICATOR_KEYS.filter(k => !indicators.chartHeader.includes(k)).map(k => (
+                <button key={k} className="indicator-add-chip" onClick={() => addIndicator('chartHeader', k)}>
+                  + {INDICATOR_LABELS[k]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <button className="profile-action-btn" onClick={handleIndicatorsReset}>
+            <Table2 size={15} />
+            сбросить индикаторы
           </button>
         </div>
 

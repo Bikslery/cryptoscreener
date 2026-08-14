@@ -8,6 +8,7 @@ import { broadcast, broadcastToChannel } from '../../ws/hub.js'
 import { updateCachedCandle, getCachedCandles } from '../candles/candle-cache.js'
 import { getRedisPub, getRedisData, REDIS_ENABLED } from '../../redis.js'
 import { subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
+import { pearson, computeVolumeSpike, TradeBucketTracker, applyIndicator, CORR_WINDOW, MAX_BUCKETS } from './indicators.js'
 
 export const adapters: ExchangeAdapter[] = [
   new BinanceSpotAdapter(),
@@ -129,6 +130,23 @@ let tickerCount = 0
 let lastBroadcastLog = 0
 const metricsMap = new Map<string, { range1m: number; natr5m: number }>()
 
+// 5m trade-count buckets fed by the Binance aggTrade lanes (spot + futures
+// per symbol). Bybit/OKX tickers never receive tradesSpike — the metric is
+// Binance-only, matching the scalpboard "Только для Binance" convention.
+const tradeBuckets = new TradeBucketTracker()
+const BINANCE_EXCHANGES = new Set(['binance-spot', 'binance-futures'])
+
+export function recordTradeBucket(symbol: string, timeMs: number): void {
+  const res = tradeBuckets.recordTrade(symbol, timeMs)
+  if (res) {
+    applyIndicator(tickerMap, symbol, { tradesSpike: Math.round(res.spike * 10000) / 10000 }, BINANCE_EXCHANGES)
+  }
+}
+
+export function getTradeBucketStats(): { trackedSymbols: number } {
+  return { trackedSymbols: tradeBuckets.size }
+}
+
 let cachedBestMap: Map<string, UnifiedTicker> | null = null
 let cachedBest: UnifiedTicker[] | null = null
 let lastBroadcastedTickers = new Map<string, Partial<UnifiedTicker>>()
@@ -145,7 +163,8 @@ function computeDelta(tickers: UnifiedTicker[]): UnifiedTicker[] {
     const key = `${t.symbol}:${t.exchange}`
     seen.add(key)
     const prev = lastBroadcastedTickers.get(key)
-    if (!prev || prev.price !== t.price || prev.change24h !== t.change24h || prev.quoteVolume24h !== t.quoteVolume24h) {
+    if (!prev || prev.price !== t.price || prev.change24h !== t.change24h || prev.quoteVolume24h !== t.quoteVolume24h
+      || prev.corrBtc !== t.corrBtc || prev.tradesSpike !== t.tradesSpike || prev.volumeSpike !== t.volumeSpike) {
       delta.push(t)
     }
   }
@@ -153,7 +172,16 @@ function computeDelta(tickers: UnifiedTicker[]): UnifiedTicker[] {
     if (!seen.has(key)) delta.push(prev as UnifiedTicker)
   }
   lastBroadcastedTickers = new Map(
-    tickers.map(t => [`${t.symbol}:${t.exchange}`, { symbol: t.symbol, exchange: t.exchange, price: t.price, change24h: t.change24h, quoteVolume24h: t.quoteVolume24h }])
+    tickers.map(t => [`${t.symbol}:${t.exchange}`, {
+      symbol: t.symbol,
+      exchange: t.exchange,
+      price: t.price,
+      change24h: t.change24h,
+      quoteVolume24h: t.quoteVolume24h,
+      corrBtc: t.corrBtc,
+      tradesSpike: t.tradesSpike,
+      volumeSpike: t.volumeSpike,
+    }])
   )
   return delta
 }
@@ -306,6 +334,7 @@ export function startAggregator() {
   }
 
   computeMetrics()
+  startCorrelationLoop()
 }
 
 const AGGTRADE_MIN_SYMBOLS = 30
@@ -429,25 +458,39 @@ async function computeMetrics() {
 
           const cached5m = getCachedCandles(coin.symbol, '5m', coin.exchange)
           let candles5m: UnifiedCandle[]
-          if (cached5m && cached5m.length >= 14) {
-            candles5m = cached5m.slice(-14)
+          if (cached5m && cached5m.length >= MAX_BUCKETS + 1) {
+            candles5m = cached5m
+          } else if (cached5m && cached5m.length >= 14) {
+            // Enough for natr5m; volumeSpike stays null until the window fills.
+            candles5m = cached5m
           } else {
-            candles5m = await fetchCandles(coin.symbol, '5m', 14, coin.exchange)
+            candles5m = await fetchCandles(coin.symbol, '5m', MAX_BUCKETS + 1, coin.exchange)
           }
           if (candles5m.length >= 2) {
-            const trs = candles5m.map((c, i) => {
+            const window = candles5m.slice(-14)
+            const trs = window.map((c, i) => {
               if (i === 0) return c.high - c.low
-              const prevClose = candles5m[i - 1].close
+              const prevClose = window[i - 1].close
               return Math.max(c.high - c.low, Math.abs(c.high - prevClose), Math.abs(c.low - prevClose))
             })
             const atr = trs.reduce((s, v) => s + v, 0) / trs.length
             const natr5m = coin.price > 0 ? (atr / coin.price) * 100 : 0
             metricsMap.set(coin.symbol, { ...(metricsMap.get(coin.symbol) || { range1m: 0 }), natr5m })
           }
+          // Volume spike: forming 5m candle vs the average of the 30 completed
+          // before it. Cheap (cache-first) so it refreshes with every 30s pass.
+          const spike = computeVolumeSpike(candles5m)
+          applyIndicator(tickerMap, coin.symbol, { volumeSpike: spike !== null ? Math.round(spike * 10000) / 10000 : null })
         } catch (e) {
           console.warn(`[Metrics] Failed for ${coin.symbol}:`, e instanceof Error ? e.message : e)
         }
       }))
+    }
+
+    // Re-apply every tracked tradesSpike so symbols whose bucket rolled over
+    // without fresh trades still push the new value into the delta lane.
+    for (const [symbol, spike] of tradeBuckets.entries()) {
+      applyIndicator(tickerMap, symbol, { tradesSpike: spike !== null ? Math.round(spike * 10000) / 10000 : null }, BINANCE_EXCHANGES)
     }
 
     for (const [symbol] of metricsMap) {
@@ -461,6 +504,82 @@ async function computeMetrics() {
   await new Promise(r => setTimeout(r, 15_000))
   await compute()
   setInterval(compute, 30000)
+}
+
+// BTC correlation runs on its own slow cadence — Pearson over 60 5m closes
+// is the only metric that needs two aligned candle series per coin, so 30s
+// would waste REST weight for zero new information (the window moves by one
+// candle per 5 minutes anyway).
+const CORR_INTERVAL_MS = parseInt(process.env.CORR_INTERVAL_MS || '300000', 10)
+const CORR_MIN_PAIRS = 10
+
+async function computeCorrelation(): Promise<void> {
+  const best = getBestMap()
+  const topCoins = Array.from(best.values())
+    .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+    .slice(0, 200)
+
+  let btcCandles = getCachedCandles('BTCUSDT', '5m', 'binance-futures')
+  if (!btcCandles || btcCandles.length < CORR_WINDOW) {
+    try {
+      btcCandles = await fetchCandles('BTCUSDT', '5m', CORR_WINDOW, 'binance-futures')
+    } catch {
+      btcCandles = []
+    }
+  }
+  const btcWindow = btcCandles.slice(-CORR_WINDOW)
+  if (btcWindow.length < CORR_MIN_PAIRS) {
+    console.warn(`[Corr] BTCUSDT 5m series too short (${btcWindow.length}) — skipping pass`)
+    return
+  }
+  const btcCloses = new Map(btcWindow.map(c => [c.time, c.close]))
+
+  const BATCH_SIZE = 10
+  let updated = 0
+  let nulled = 0
+  for (let i = 0; i < topCoins.length; i += BATCH_SIZE) {
+    if (anyLimiterOverThreshold()) {
+      console.warn('[Corr] Rate limit threshold reached, skipping batch')
+      break
+    }
+    const batch = topCoins.slice(i, i + BATCH_SIZE)
+    await Promise.all(batch.map(async (coin) => {
+      try {
+        let candles = getCachedCandles(coin.symbol, '5m', coin.exchange)
+        if (!candles || candles.length < CORR_WINDOW) {
+          candles = await fetchCandles(coin.symbol, '5m', CORR_WINDOW, coin.exchange)
+        }
+        if (!candles || candles.length < CORR_MIN_PAIRS) {
+          applyIndicator(tickerMap, coin.symbol, { corrBtc: null })
+          nulled++
+          return
+        }
+        const xs: number[] = []
+        const ys: number[] = []
+        for (const c of candles.slice(-CORR_WINDOW)) {
+          const b = btcCloses.get(c.time)
+          if (b !== undefined) {
+            xs.push(c.close)
+            ys.push(b)
+          }
+        }
+        const r = pearson(xs, ys)
+        applyIndicator(tickerMap, coin.symbol, { corrBtc: r !== null ? Math.round(r * 10000) / 10000 : null })
+        if (r !== null) updated++
+        else nulled++
+      } catch (e) {
+        console.warn(`[Corr] Failed for ${coin.symbol}:`, e instanceof Error ? e.message : e)
+      }
+    }))
+  }
+  console.log(`[Corr] Updated corrBtc for ${topCoins.length} coins (${updated} values, ${nulled} null, BTC window ${btcWindow.length})`)
+}
+
+function startCorrelationLoop() {
+  setTimeout(() => {
+    computeCorrelation().catch(() => {})
+    setInterval(() => computeCorrelation().catch(() => {}), CORR_INTERVAL_MS)
+  }, 30_000)
 }
 
 function anyLimiterOverThreshold(): boolean {
@@ -517,6 +636,10 @@ export function setTickersFromRedis(tickers: UnifiedTicker[]) {
       t.openPrice24h = t.price / (1 + t.change24h / 100)
     }
     if (!t.openPrice24h) t.openPrice24h = t.price
+    // Normalize indicator fields — pre-indicator snapshots omit them.
+    if (t.corrBtc === undefined) t.corrBtc = null
+    if (t.tradesSpike === undefined) t.tradesSpike = null
+    if (t.volumeSpike === undefined) t.volumeSpike = null
     tickerMap.set(`${t.symbol}:${t.exchange}`, t)
   }
   cachedBestMap = null

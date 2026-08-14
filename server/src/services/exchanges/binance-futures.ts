@@ -483,6 +483,9 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       quoteVolume24h: parseFloat(isWs ? t.q : t.quoteVolume),
       range1m: 0,
       natr5m: 0,
+      corrBtc: null,
+      tradesSpike: null,
+      volumeSpike: null,
       pricePrecision,
       timestamp: Date.now(),
     }

@@ -89,6 +89,9 @@ export class OkxSpotAdapter implements ExchangeAdapter {
       quoteVolume24h: parseFloat(d.volCcy24h),
       range1m: 0,
       natr5m: 0,
+      corrBtc: null,
+      tradesSpike: null,
+      volumeSpike: null,
       pricePrecision,
       timestamp: Date.now(),
     }

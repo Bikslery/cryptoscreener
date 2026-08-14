@@ -12,6 +12,9 @@ export interface UnifiedTicker {
   quoteVolume24h: number
   range1m: number
   natr5m: number
+  corrBtc: number | null
+  tradesSpike: number | null
+  volumeSpike: number | null
   pricePrecision: number
   timestamp: number
 }
@@ -120,6 +123,10 @@ export interface Watchlist {
   coins: string[]
 }
 
+export type IndicatorKey = 'change24h' | 'range1m' | 'natr5m' | 'quoteVolume24h' | 'corrBtc' | 'tradesSpike' | 'volumeSpike'
+
+export type CoinListColKey = 'symbol' | IndicatorKey
+
 export interface UserSettings {
   theme: 'dark' | 'light'
   layout: {
@@ -130,6 +137,10 @@ export interface UserSettings {
   defaultTimeframe: string
   chartBlocks: string[]
   chartVisibleBars?: number
+  indicators?: {
+    coinList: CoinListColKey[]
+    chartHeader: IndicatorKey[]
+  }
 }
 
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'

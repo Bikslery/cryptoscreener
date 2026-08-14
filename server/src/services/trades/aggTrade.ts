@@ -1,7 +1,7 @@
 import WebSocket from 'ws'
 import { broadcastToChannel } from '../../ws/hub.js'
 import { getWsAgent } from '../exchanges/proxy.js'
-import { updateTickerPrice } from '../aggregator/index.js'
+import { updateTickerPrice, recordTradeBucket } from '../aggregator/index.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 import type { Exchange } from '../../types.js'
 
@@ -109,6 +109,10 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
         const isBuyerMaker = data.m
 
         updateTickerPrice(symbol, exchange, price)
+
+        // 5m trade-count bucket for the tradesSpike indicator (Binance only —
+        // Bybit/OKX trade lanes are not Binance aggTrade streams).
+        recordTradeBucket(symbol, data.T)
 
         const tradePayload = {
           symbol,

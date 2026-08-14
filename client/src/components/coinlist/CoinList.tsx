@@ -1,29 +1,18 @@
 import { memo, useCallback, useMemo, useRef, useEffect } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
-import { useCoinListStore } from '../../store'
-import type { UnifiedTicker } from '../../types'
-import { formatCompact, extractBaseAsset } from '../../utils/format'
+import { useCoinListStore, useAuthStore } from '../../store'
+import type { UnifiedTicker, CoinListColKey } from '../../types'
+import { extractBaseAsset } from '../../utils/format'
 import { getOrFetchHistory } from '../../services/candle-prefetch'
 import { VOLUME_HIGH_THRESHOLD } from '../../constants/volume'
-
-type ColKey = keyof UnifiedTicker
+import { resolveIndicators, formatIndicator, COLUMN_META } from '../../services/indicators'
 
 interface ColumnDef {
-  key: ColKey
+  key: CoinListColKey
   header: string
   subheader: string
   width: string
 }
-
-const COLS: ColumnDef[] = [
-  { key: 'symbol', header: 'Тикер', subheader: '', width: '80px' },
-  { key: 'change24h', header: 'ИЗМ', subheader: '24ч', width: '72px' },
-  { key: 'range1m', header: 'РЕНЖ', subheader: '1м/5', width: '72px' },
-  { key: 'natr5m', header: 'NATR', subheader: '5м/14', width: '72px' },
-  { key: 'quoteVolume24h', header: 'ОБЪЁМ', subheader: '24ч', width: '80px' },
-]
-
-const ROW_COLS = '1.1fr 1fr 1fr 1fr 1.1fr'
 
 /**
  * The flag that always sat next to the ticker name. It is the watchlist
@@ -45,20 +34,14 @@ function WatchFlag({ watched, onClick }: { watched: boolean; onClick: (e: React.
   )
 }
 
-function formatVal(key: ColKey, coin: UnifiedTicker): string {
-  const v = coin[key]
-  if (key === 'symbol') return extractBaseAsset(v as string)
-  if (key === 'change24h') return `${(v as number) >= 0 ? '+' : ''}${(v as number).toFixed(1)}`
-  if (key === 'range1m' || key === 'natr5m') return v ? `${(v as number).toFixed(1)}` : '-'
-  if (key === 'quoteVolume24h') {
-    const n = v as number
-    return formatCompact(n)
-  }
-  return String(v)
+function formatVal(key: CoinListColKey, coin: UnifiedTicker): string {
+  if (key === 'symbol') return extractBaseAsset(coin.symbol)
+  return formatIndicator(key, coin[key])
 }
 
 interface RowProps {
   coin: UnifiedTicker
+  cols: ColumnDef[]
   isSelected: boolean
   isOnPage: boolean
   isNextOnPage: boolean
@@ -68,7 +51,7 @@ interface RowProps {
   onToggleWatch: (symbol: string) => void
 }
 
-export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage, isWatched, onClick, onPrefetch, onToggleWatch }: RowProps) {
+export const Row = memo(function Row({ coin, cols, isSelected, isOnPage, isNextOnPage, isWatched, onClick, onPrefetch, onToggleWatch }: RowProps) {
   const isUp = coin.change24h >= 0
   const bg = isSelected
     ? 'bg-white/[0.10]'
@@ -81,29 +64,44 @@ export const Row = memo(function Row({ coin, isSelected, isOnPage, isNextOnPage,
   const borderB = isOnPage && isNextOnPage
     ? 'border-b border-white/[0.06]'
     : 'border-b border-[#111]'
+  const rowCols = cols.map(c => c.width).join(' ')
   return (
     <div
       className={`grid cursor-pointer transition-colors duration-100 ${bg} ${borderL} ${borderB}`}
-      style={{ gridTemplateColumns: ROW_COLS, height: '32px' }}
+      style={{ gridTemplateColumns: rowCols, height: '32px' }}
       onMouseDown={() => onPrefetch(coin.symbol)}
       onClick={() => onClick(coin.symbol)}
     >
-      <div className={`flex items-center justify-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
-        <WatchFlag watched={isWatched} onClick={(e) => { e.stopPropagation(); onToggleWatch(coin.symbol) }} />
-        {formatVal('symbol', coin)}
-      </div>
-      <div className={`flex items-center justify-center px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
-        {formatVal('change24h', coin)}%
-      </div>
-      <div className="flex items-center justify-center px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
-        {formatVal('range1m', coin)}
-      </div>
-      <div className="flex items-center justify-center px-2 text-[11px] text-[#a0a0a0] border-r border-[#111]">
-        {formatVal('natr5m', coin)}
-      </div>
-      <div data-testid="vol-cell" className={`flex items-center justify-center px-2 text-[11px] ${coin.quoteVolume24h >= VOLUME_HIGH_THRESHOLD ? 'text-[#fff] font-medium' : 'text-[#a0a0a0]'}`}>
-        {formatVal('quoteVolume24h', coin)}
-      </div>
+      {cols.map((col, i) => {
+        const isLast = i === cols.length - 1
+        if (col.key === 'symbol') {
+          return (
+            <div key={col.key} className={`flex items-center justify-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
+              <WatchFlag watched={isWatched} onClick={(e) => { e.stopPropagation(); onToggleWatch(coin.symbol) }} />
+              {formatVal('symbol', coin)}
+            </div>
+          )
+        }
+        if (col.key === 'change24h') {
+          return (
+            <div key={col.key} className={`flex items-center justify-center px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+              {formatVal('change24h', coin)}%
+            </div>
+          )
+        }
+        if (col.key === 'quoteVolume24h') {
+          return (
+            <div key={col.key} data-testid="vol-cell" className={`flex items-center justify-center px-2 text-[11px] ${isLast ? '' : 'border-r border-[#111]'} ${coin.quoteVolume24h >= VOLUME_HIGH_THRESHOLD ? 'text-[#fff] font-medium' : 'text-[#a0a0a0]'}`}>
+              {formatVal('quoteVolume24h', coin)}
+            </div>
+          )
+        }
+        return (
+          <div key={col.key} className={`flex items-center justify-center px-2 text-[11px] text-[#a0a0a0] ${isLast ? '' : 'border-r border-[#111]'}`}>
+            {formatVal(col.key, coin)}
+          </div>
+        )
+      })}
     </div>
   )
 })
@@ -123,6 +121,13 @@ export function CoinList() {
   const tf = useCoinListStore(s => s.activeTimeframe)
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const watchSet = useMemo(() => new Set(watchlist), [watchlist])
+
+  const settings = useAuthStore(s => s.settings)
+  const cols = useMemo<ColumnDef[]>(() => {
+    const { coinList } = resolveIndicators(settings?.indicators)
+    return coinList.map(key => ({ key, ...COLUMN_META[key] }))
+  }, [settings])
+  const rowCols = useMemo(() => cols.map(c => c.width).join(' '), [cols])
 
   const coinMap = useCoinListStore(s => s.coinMap)
   const onPrefetch = useCallback((symbol: string) => {
@@ -148,6 +153,7 @@ export function CoinList() {
       <Row
         key={coin.symbol}
         coin={coin}
+        cols={cols}
         isSelected={selectedSymbol === coin.symbol}
         isOnPage={onPage}
         isNextOnPage={nextOnPage}
@@ -157,19 +163,19 @@ export function CoinList() {
         onToggleWatch={toggleWatch}
       />
     )
-  }, [sortedCoins, selectedSymbol, expandChart, pageSet, highlightActive, onPrefetch, watchSet, toggleWatch])
+  }, [sortedCoins, selectedSymbol, expandChart, pageSet, highlightActive, onPrefetch, watchSet, toggleWatch, cols])
 
   return (
     <div className="w-full h-full flex flex-col bg-[#0a0a0a]">
       <div
         className="grid border-b border-[#1f1f1f] bg-[#0e0e0e] text-[11px] select-none flex-shrink-0"
-        style={{ gridTemplateColumns: ROW_COLS }}
+        style={{ gridTemplateColumns: rowCols }}
       >
-        {COLS.map((col, i) => (
+        {cols.map((col, i) => (
           <div
             key={col.key}
             className={`flex flex-col items-center justify-center cursor-pointer hover:text-[#aaa] transition-colors py-1 ${
-              i < COLS.length - 1 ? 'border-r border-[#1f1f1f]' : ''
+              i < cols.length - 1 ? 'border-r border-[#1f1f1f]' : ''
             } ${sortBy === col.key ? 'text-[#fff]' : 'text-[#888]'}`}
             style={{ height: '40px' }}
             onClick={() => setSort(col.key)}

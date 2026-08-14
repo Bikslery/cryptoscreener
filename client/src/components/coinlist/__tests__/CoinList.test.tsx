@@ -3,6 +3,9 @@ import { render, fireEvent } from '@testing-library/react'
 import type { UnifiedTicker } from '../../../types'
 import { Row } from '../CoinList'
 import { VOLUME_HIGH_THRESHOLD } from '../../../constants/volume'
+import { resolveIndicators, COLUMN_META } from '../../../services/indicators'
+
+const DEFAULT_COLS = resolveIndicators(undefined).coinList.map(key => ({ key, ...COLUMN_META[key] }))
 
 function makeCoin(quoteVolume24h: number): UnifiedTicker {
   return {
@@ -17,6 +20,9 @@ function makeCoin(quoteVolume24h: number): UnifiedTicker {
     quoteVolume24h,
     range1m: 0.5,
     natr5m: 0.3,
+    corrBtc: null,
+    tradesSpike: null,
+    volumeSpike: null,
     pricePrecision: 2,
     timestamp: 0,
   }
@@ -26,6 +32,7 @@ function renderRow(quoteVolume24h: number) {
   const { getByTestId } = render(
     <Row
       coin={makeCoin(quoteVolume24h)}
+      cols={DEFAULT_COLS}
       isSelected={false}
       isOnPage={false}
       isNextOnPage={false}
@@ -41,6 +48,7 @@ function renderRow(quoteVolume24h: number) {
 function renderBaseRow(overrides: Partial<Parameters<typeof Row>[0]> = {}) {
   const props = {
     coin: makeCoin(1000),
+    cols: DEFAULT_COLS,
     isSelected: false,
     isOnPage: false,
     isNextOnPage: false,

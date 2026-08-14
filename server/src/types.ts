@@ -13,6 +13,9 @@ export interface UnifiedTicker {
   quoteVolume24h: number
   range1m: number
   natr5m: number
+  corrBtc: number | null
+  tradesSpike: number | null
+  volumeSpike: number | null
   pricePrecision: number
   timestamp: number
 }
@@ -108,6 +111,8 @@ export interface UserSettings {
   chartBlocks: string[]
   /** opaque passthrough — full cascade/density engine config from the cabinet */
   cascades?: Record<string, unknown>
+  /** opaque passthrough — coin list / chart header indicator columns */
+  indicators?: Record<string, unknown>
 }
 
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'

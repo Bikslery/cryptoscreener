@@ -1,7 +1,7 @@
 import { useEffect, useRef, memo, useState, useMemo } from 'react'
 import { createChart, CandlestickSeries, BarSeries, LineSeries, HistogramSeries, PriceScaleMode } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time, SeriesType, DeepPartial, CandlestickSeriesOptions, BarSeriesOptions, LineSeriesOptions } from 'lightweight-charts'
-import { useCoinListStore, setLivePrice } from '../../store'
+import { useCoinListStore, setLivePrice, useAuthStore } from '../../store'
 import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
 import { registerGlider, unregisterGlider, type Glider } from '../../services/glide'
 import { stepFormingAnimation, formingGlideK, type FormingTarget } from '../../services/candle-anim'
@@ -10,6 +10,7 @@ import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount, getWsLastMessageAt } from '../../services/ws'
 import type { Timeframe, UnifiedCandle, Exchange, DrawingTool } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
+import { resolveIndicators, formatIndicator } from '../../services/indicators'
 import { ArrowLeft, Settings2 } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
 import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT, EXPANDED_CANDLE_LIMIT } from '../../services/candle-prefetch'
@@ -1291,8 +1292,13 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol, chartExchange }:
       quoteVolume24h: c.quoteVolume24h,
       natr5m: c.natr5m,
       range1m: c.range1m,
+      corrBtc: c.corrBtc,
+      tradesSpike: c.tradesSpike,
+      volumeSpike: c.volumeSpike,
     }
   }))
+  const settings = useAuthStore(s => s.settings)
+  const chartHeader = useMemo(() => resolveIndicators(settings?.indicators).chartHeader, [settings])
 
   const isUp = coin ? coin.change24h >= 0 : true
   const badge = exchangeBadge(chartExchange)
@@ -1309,16 +1315,25 @@ const MiniChartHeader = memo(function MiniChartHeader({ symbol, chartExchange }:
         </span>
       </div>
       <div className="flex items-center gap-[6px] flex-shrink-0">
-        {coin && (
-          <>
-            <span className={`font-mono font-bold text-[10px] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
-              {isUp ? '+' : ''}{coin.change24h.toFixed(1)}%
+        {coin && chartHeader.map(key => {
+          if (key === 'change24h') {
+            return (
+              <span key={key} className={`font-mono font-bold text-[10px] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+                {isUp ? '+' : ''}{coin.change24h.toFixed(1)}%
+              </span>
+            )
+          }
+          if (key === 'quoteVolume24h') {
+            return <span key={key} className="font-mono text-[10px] text-[#888]">{vol}</span>
+          }
+          const value = coin[key]
+          const isSpike = (key === 'tradesSpike' || key === 'volumeSpike') && typeof value === 'number' && value >= 2
+          return (
+            <span key={key} className={`font-mono text-[10px] ${isSpike ? 'text-[#f5c518] font-bold' : 'text-[#888]'}`}>
+              {formatIndicator(key, value)}
             </span>
-            <span className="font-mono text-[10px] text-[#888]">{coin.natr5m ? coin.natr5m.toFixed(1) : '-'}</span>
-            <span className="font-mono text-[10px] text-[#888]">{coin.range1m ? coin.range1m.toFixed(1) : '-'}</span>
-            <span className="font-mono text-[10px] text-[#888]">{vol}</span>
-          </>
-        )}
+          )
+        })}
       </div>
     </div>
   )
