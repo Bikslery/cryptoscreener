@@ -293,15 +293,6 @@ export default function AuthModal() {
             {bindError && (
               <div className="auth-bind-error">
                 <div className="auth-bind-error-text">{bindError}</div>
-                <button
-                  onClick={() => {
-                    setBindError('')
-                    startPolling()
-                  }}
-                  className="auth-btn"
-                >
-                  Попробовать с другим Telegram
-                </button>
               </div>
             )}
             {error && !bindError && <div className="auth-error" style={{ marginTop: '1rem' }}>{error}</div>}
