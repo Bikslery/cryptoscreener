@@ -18,6 +18,7 @@ import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatc
 import { createSecondCandleAggregator, type SecondCandleAggregator } from '../../services/second-candle-aggregator'
 import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
 import { isFiniteOHLCV, validateCandle } from '../../services/candle-utils'
+import { recordDiag } from '../../services/candle-diag'
 import { useDrawings } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
 import { useChartOverlays } from './overlays/useChartOverlays'
@@ -71,7 +72,13 @@ function upsertBar(candlesDataRef: React.RefObject<UnifiedCandle[]>, bar: Unifie
  * history loads and repaints always paint exact values — the animation never
  * touches data.
  */
-class FormingAnimator implements Glider {
+// Exported for unit tests only (see __tests__/forming-animator.test.ts) —
+// not part of the component's public surface. This breaks the
+// components-only-exports assumption react-refresh relies on for this file;
+// acceptable since ChartGrid.tsx already isn't a clean fast-refresh boundary
+// (it also exports helper hooks alongside components).
+// eslint-disable-next-line react-refresh/only-export-components
+export class FormingAnimator implements Glider {
   private displayed: FormingTarget | null = null
   private target: FormingTarget | null = null
   private running = false
@@ -87,12 +94,43 @@ class FormingAnimator implements Glider {
     return this.running
   }
 
-  /** Route a live forming-candle update through the animator. Returns true when handled. */
+  /**
+   * Route a live forming-candle update through the animator. Returns true
+   * when handled.
+   *
+   * NOTE: under the current applyChartPatch dispatch, this only ever
+   * receives updates for the SAME period this animator is already tracking
+   * (isFormingBar gates on the caller's side); a genuinely new period is
+   * routed through the exact-paint branch + `finalizeAndReset()` instead.
+   * The `displayed.time !== t.time` branch below is kept as a defensive
+   * fallback for that invariant — if it's ever hit, it still does the right
+   * thing (finalize the old bar's exact target before snapping to the new
+   * one) rather than silently glide-jumping across a period boundary.
+   */
   paint(c: UnifiedCandle): boolean {
     const t: FormingTarget = { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }
     if (!this.displayed || this.displayed.time !== t.time) {
-      // New bar (or first seed after a repaint): snap exactly — the glide
-      // must never stretch across period boundaries.
+      // Bar handoff (Stage 2 item 3): finalize whatever the PREVIOUS bar's
+      // glide was converging toward — its exact last-known target — before
+      // abandoning it. Without this, a glide frozen mid-flight (running,
+      // displayed lagging target) leaves the closed bar's body stuck at a
+      // non-final interpolated frame forever, since nothing ever repaints a
+      // bar again once it's no longer the series' last one.
+      this.finalizeCurrent()
+      // Fully clear + unregister rather than leaving `running`/registration
+      // dangling: `displayed` is about to be set equal to `target` for the
+      // NEW bar below (a fresh snap has no glide yet), so there is nothing
+      // for the shared rAF coordinator to advance until an actual second
+      // update arrives for this new bar. Without this explicit clear, the
+      // OLD registration would linger in the shared gliders Set for one
+      // extra (wasted, self-converging) frame before naturally dropping out.
+      this.clearState()
+      // New bar: snap exactly — the glide must never stretch across period
+      // boundaries. (Starting the new bar's displayed body from anything
+      // other than the server-provided `c.open` — e.g. forcing
+      // open = previous close — would silently override authoritative
+      // data on a real price gap, so `open` here is always exactly what the
+      // server sent.)
       this.target = t
       this.displayed = { ...t }
       this.paintSeries(this.displayed)
@@ -103,14 +141,26 @@ class FormingAnimator implements Glider {
     return true
   }
 
-  /** A final kline (or any repaint) must show exact values — stop the glide. */
+  /**
+   * Called when the previously-forming bar is being abandoned because the
+   * caller is about to exact-paint a DIFFERENT bar directly (new period, an
+   * out-of-order correction, or a candlesType flip) — snaps the OLD bar to
+   * its last known exact target first (see `paint()` doc), then clears.
+   */
+  finalizeAndReset(): void {
+    this.finalizeCurrent()
+    this.clearState()
+  }
+
+  /**
+   * Exact-data paths (setData) must stop any pending glide WITHOUT an extra
+   * repaint: setData() is about to overwrite the entire series a moment
+   * later (with the exact authoritative array), so finalizing here would be
+   * wasted work at best and, since the series' internal bar set is about to
+   * change wholesale, a needless extra `update()` call at worst.
+   */
   reset() {
-    if (this.running) {
-      unregisterGlider(this)
-      this.running = false
-    }
-    this.displayed = null
-    this.target = null
+    this.clearState()
   }
 
   /** Shared-coordinator entry: advance one frame, false = converged/stop. */
@@ -134,6 +184,25 @@ class FormingAnimator implements Glider {
     registerGlider(this)
   }
 
+  /** Snap the CURRENT bar to its exact last-known target if a glide was in
+   * flight. No-op if nothing was running. Never clears state itself (callers
+   * decide that) and never recurses into finalize/reset on failure — see
+   * `paintSeries`. */
+  private finalizeCurrent(): void {
+    if (this.running && this.target) {
+      this.paintSeries(this.target)
+    }
+  }
+
+  private clearState(): void {
+    if (this.running) {
+      unregisterGlider(this)
+      this.running = false
+    }
+    this.displayed = null
+    this.target = null
+  }
+
   private paintSeries(t: FormingTarget) {
     try {
       this.series.update({
@@ -144,8 +213,11 @@ class FormingAnimator implements Glider {
         close: t.close,
       })
     } catch {
-      // Series is gone (chart removed / recreated) — stop cleanly.
-      this.reset()
+      // Series is gone (chart removed / recreated). This is a leaf
+      // operation — clear state directly instead of recursing into
+      // finalizeAndReset()/reset() (which would call back into
+      // paintSeries() and could loop if the series keeps throwing).
+      this.clearState()
     }
   }
 }
@@ -180,6 +252,14 @@ function isFormingBar(bar: UnifiedCandle, candlesDataRef: React.RefObject<Unifie
   return !!last && bar.time === last.time
 }
 
+/**
+ * Source tag for diagnostics only — identifies which lane produced the patch
+ * being applied (kline stream, trade tick, bookTicker mid, second-candle
+ * aggregator, or a buffered-flush replay from a history/lazy-scroll cycle).
+ * Never affects behavior, only what gets logged when something looks wrong.
+ */
+type PatchSource = 'kline' | 'tick-trade' | 'tick-price' | 'second-agg' | 'history-flush' | 'lazy-scroll-flush'
+
 function applyChartPatch(
   patch: ChartEventPatch,
   candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
@@ -188,6 +268,7 @@ function applyChartPatch(
   symbol: string,
   exchange: Exchange | undefined,
   tf: Timeframe,
+  source: PatchSource,
 ) {
   const candlesType = useChartSettings.getState().candlesType
   const series = candleRef.current
@@ -205,19 +286,39 @@ function applyChartPatch(
         // array keeps the exact authoritative bar (upsertBar below).
         animator.paint(bar)
       } else {
-        // New period / full snapshot: paint exact values, stop any pending
-        // glide so it can't overwrite them on the next frame.
-        if (animator) animator.reset()
+        // New period / full snapshot: this is the bar-handoff point (Stage 2
+        // item 3). The animator may still be mid-glide for the PREVIOUS
+        // forming bar (its `displayed` lagging `target`) — finalizeAndReset
+        // snaps that old bar to its exact final target first (so it never
+        // freezes on a stale interpolated frame once it stops being the
+        // last bar) and only then clears the glide state, before this new
+        // bar's exact values are painted below.
+        if (animator) animator.finalizeAndReset()
         candleRef.current?.update({ time: t, open: bar.open, high: bar.high, low: bar.low, close: bar.close })
       }
       if (u.paintVolume) {
         volumeRef.current?.update({ time: t, value: bar.volume })
       }
-    } catch {
-      // Series was recreated mid-paint (pricePrecision flip) — the next
-      // history load repaints everything.
+    } catch (err) {
+      // series.update() throws when the bar's time is older than the
+      // series' current last bar (lightweight-charts monotonic-time
+      // invariant) or when the series was recreated mid-paint
+      // (pricePrecision flip). Never swallow silently — log exactly which
+      // bar/source caused it so a reconnect/lazy-scroll/tf-switch race can
+      // be traced back to its origin instead of just "candles look wrong".
+      const arr = candlesDataRef.current
+      const lastArrBar = arr && arr.length > 0 ? arr[arr.length - 1] : null
+      recordDiag('series_update_rejected', {
+        symbol, exchange, tf,
+        from: bar.time,
+        to: lastArrBar?.time,
+        detail: `source=${source} error=${err instanceof Error ? err.message : String(err)}`,
+      })
     }
     upsertBar(candlesDataRef, bar)
+  }
+  if (patch.outOfOrder && patch.outOfOrder.length > 0) {
+    applyOutOfOrderCorrections(patch.outOfOrder, candleRef, candlesDataRef, symbol, exchange, tf, source)
   }
   if (patch.livePrice != null) {
     setLivePrice(symbol, patch.livePrice)
@@ -225,6 +326,114 @@ function applyChartPatch(
   if (patch.cacheWrites && exchange) {
     for (const c of patch.cacheWrites) {
       candleCache.updateCandle(exchange, symbol, tf, c)
+    }
+  }
+}
+
+/**
+ * Out-of-order kline correction (Stage 2, item "Out-of-order коррекции"):
+ * a late kline snapshot arrived for a period the events layer has already
+ * moved past (older than its own bounded tail window). Instead of a silent
+ * drop, check whether the bar still exists in the FULL candlesDataRef array
+ * (which is not bounded to MAX_TAIL) — if so, correct it in place via
+ * lightweight-charts v5's `series.update(bar, true)` (historicalUpdate),
+ * which repaints a non-last bar without a setData()/viewport reset. This is
+ * a rare path (only real out-of-order server data triggers it), so a linear
+ * findIndex from the tail backward is fine.
+ */
+function applyOutOfOrderCorrections(
+  corrections: { time: number; bar: UnifiedCandle }[],
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  source: PatchSource,
+) {
+  const arr = candlesDataRef.current
+  if (!arr || arr.length === 0) return
+  const candlesType = useChartSettings.getState().candlesType
+  if (candlesType === 'line') return // line series has no meaningful OHLC historical-update here
+  const series = candleRef.current
+  if (!series) return
+
+  for (const { time, bar } of corrections) {
+    const idx = arr.findIndex(c => c.time === time)
+    if (idx < 0) {
+      recordDiag('out_of_order_unresolved', {
+        symbol, exchange, tf, from: time,
+        detail: `source=${source} bar not found in candlesDataRef either — dropped`,
+      })
+      continue
+    }
+    arr[idx] = bar
+    try {
+      series.update(
+        { time: toChartTime(bar.time) as Time, open: bar.open, high: bar.high, low: bar.low, close: bar.close },
+        true, // historicalUpdate: allowed to touch a non-last bar
+      )
+      recordDiag('out_of_order_corrected', {
+        symbol, exchange, tf, from: time,
+        detail: `source=${source} repainted in place via historicalUpdate`,
+      })
+    } catch (err) {
+      recordDiag('out_of_order_repaint_failed', {
+        symbol, exchange, tf, from: time,
+        detail: `source=${source} error=${err instanceof Error ? err.message : String(err)}`,
+      })
+    }
+  }
+}
+
+/**
+ * Temporary invariant logger (Stage 1): after every applyChartPatch/flush,
+ * verify the tail of candlesDataRef agrees with the events layer's own tail
+ * bookkeeping. Any mismatch means the array and the event layer have
+ * diverged — which is exactly the class of bug this instrumentation exists
+ * to catch (lazy-scroll race, reconnect race, tf/symbol switch mid-close,
+ * animator handoff). Logs via candle-diag so it shows up in
+ * `window.__candleDiag.inspect()` without touching rendering.
+ */
+function checkTailInvariant(
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  eventsRef: React.RefObject<CandleEvents | null> | undefined,
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  source: PatchSource,
+  n = 3,
+) {
+  const ev = eventsRef?.current
+  if (!ev) return
+  const arr = candlesDataRef.current
+  if (!arr || arr.length === 0) return
+  const eventsTail = ev.peekTail(n)
+  if (eventsTail.length === 0) return
+  const arrTail = arr.slice(Math.max(0, arr.length - n)).map(c => ({ time: c.time, close: c.close }))
+
+  // Compare from the right (most recent) — the events layer's tail is
+  // capped at MAX_TAIL so it may hold fewer entries than requested.
+  for (let i = 1; i <= eventsTail.length; i++) {
+    const ePos = eventsTail.length - i
+    const aPos = arrTail.length - i
+    if (ePos < 0 || aPos < 0) break
+    const e = eventsTail[ePos]
+    const a = arrTail[aPos]
+    if (e.time !== a.time) {
+      recordDiag('tail_invariant_time_mismatch', {
+        symbol, exchange, tf,
+        from: e.time, to: a.time,
+        detail: `source=${source} events-tail vs candlesDataRef diverged at offset ${i}`,
+      })
+      return
+    }
+    if (Math.abs(e.close - a.close) > 1e-9) {
+      recordDiag('tail_invariant_price_mismatch', {
+        symbol, exchange, tf,
+        from: e.time,
+        detail: `source=${source} events.close=${e.close} arr.close=${a.close} at offset ${i}`,
+      })
+      return
     }
   }
 }
@@ -430,9 +639,10 @@ function useFullHistory(
         // double-painted.
         eventsRef.current?.applyHistory(valid)
         const flush = eventsRef.current?.setBuffered(false)
-        if (flush && flush.updates.length > 0) {
-          applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf)
+        if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
+          applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'history-flush')
         }
+        checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'history-flush')
       }
     }
 
@@ -582,9 +792,10 @@ function useLazyScroll(
 
         if (added <= 0) {
           const flush = eventsRef?.current?.setBuffered(false)
-          if (flush && flush.updates.length > 0) {
-            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf)
+          if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
           }
+          checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
           return
         }
 
@@ -609,9 +820,10 @@ function useLazyScroll(
           // End reconciliation: replay any live events captured since the
           // fetch started ON TOP of the merged history.
           const flush = eventsRef?.current?.setBuffered(false)
-          if (flush && flush.updates.length > 0) {
-            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf)
+          if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
           }
+          checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
         } catch (err) {
           console.error('[ChartGrid] setData failed during lazy scroll', { symbol: curSymbol, tf: curTf, error: err })
           eventsRef?.current?.setBuffered(false)
@@ -655,9 +867,10 @@ function useLazyScroll(
             inflightRef.current = false
             setIsLoadingMoreRef.current?.(false)
             const flush = eventsRef?.current?.setBuffered(false)
-            if (flush && flush.updates.length > 0) {
-              applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf)
+            if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
+              applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
             }
+            checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
             return
           }
 
@@ -687,9 +900,10 @@ function useLazyScroll(
           inflightRef.current = false
           setIsLoadingMoreRef.current?.(false)
           const flush = eventsRef?.current?.setBuffered(false)
-          if (flush && flush.updates.length > 0) {
-            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf)
+          if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
           }
+          checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
         })
     }
 
@@ -811,9 +1025,27 @@ function useWsCandle(
 
       // kline snapshot → FULL replace of the bar (scalpboard's Cn).
       const patch = ev.applyKline(c)
-      if (adjustingRef?.current) return
+      if (adjustingRef?.current) {
+        // Atomicity invariant (Stage 2 item 1): `adjustingRef` is only ever
+        // set true INSIDE a window where the events layer's own buffer is
+        // already held open (useLazyScroll calls setBuffered(true) before
+        // the fetch and only sets adjustingRef true within that window), so
+        // `ev.applyKline` above should have queued this event rather than
+        // mutating the tail — `patch` should be EMPTY_PATCH(). If it isn't
+        // (a future refactor decoupled the two flags), the event's tail
+        // already advanced but is about to be silently dropped here instead
+        // of replayed on flush — log it loudly instead of losing it quietly.
+        if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
+          recordDiag('adjusting_drop_unbuffered', {
+            symbol, exchange, tf, from: c.time,
+            detail: 'kline mutated events tail while adjustingRef was true but buffer was NOT held — event lost',
+          })
+        }
+        return
+      }
 
-      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf)
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'kline')
+      checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'kline')
     })
     wsSubscribe(channel)
     return () => {
@@ -860,8 +1092,18 @@ function useWsTrade(
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(price)) return
 
+      // Defensive floor (Stage 2 item 6): the server's aggTrade payload sends
+      // `data.T / 1000` — a bare division, not a floor — so `trade.time` can
+      // arrive as a fractional epoch-seconds value (e.g. 1712345678.123).
+      // Bucket math elsewhere (second-candle-aggregator) already floors to
+      // its own tf-bucket boundary so fractional input is harmless there,
+      // but the raw value also feeds `applyTick`'s window guard
+      // (`tick.timeSec > cur.candle.time`) directly — flooring here once,
+      // at the ingestion boundary, keeps every downstream consumer working
+      // with whole-second times without relying on each call site to guard
+      // it independently.
       const tradeTime = typeof trade.time === 'number' && isFinite(trade.time)
-        ? trade.time
+        ? Math.floor(trade.time)
         : Math.floor(Date.now() / 1000)
 
       // Second timeframes: every print feeds the client-side aggregator
@@ -882,9 +1124,18 @@ function useWsTrade(
       // Price tick → mutate ONLY the last bar's close/high/low (scalpboard's
       // En). Volume never comes from trades.
       const patch = ev.applyTick({ price, timeSec: tradeTime } as TickPayload)
-      if (adjustingRef?.current) return
+      if (adjustingRef?.current) {
+        if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
+          recordDiag('adjusting_drop_unbuffered', {
+            symbol, exchange, tf, from: tradeTime,
+            detail: 'trade tick mutated events tail while adjustingRef was true but buffer was NOT held — event lost',
+          })
+        }
+        return
+      }
 
-      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf)
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'tick-trade')
+      checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'tick-trade')
     })
     wsSubscribe(tradeType)
 
@@ -911,10 +1162,32 @@ function useWsTrade(
       lastMidTickAtRef.current = Date.now()
 
       const ev = eventsRef.current
-      if (!ev || adjustingRef?.current) return
+      if (!ev) return
 
+      // Bug fix (Stage 2 item 1 — atomicity): this branch used to check
+      // `adjustingRef.current` BEFORE calling `ev.applyTick`, which meant a
+      // mid-price tick arriving during a lazy-scroll prepend was dropped
+      // entirely — never even queued into the events layer's buffer (which
+      // is already held open at this point, see useLazyScroll's
+      // setBuffered(true)). The kline/trade-lane branches above call
+      // apply*() FIRST (so the event is queued/buffered) and only then check
+      // adjustingRef to decide whether to paint immediately — mirror that
+      // ordering here so the tick's tail-events queue and the painted
+      // candlesDataRef/series can never diverge (the tail no longer "gets
+      // ahead" of the series during the adjusting window).
       const patch = ev.applyTick({ price: d.price, timeSec: Math.floor(Date.now() / 1000) } as TickPayload)
-      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf)
+      if (adjustingRef?.current) {
+        if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
+          recordDiag('adjusting_drop_unbuffered', {
+            symbol, exchange, tf,
+            detail: 'bookTicker mid tick mutated events tail while adjustingRef was true but buffer was NOT held — event lost',
+          })
+        }
+        return
+      }
+
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'tick-price')
+      checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'tick-price')
     })
     wsSubscribe(priceChannel)
 
@@ -953,8 +1226,17 @@ function useSecondCandleAggregator(
         if (destroyedRef.current || !eventsRef.current) return
         if (lastUpdateRef) lastUpdateRef.current = Date.now()
         const patch = eventsRef.current.applyKline(c)
-        if (adjustingRef?.current) return
-        applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf)
+        if (adjustingRef?.current) {
+          if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
+            recordDiag('adjusting_drop_unbuffered', {
+              symbol, exchange, tf, from: c.time,
+              detail: 'second-candle-aggregator kline mutated events tail while adjustingRef was true but buffer was NOT held — event lost',
+            })
+          }
+          return
+        }
+        applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'second-agg')
+        checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'second-agg')
       },
     })
     aggregatorRef.current = agg
@@ -1118,6 +1400,15 @@ const MiniChart = memo(function MiniChart({
     return () => {
       destroyedRef.current = true
       ro.disconnect()
+      // Explicitly stop any pending forming-candle glide (Stage 2 item 3:
+      // "Отменять rAF при setData, смене tf/символа, destroy"). The
+      // WeakMap-keyed animator would otherwise only stop lazily on its next
+      // rAF tick (once `getRef()` returns null and its `tick()` returns
+      // false) — up to one frame of `series.update()` calls against a
+      // series that's about to be removed. Calling reset() here unregisters
+      // it from the shared rAF coordinator synchronously, before
+      // chart.remove() disposes the series.
+      stopFormingGlide(candleRef)
       chart.remove()
       chartRef.current = null
       candleRef.current = null
@@ -1686,6 +1977,9 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
       ro.disconnect()
       watermarkRef.current?.detach()
       watermarkRef.current = null
+      // See MiniChart's identical comment: stop any pending forming-candle
+      // glide synchronously (Stage 2 item 3) before the series is disposed.
+      stopFormingGlide(candleRef)
       chart.remove()
       chartRef.current = null
       candleRef.current = null
