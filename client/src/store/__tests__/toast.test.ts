@@ -46,15 +46,16 @@ afterEach(() => {
 })
 
 describe('useToastStore — showAlert', () => {
-  it('adds an impulse toast with ticker + movement line', () => {
+  it('adds an impulse toast with ticker + movement headline', () => {
     useToastStore.getState().showAlert(impulseAlert())
     const toasts = useToastStore.getState().toasts
     expect(toasts).toHaveLength(1)
     expect(toasts[0].kind).toBe('alert')
     expect(toasts[0].position).toBe('bottom-right')
     expect(toasts[0].alertData?.symbol).toBe('BTC')
-    expect(toasts[0].alertData?.line).toContain('-4.2%')
-    expect(toasts[0].alertData?.line).toContain('вниз')
+    expect(toasts[0].alertData?.headline).toBe('-4.2%')
+    expect(toasts[0].alertData?.sub).toContain('вниз')
+    expect(toasts[0].alertData?.sub).toContain('об ×2')
     expect(toasts[0].alertData?.tone).toBe('down')
   })
 
@@ -66,8 +67,8 @@ describe('useToastStore — showAlert', () => {
   it('builds a price toast with the crossing level', () => {
     useToastStore.getState().showAlert(priceAlert())
     const t = useToastStore.getState().toasts[0]
-    expect(t.alertData?.line).toMatch(/\$3,001/)
-    expect(t.alertData?.line).toContain('выше')
+    expect(t.alertData?.headline).toMatch(/\$3,001/)
+    expect(t.alertData?.sub).toContain('вверх')
   })
 })
 

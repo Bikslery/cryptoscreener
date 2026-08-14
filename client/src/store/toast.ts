@@ -6,9 +6,13 @@ export type ToastPosition = 'bottom-center' | 'bottom-right' | 'bottom-left'
 
 export interface AlertToastData {
   type: Alert['type']
+  label: string
   symbol: string
-  /** Details line: movement % / price crossing / exchange. */
-  line: string
+  /** Big headline: movement % for impulse, price for crossings. */
+  headline: string
+  /** Secondary details line: TF/direction/volume or crossing direction. */
+  sub: string
+  exchange?: string
   tone: 'up' | 'down' | 'neutral'
 }
 
@@ -30,7 +34,7 @@ interface ToastState {
 }
 
 const ALERT_LABELS: Record<string, string> = {
-  price: 'Цена',
+  price: 'Пересечение цены',
   impulse: 'Импульс',
   listing: 'Листинг',
 }
@@ -50,21 +54,41 @@ function buildAlertData(alert: Alert): AlertToastData {
     const move = typeof alert.movePct === 'number' ? alert.movePct : cond.percent ?? 0
     const sign = move >= 0 ? '+' : ''
     const vol = (cond.volumeSpike ?? 0) > 0 ? ` · об ×${cond.volumeSpike}` : ''
+    const priceText = alert.price != null ? `$${formatPrice(alert.price, 2)}` : ''
     const tone = cond.direction === 'up' ? 'up' : cond.direction === 'down' ? 'down' : (move >= 0 ? 'up' : 'down')
     return {
       type: 'impulse',
+      label: ALERT_LABELS.impulse,
       symbol,
-      line: `${sign}${move.toFixed(1)}% · ${cond.timeframe ?? '5m'} ${dir}${vol}`,
+      headline: `${sign}${move.toFixed(1)}%`,
+      sub: `${cond.timeframe ?? '5m'} · ${dir}${vol}${priceText ? ` · ${priceText}` : ''}`,
+      exchange: alert.exchange ?? undefined,
       tone: tone as AlertToastData['tone'],
     }
   }
   if (alert.type === 'price') {
     const cond = alert.condition as { price?: number; direction?: string }
-    const priceText = alert.price != null ? `$${formatPrice(alert.price, 2)}` : `$${formatPrice(cond.price ?? 0, 2)}`
-    const dirText = cond.direction === 'above' ? 'выше' : 'ниже'
-    return { type: 'price', symbol, line: `${priceText} ${dirText}`, tone: 'neutral' }
+    const priceText = alert.price != null ? alert.price : cond.price ?? 0
+    const dirText = cond.direction === 'above' ? 'пересечение вверх' : 'пересечение вниз'
+    return {
+      type: 'price',
+      label: ALERT_LABELS.price,
+      symbol,
+      headline: `$${formatPrice(priceText, 2)}`,
+      sub: dirText,
+      exchange: alert.exchange ?? undefined,
+      tone: 'neutral',
+    }
   }
-  return { type: 'listing', symbol, line: alert.exchange ?? '', tone: 'neutral' }
+  return {
+    type: 'listing',
+    label: ALERT_LABELS.listing,
+    symbol,
+    headline: symbol,
+    sub: alert.exchange ?? 'новая монета',
+    exchange: alert.exchange ?? undefined,
+    tone: 'neutral',
+  }
 }
 
 function pruneAlertStack(toasts: Toast[], position: ToastPosition, limit: number): Toast[] {
