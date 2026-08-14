@@ -1,4 +1,4 @@
-import { useEffect, lazy, Suspense } from 'react'
+import { useEffect, lazy, Suspense, useState, useCallback } from 'react'
 import { ChartGrid } from './components/charts/ChartGrid'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { TopBar } from './components/layout/TopBar'
@@ -29,9 +29,53 @@ const TIMEFRAME_HOTKEYS: Record<string, Timeframe> = {
   '7': '1w',
 }
 
+// Right ticker panel: resizable width only (height is fixed to the layout).
+const PANEL_WIDTH_KEY = 'crypto-screener:right-panel-width'
+const PANEL_WIDTH_DEFAULT = 480
+const PANEL_WIDTH_MIN = 320
+const PANEL_WIDTH_MAX = 900
+
+function clampPanelWidth(v: number): number {
+  return Math.min(PANEL_WIDTH_MAX, Math.max(PANEL_WIDTH_MIN, v))
+}
+
+function readPanelWidth(): number {
+  const raw = Number(localStorage.getItem(PANEL_WIDTH_KEY))
+  return Number.isFinite(raw) && raw > 0 ? clampPanelWidth(raw) : PANEL_WIDTH_DEFAULT
+}
+
 function App() {
   const coinListInit = useCoinListStore(s => s.init)
   const alertInit = useAlertStore(s => s.init)
+  const [panelWidth, setPanelWidth] = useState(readPanelWidth)
+
+  const startPanelDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = panelWidth
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+    const onMove = (ev: PointerEvent) => {
+      setPanelWidth(clampPanelWidth(startW + (startX - ev.clientX)))
+    }
+    const onUp = (ev: PointerEvent) => {
+      const next = clampPanelWidth(startW + (startX - ev.clientX))
+      setPanelWidth(next)
+      try { localStorage.setItem(PANEL_WIDTH_KEY, String(next)) } catch { /* private mode */ }
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [panelWidth])
+
+  const resetPanelWidth = useCallback(() => {
+    setPanelWidth(PANEL_WIDTH_DEFAULT)
+    try { localStorage.setItem(PANEL_WIDTH_KEY, String(PANEL_WIDTH_DEFAULT)) } catch { /* private mode */ }
+  }, [])
+
   const checkSession = useAuthStore(s => s.checkSession)
   const isChecking = useAuthStore(s => s.isChecking)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
@@ -172,8 +216,15 @@ function App() {
         <ErrorBoundary fallback={<div className="flex-1 h-full flex items-center justify-center text-[#333]">Chart error</div>}>
           <ChartGrid />
         </ErrorBoundary>
-        <div className="w-[1px] bg-[#1f1f1f] flex-shrink-0" />
-        <RightPanel />
+        <div
+          className="group w-[5px] h-full flex-shrink-0 cursor-col-resize flex items-stretch justify-center touch-none select-none"
+          title="Перетащите, чтобы изменить ширину панели. Двойной клик — сброс."
+          onPointerDown={startPanelDrag}
+          onDoubleClick={resetPanelWidth}
+        >
+          <div className="w-[1px] h-full bg-[#1f1f1f] group-hover:bg-[#6f4db3] transition-colors" />
+        </div>
+        <RightPanel width={panelWidth} />
       </div>
       <Suspense fallback={null}>
         <ProfileModalGate />

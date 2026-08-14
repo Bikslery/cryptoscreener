@@ -4,11 +4,11 @@ import { AlertStack } from '../alerts/AlertStack'
 
 type Tab = 'charts' | 'alerts'
 
-export const RightPanel = memo(function RightPanel() {
+export const RightPanel = memo(function RightPanel({ width }: { width: number }) {
   const [tab, setTab] = useState<Tab>('charts')
 
   return (
-    <div className="w-[480px] h-full flex flex-col bg-[#0a0a0a]">
+    <div className="h-full flex flex-col bg-[#0a0a0a] flex-shrink-0" style={{ width }}>
       {/* Tabs */}
       <div className="flex items-center h-[36px] bg-[#0e0e0e] border-b border-[#1f1f1f] flex-shrink-0 select-none">
         <button

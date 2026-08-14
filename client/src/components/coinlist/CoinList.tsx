@@ -23,7 +23,7 @@ const COLS: ColumnDef[] = [
   { key: 'quoteVolume24h', header: 'ОБЪЁМ', subheader: '24ч', width: '80px' },
 ]
 
-const ROW_COLS = '80px 72px 72px 72px 80px'
+const ROW_COLS = '1.1fr 1fr 1fr 1fr 1.1fr'
 
 /**
  * The flag that always sat next to the ticker name. It is the watchlist
@@ -160,7 +160,7 @@ export function CoinList() {
   }, [sortedCoins, selectedSymbol, expandChart, pageSet, highlightActive, onPrefetch, watchSet, toggleWatch])
 
   return (
-    <div className="w-[480px] h-full flex flex-col bg-[#0a0a0a]">
+    <div className="w-full h-full flex flex-col bg-[#0a0a0a]">
       <div
         className="grid border-b border-[#1f1f1f] bg-[#0e0e0e] text-[11px] select-none flex-shrink-0"
         style={{ gridTemplateColumns: ROW_COLS }}
