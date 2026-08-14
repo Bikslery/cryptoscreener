@@ -1357,7 +1357,12 @@ const MiniChart = memo(function MiniChart({
     const chart = createChart(containerRef.current, {
       ...base,
       handleScroll: true,
-      kineticScroll: { touch: false, mouse: false },
+      // scalpboard parity: mouse-drag inertia ON — releasing the drag keeps
+      // the chart gliding (their board feels like TradingView). Touch stays
+      // off (desktop-first). Lazy-scroll pagination is throttled at 100ms
+      // with an inflight guard, so inertia-driven range events can't flood
+      // the server with older-page requests.
+      kineticScroll: { touch: false, mouse: true },
     })
 
     const seriesOpts = candleSeriesOptions(s)
@@ -1931,7 +1936,8 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     const chart = createChart(containerRef.current, {
       ...base,
       handleScroll: true,
-      kineticScroll: { touch: false, mouse: false },
+      // scalpboard parity: mouse-drag inertia ON (see MiniChart comment).
+      kineticScroll: { touch: false, mouse: true },
     })
 
     const seriesOpts = candleSeriesOptions(s)
