@@ -289,7 +289,7 @@ export default function ProfileModal() {
         setAlertsEnabled(impulse?.active === true)
         if (impulse?.condition) {
           const cond = impulse.condition as { percent?: number; exchanges?: { exchange: Exchange }[]; telegram?: boolean }
-          if (typeof cond.percent === 'number') setAlertPercent(Math.min(50, Math.max(0.1, cond.percent)))
+          if (typeof cond.percent === 'number') setAlertPercent(Math.min(50, Math.max(0.5, cond.percent)))
           if (Array.isArray(cond.exchanges)) {
             if (cond.exchanges.length === 1) setAlertExchange(cond.exchanges[0].exchange)
             else setAlertExchange('all')
@@ -1071,9 +1071,9 @@ export default function ProfileModal() {
             <div className="profile-scale-row">
               <input
                 type="range"
-                min={0.1}
+                min={0.5}
                 max={50}
-                step={0.1}
+                step={0.5}
                 value={alertPercent}
                 onChange={(e) => {
                   const v = Number(e.target.value)

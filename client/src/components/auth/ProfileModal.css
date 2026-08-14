@@ -921,10 +921,10 @@
   cursor: default;
 }
 
-/* Impulse percent slider — purple accent to match the alerts section */
+/* Impulse percent slider — white to match the rest of the cabinet sliders */
 
 .alert-scale-slider {
-  accent-color: #6f4db3;
+  accent-color: #ffffff;
 }
 
 .profile-alert-done {
