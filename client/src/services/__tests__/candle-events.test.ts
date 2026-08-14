@@ -147,19 +147,38 @@ describe('candle-events (scalpboard parity)', () => {
     expect(flush.livePrice).toBe(103.8)
   })
 
-  it('stale kline inside the buffer is dropped on replay, newer ones win', () => {
+  // Stage 2 item 2: the buffer replay is now STRICTLY SORTED by event time
+  // (not raw arrival/insertion order) before replaying, so a late snapshot
+  // for an already-settled period is recognized as stale regardless of the
+  // order it happened to arrive on the wire. A pre-existing tail (seeded via
+  // applyHistory, exactly like the real reconcile flow in
+  // useFullHistory/useLazyScroll) makes "stale" well-defined.
+  it('stale kline inside the buffer is dropped (surfaced as out-of-order) on replay, sorted by time', () => {
     const ev = makeEvents()
+    ev.applyHistory([
+      makeCandle(240, 98.5, 99.5, 98, 99, 8),
+      makeCandle(300, 99, 100, 98.5, 99.5, 11),
+      makeCandle(360, 99.5, 101, 99, 100.5, 15),
+    ])
     ev.setBuffered(true)
+    // Arrival order is deliberately the OPPOSITE of time order: the newer
+    // kline arrives first on the wire, the truly-late one (a period BEFORE
+    // the seeded tail, 300 < 360) second.
     ev.applyKline(makeCandle(420, 103, 104, 102, 103.5, 20))
-    // Late snapshot for the ALREADY-PAINTED 360s period arrives mid-fetch.
-    ev.applyKline(makeCandle(360, 99, 99.5, 98.7, 99.1, 1))
+    // Late snapshot for the ALREADY-PAINTED (and already superseded) 300s
+    // period arrives mid-fetch — e.g. a retransmit after a brief WS hiccup.
+    ev.applyKline(makeCandle(300, 99, 99.5, 98.7, 99.1, 1))
     ev.applyTick(tick(104, 440))
 
     const flush = ev.setBuffered(false)
-    // The stale 360s kline is dropped against the seeded tail (applyHistory).
+    // Sorted replay processes 300 first (older than the seeded tail=360 →
+    // out-of-order, no paintable update) → 420 (new period, appended) → tick.
     expect(flush.updates.map(u => u.bar.time)).toEqual([420, 420])
     expect(lastBar(flush).close).toBe(104)
     expect(lastBar(flush).volume).toBe(20)
+    expect(flush.outOfOrder).toHaveLength(1)
+    expect(flush.outOfOrder?.[0].time).toBe(300)
+    expect(flush.outOfOrder?.[0].bar.close).toBe(99.1)
   })
 
   it('bounded buffer: more than 1000 buffered events never balloons', () => {
@@ -167,13 +186,53 @@ describe('candle-events (scalpboard parity)', () => {
     ev.setBuffered(true)
     // All ticks must land inside the tail window (60, 120) so the replay
     // applies them; 1200 events pushed, only the last 1000 survive the cap.
-    for (let i = 0; i < 1200; i++) ev.applyTick(tick(100 + i * 0.001, 61 + (i % 58)))
+    // Times are strictly increasing (fractional, spread across the window)
+    // so arrival order and the buffer's sorted-replay order agree — this
+    // test is about the 1000-event CAP, not about replay ordering (which
+    // has its own dedicated test above).
+    for (let i = 0; i < 1200; i++) ev.applyTick(tick(100 + i * 0.001, 61 + (i / 1200) * 58))
     ev.applyHistory([makeCandle(60, 90, 92, 89, 91, 1)])
     const flush = ev.setBuffered(false)
     expect(flush.updates.length).toBeGreaterThan(0)
     expect(flush.updates.length).toBeLessThanOrEqual(1000)
     expect(lastBar(flush).time).toBe(60)
     expect(lastBar(flush).close).toBe(100 + 1199 * 0.001)
+  })
+
+  it('setBuffered is nesting-safe: a depth counter, not a boolean', () => {
+    const ev = makeEvents()
+    ev.applyHistory([makeCandle(300, 100, 101, 99, 100.5, 12)])
+
+    // Two independent callers hold the buffer open at once (e.g. a
+    // WS-reconnect history reload racing a lazy-scroll prepend).
+    ev.setBuffered(true) // depth 1
+    ev.setBuffered(true) // depth 2
+    ev.applyTick(tick(100.8, 318))
+
+    // First caller releases — buffer must STAY held (depth 1), event must
+    // NOT replay yet, because the second caller never released its hold.
+    const midFlush = ev.setBuffered(false) // depth 1
+    expect(midFlush.updates).toHaveLength(0)
+
+    // Second caller releases — depth reaches 0, NOW it replays.
+    const finalFlush = ev.setBuffered(false) // depth 0
+    expect(finalFlush.updates).toHaveLength(1)
+    expect(lastBar(finalFlush).close).toBe(100.8)
+  })
+
+  it('peekTail exposes the last N bars for the invariant logger', () => {
+    const ev = makeEvents()
+    ev.applyHistory([
+      makeCandle(180, 98, 99, 97, 98.5, 3),
+      makeCandle(240, 98.5, 99.5, 98, 99, 8),
+      makeCandle(300, 99, 100, 98.5, 99.5, 11),
+    ])
+    expect(ev.peekTail(2)).toEqual([
+      { time: 240, close: 99 },
+      { time: 300, close: 99.5 },
+    ])
+    ev.applyTick(tick(100.2, 318))
+    expect(ev.peekTail(1)).toEqual([{ time: 300, close: 100.2 }])
   })
 
   it('toChartTime shifts by the fixed local offset (UTC stays raw)', () => {
