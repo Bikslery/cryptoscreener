@@ -52,12 +52,11 @@ describe('useToastStore — showAlert', () => {
     expect(toasts).toHaveLength(1)
     expect(toasts[0].kind).toBe('alert')
     expect(toasts[0].position).toBe('bottom-right')
+    expect(toasts[0].alertData?.label).toBe('Impulse')
     expect(toasts[0].alertData?.symbol).toBe('BTC')
     expect(toasts[0].alertData?.accent).toBe('-4.2%')
     expect(toasts[0].alertData?.accentTone).toBe('down')
-    expect(toasts[0].alertData?.sub).toContain('вниз')
-    expect(toasts[0].alertData?.sub).toContain('об ×2')
-    expect(toasts[0].alertData?.sub).toContain('Binance Futures')
+    expect(toasts[0].alertData?.sub).toBe('Binance Futures')
   })
 
   it('honors the requested position', () => {
@@ -68,9 +67,9 @@ describe('useToastStore — showAlert', () => {
   it('builds a price toast with the crossing level', () => {
     useToastStore.getState().showAlert(priceAlert())
     const t = useToastStore.getState().toasts[0]
+    expect(t.alertData?.label).toBe('Price alert')
     expect(t.alertData?.accent).toBe('')
-    expect(t.alertData?.sub).toMatch(/\$3,001/)
-    expect(t.alertData?.sub).toContain('выше')
+    expect(t.alertData?.sub).toBe('3,001.00')
   })
 })
 

@@ -35,9 +35,9 @@ interface ToastState {
 }
 
 const ALERT_LABELS: Record<string, string> = {
-  price: 'Пересечение цены',
-  impulse: 'Импульс',
-  listing: 'Листинг',
+  price: 'Price alert',
+  impulse: 'Impulse',
+  listing: 'Listing',
 }
 
 const EXCHANGE_NAMES: Record<string, string> = {
@@ -59,32 +59,29 @@ function buildAlertData(alert: Alert): AlertToastData {
   const symbol = extractBaseAsset(alert.symbol) || 'ANY'
   const exchangeName = alert.exchange ? EXCHANGE_NAMES[alert.exchange] ?? alert.exchange : ''
   if (alert.type === 'impulse') {
-    const cond = alert.condition as { timeframe?: string; direction?: string; volumeSpike?: number; percent?: number }
-    const dir = cond.direction === 'up' ? 'вверх' : cond.direction === 'down' ? 'вниз' : 'любое'
+    const cond = alert.condition as { percent?: number }
     const move = typeof alert.movePct === 'number' ? alert.movePct : cond.percent ?? 0
     const sign = move >= 0 ? '+' : ''
-    const vol = (cond.volumeSpike ?? 0) > 0 ? ` · об ×${cond.volumeSpike}` : ''
-    const tone = cond.direction === 'up' ? 'up' : cond.direction === 'down' ? 'down' : (move >= 0 ? 'up' : 'down')
+    const tone = move >= 0 ? 'up' : 'down'
     return {
       type: 'impulse',
       label: ALERT_LABELS.impulse,
       symbol,
       accent: `${sign}${move.toFixed(1)}%`,
       accentTone: tone as AlertToastData['accentTone'],
-      sub: `${cond.timeframe ?? '5m'} ${dir}${vol}${exchangeName ? ` · ${exchangeName}` : ''}`,
+      sub: exchangeName,
     }
   }
   if (alert.type === 'price') {
-    const cond = alert.condition as { price?: number; direction?: string }
+    const cond = alert.condition as { price?: number }
     const priceText = alert.price != null ? alert.price : cond.price ?? 0
-    const dirText = cond.direction === 'above' ? 'выше' : 'ниже'
     return {
       type: 'price',
       label: ALERT_LABELS.price,
       symbol,
       accent: '',
       accentTone: 'neutral',
-      sub: `$${formatPrice(priceText, 2)} · ${dirText}`,
+      sub: formatPrice(priceText, 2),
     }
   }
   return {
@@ -93,7 +90,7 @@ function buildAlertData(alert: Alert): AlertToastData {
     symbol,
     accent: '',
     accentTone: 'neutral',
-    sub: exchangeName || 'новая монета',
+    sub: exchangeName || 'New listing',
   }
 }
 
