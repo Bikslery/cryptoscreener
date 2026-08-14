@@ -15,7 +15,12 @@ server/prisma/dev.db-journal
 *.err
 TZ/
 
+# Local VPS helpers / backups (contain credentials)
+.tmp-askpass.sh
+.env.old-vps
+
 # Local AI-agent tooling (not part of the project)
+.github/prompts/
 .agent/
 .agents/
 .claude/
