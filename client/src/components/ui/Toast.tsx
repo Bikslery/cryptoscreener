@@ -15,10 +15,10 @@ const ACCENT: Record<AlertToastData['accentTone'], string> = {
 
 /**
  * Fired-alert popup in the scalpboard AlertCard style — em-based sizes on a
- * 16px base (0.4em left bar, 0.7em/1em balanced content padding so text
- * never touches the card edges, 0.85em type label, 1.6em ticker, 0.8em sub,
- * 1.5em icon buttons, 21/9 aspect, 0.4em border radius, #262626 border on
- * #171717).
+ * 16px base (0.4em left bar, 0.9em/1.25em balanced padding on every side so
+ * the text block sits centered with clear margins, 0.85em type label,
+ * 1.6em ticker, 0.8em sub, 1.5em icon buttons, 0.4em border radius,
+ * #262626 border on #171717). Height follows the content — no fixed aspect.
  */
 function AlertCard({ id, data, count, onClose }: {
   id: number
@@ -27,9 +27,9 @@ function AlertCard({ id, data, count, onClose }: {
   onClose: (id: number, closeAll: boolean) => void
 }) {
   return (
-    <div className="pointer-events-auto relative w-[280px] text-[16px] font-mono rounded-[0.4em] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden aspect-[21/9] grid grid-cols-[0.4em_auto] animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b]">
+    <div className="pointer-events-auto relative w-[280px] text-[16px] font-mono rounded-[0.4em] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden grid grid-cols-[0.4em_auto] animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b]">
       <div className={`w-full h-full rounded-l-[1rem] ${BAR[data.type] ?? BAR.price}`} />
-      <div className="relative flex flex-col justify-between p-[0.7em_1em] min-w-0 text-[#d4d4d4]">
+      <div className="relative flex flex-col justify-center p-[0.9em_1.25em] min-w-0 text-[#d4d4d4]">
         <div className="flex items-center justify-between mb-[0.5em]">
           <span className="text-[0.85em] text-[#d4d4d4] truncate">{data.label}</span>
           <button
