@@ -1,4 +1,9 @@
 import { useToastStore, type AlertToastData } from '../../store/toast'
+import { useCoinListStore } from '../../store'
+import type { ChartExchange } from '../../store'
+
+/** Chart exchanges the app can actually display (alerts may fire on OKX too). */
+const CHART_EXCHANGES = new Set<string>(['binance-spot', 'binance-futures', 'bybit-futures'])
 
 /** Left accent bar colors — scalpboard mapping: price yellow, impulse green, listing blue. */
 const BAR: Record<string, string> = {
@@ -29,14 +34,19 @@ function barColor(data: AlertToastData): string {
  * 1.6em ticker, 0.8em sub, 1.5em icon buttons, 0.4em border radius,
  * #262626 border on #171717). Height follows the content — no fixed aspect.
  */
-function AlertCard({ id, data, count, onClose }: {
+function AlertCard({ id, data, count, onClose, onOpen }: {
   id: number
   data: AlertToastData
   count: number
   onClose: (id: number, closeAll: boolean) => void
+  onOpen: () => void
 }) {
   return (
-    <div className="pointer-events-auto relative w-[280px] text-[16px] font-mono rounded-[0.4em] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden grid grid-cols-[0.4em_auto] animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b]">
+    <div
+      className="pointer-events-auto relative w-[280px] text-[16px] font-mono rounded-[0.4em] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden grid grid-cols-[0.4em_auto] animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b] cursor-pointer"
+      onClick={onOpen}
+      title="Открыть график"
+    >
       <div className={`w-full h-full rounded-l-[1rem] ${barColor(data)}`} />
       <div className="relative flex flex-col justify-center p-[0.9em_1.25em] min-w-0 text-[#d4d4d4]">
         <div className="flex items-center justify-between mb-[0.5em]">
@@ -91,6 +101,21 @@ export function ToastContainer() {
     else dismiss(id)
   }
 
+  // Click on a fired notification opens the chart of the coin it came from:
+  // switch the global chart exchange to the firing one (when the chart
+  // supports it), then focus the symbol on the big chart.
+  const handleOpen = (toast: (typeof right)[number]) => {
+    const data = toast.alertData
+    if (!data) return
+    dismiss(toast.id)
+    const store = useCoinListStore.getState()
+    const exchange = data.exchange
+    if (exchange && CHART_EXCHANGES.has(exchange) && store.chartExchange !== exchange) {
+      store.setChartExchange(exchange as ChartExchange)
+    }
+    store.expandChart(data.fullSymbol)
+  }
+
   const typeCounts = (stack: typeof right): Map<string, number> => {
     const m = new Map<string, number>()
     for (const t of stack) {
@@ -127,6 +152,7 @@ export function ToastContainer() {
                 data={toast.alertData!}
                 count={counts.get(toast.alertData?.type ?? 'price') ?? 1}
                 onClose={handleClose}
+                onOpen={() => handleOpen(toast)}
               />
             )
           })()}
@@ -145,6 +171,7 @@ export function ToastContainer() {
                 data={toast.alertData!}
                 count={counts.get(toast.alertData?.type ?? 'price') ?? 1}
                 onClose={handleClose}
+                onOpen={() => handleOpen(toast)}
               />
             )
           })()}

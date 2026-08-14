@@ -59,6 +59,13 @@ describe('useToastStore — showAlert', () => {
     expect(toasts[0].alertData?.sub).toBe('Binance Futures')
   })
 
+  it('keeps the full symbol and the firing exchange for chart navigation', () => {
+    useToastStore.getState().showAlert(impulseAlert({ symbol: 'SOLUSDT', exchange: 'bybit-futures' }))
+    const t = useToastStore.getState().toasts[0]
+    expect(t.alertData?.fullSymbol).toBe('SOLUSDT')
+    expect(t.alertData?.exchange).toBe('bybit-futures')
+  })
+
   it('honors the requested position', () => {
     useToastStore.getState().showAlert(impulseAlert(), { position: 'bottom-left' })
     expect(useToastStore.getState().toasts[0].position).toBe('bottom-left')

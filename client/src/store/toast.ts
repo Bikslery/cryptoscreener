@@ -8,8 +8,12 @@ export interface AlertToastData {
   type: Alert['type']
   /** Header label: Импульс / Пересечение цены / Листинг. */
   label: string
-  /** Big mono ticker. */
+  /** Big mono ticker (base asset). */
   symbol: string
+  /** Full exchange symbol (e.g. BTCUSDT) — used to open the chart on click. */
+  fullSymbol: string
+  /** Exchange the alert fired on (chart-navigable when supported). */
+  exchange: string | null
   /** Colored suffix next to the ticker (movement % for impulse). */
   accent: string
   accentTone: 'up' | 'down' | 'neutral'
@@ -60,6 +64,10 @@ const timers = new Map<number, ReturnType<typeof setTimeout>>()
 function buildAlertData(alert: Alert): AlertToastData {
   const symbol = extractBaseAsset(alert.symbol) || 'ANY'
   const exchangeName = alert.exchange ? EXCHANGE_NAMES[alert.exchange] ?? alert.exchange : ''
+  const base: Pick<AlertToastData, 'fullSymbol' | 'exchange'> = {
+    fullSymbol: alert.symbol,
+    exchange: alert.exchange,
+  }
   if (alert.type === 'impulse') {
     const cond = alert.condition as { percent?: number }
     const move = typeof alert.movePct === 'number' ? alert.movePct : cond.percent ?? 0
@@ -73,6 +81,7 @@ function buildAlertData(alert: Alert): AlertToastData {
       type: 'impulse',
       label: ALERT_LABELS.impulse,
       symbol,
+      ...base,
       accent: `${sign}${displayed}%`,
       accentTone: tone,
       sub: exchangeName,
@@ -85,6 +94,7 @@ function buildAlertData(alert: Alert): AlertToastData {
       type: 'price',
       label: ALERT_LABELS.price,
       symbol,
+      ...base,
       accent: '',
       accentTone: 'neutral',
       sub: formatPrice(priceText, 2),
@@ -94,6 +104,7 @@ function buildAlertData(alert: Alert): AlertToastData {
     type: 'listing',
     label: ALERT_LABELS.listing,
     symbol,
+    ...base,
     accent: '',
     accentTone: 'neutral',
     sub: exchangeName || 'New listing',
