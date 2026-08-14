@@ -74,14 +74,14 @@ describe('useToastStore — showAlert', () => {
 })
 
 describe('useToastStore — stacking and caps', () => {
-  it('stacks multiple toasts (newest prepended to the same corner)', () => {
+  it('queues multiple toasts in the same corner (oldest first)', () => {
     for (let i = 0; i < 3; i++) {
       useToastStore.getState().showAlert(impulseAlert({ id: `a${i}` }))
     }
     expect(useToastStore.getState().toasts).toHaveLength(3)
   })
 
-  it('drops the oldest toast when the corner stack exceeds 6', () => {
+  it('drops the oldest toast when the corner queue exceeds 6', () => {
     for (let i = 1; i <= 8; i++) {
       useToastStore.getState().showAlert(impulseAlert({ id: `a${i}` }))
     }
@@ -116,6 +116,47 @@ describe('useToastStore — dismiss and dismissAll', () => {
     vi.advanceTimersByTime(19999)
     expect(useToastStore.getState().toasts).toHaveLength(1)
     vi.advanceTimersByTime(1)
+    expect(useToastStore.getState().toasts).toHaveLength(0)
+  })
+})
+
+describe('useToastStore — single-slot queue', () => {
+  it('chains timers: a queued alert auto-dismisses only after it becomes visible', () => {
+    vi.useFakeTimers()
+    useToastStore.getState().showAlert(impulseAlert({ id: 'a1' }), { duration: 20000 })
+    useToastStore.getState().showAlert(impulseAlert({ id: 'a2' }), { duration: 20000 })
+    const queuedId = useToastStore.getState().toasts[1].id
+    // Only the visible (oldest) toast auto-closes; a2 stays queued.
+    vi.advanceTimersByTime(20000)
+    expect(useToastStore.getState().toasts).toHaveLength(1)
+    expect(useToastStore.getState().toasts[0].id).toBe(queuedId)
+    // Once promoted, a2 gets its own full duration.
+    vi.advanceTimersByTime(20000)
+    expect(useToastStore.getState().toasts).toHaveLength(0)
+  })
+
+  it('manually dismissing the visible toast promotes the next queued one', () => {
+    vi.useFakeTimers()
+    useToastStore.getState().showAlert(impulseAlert({ id: 'a1' }), { duration: 20000 })
+    useToastStore.getState().showAlert(impulseAlert({ id: 'a2' }), { duration: 20000 })
+    const firstId = useToastStore.getState().toasts[0].id
+    useToastStore.getState().dismiss(firstId)
+    const rest = useToastStore.getState().toasts
+    expect(rest).toHaveLength(1)
+    // The promoted toast's timer starts at promotion time, not creation time.
+    vi.advanceTimersByTime(19999)
+    expect(useToastStore.getState().toasts).toHaveLength(1)
+    vi.advanceTimersByTime(1)
+    expect(useToastStore.getState().toasts).toHaveLength(0)
+  })
+
+  it('dismissAll clears queued alerts and their timers', () => {
+    vi.useFakeTimers()
+    useToastStore.getState().showAlert(impulseAlert({ id: 'a1' }), { duration: 20000 })
+    useToastStore.getState().showAlert(impulseAlert({ id: 'a2' }), { duration: 20000 })
+    useToastStore.getState().dismissAll()
+    expect(useToastStore.getState().toasts).toHaveLength(0)
+    vi.advanceTimersByTime(60000)
     expect(useToastStore.getState().toasts).toHaveLength(0)
   })
 })

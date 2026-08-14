@@ -49,8 +49,10 @@ const EXCHANGE_NAMES: Record<string, string> = {
 }
 
 const DEFAULT_ALERT_DURATION_MS = 20_000
-/** Soft cap per corner — older alert toasts drop off when the stack overflows. */
+/** Soft cap per corner — oldest queued alert toasts drop off when the queue overflows. */
 const ALERT_STACK_LIMIT = 6
+/** Alert corners render one toast at a time; everything else waits in the queue. */
+const ALERT_POSITIONS: ToastPosition[] = ['bottom-right', 'bottom-left']
 
 let toastId = 0
 const timers = new Map<number, ReturnType<typeof setTimeout>>()
@@ -115,6 +117,20 @@ function scheduleDismiss(id: number, duration: number) {
   }, duration))
 }
 
+/**
+ * Only the oldest queued alert of each corner is visible, so it is the only
+ * one with an auto-dismiss timer. When it closes (timer or manual), the next
+ * queued toast gets promoted here and its timer starts fresh.
+ */
+function syncTimers(toasts: Toast[]) {
+  for (const position of ALERT_POSITIONS) {
+    const first = toasts.find(t => t.kind === 'alert' && t.position === position)
+    if (first && !timers.has(first.id)) {
+      scheduleDismiss(first.id, first.duration)
+    }
+  }
+}
+
 export const useToastStore = create<ToastState>((set) => ({
   toasts: [],
   show: (message, duration = 2000) => {
@@ -135,9 +151,10 @@ export const useToastStore = create<ToastState>((set) => ({
         position,
         alertData: buildAlertData(alert),
       }]
-      return { toasts: pruneAlertStack(next, position, ALERT_STACK_LIMIT) }
+      const pruned = pruneAlertStack(next, position, ALERT_STACK_LIMIT)
+      return { toasts: pruned }
     })
-    scheduleDismiss(id, duration)
+    syncTimers(useToastStore.getState().toasts)
   },
   dismiss: (id) => {
     const timer = timers.get(id)
@@ -146,6 +163,7 @@ export const useToastStore = create<ToastState>((set) => ({
       timers.delete(id)
     }
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
+    syncTimers(useToastStore.getState().toasts)
   },
   dismissAll: () => {
     for (const timer of timers.values()) clearTimeout(timer)

@@ -14,10 +14,11 @@ const ACCENT: Record<AlertToastData['accentTone'], string> = {
 }
 
 /**
- * Fired-alert popup replicating the scalpboard AlertCard 1:1 — em-based
- * sizes on a 16px base (0.4em left bar, 0.6/0.5/0.5em content padding,
- * 0.85em type label, 1.6em ticker, 0.8em sub, 1.5em icon buttons,
- * 21/8 aspect, 0.4em border radius, #262626 border on #171717).
+ * Fired-alert popup in the scalpboard AlertCard style — em-based sizes on a
+ * 16px base (0.4em left bar, 0.7em/1em balanced content padding so text
+ * never touches the card edges, 0.85em type label, 1.6em ticker, 0.8em sub,
+ * 1.5em icon buttons, 21/9 aspect, 0.4em border radius, #262626 border on
+ * #171717).
  */
 function AlertCard({ id, data, count, onClose }: {
   id: number
@@ -26,9 +27,9 @@ function AlertCard({ id, data, count, onClose }: {
   onClose: (id: number, closeAll: boolean) => void
 }) {
   return (
-    <div className="pointer-events-auto relative w-[280px] text-[16px] font-mono rounded-[0.4em] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden aspect-[21/8] grid grid-cols-[0.4em_auto] animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b]">
+    <div className="pointer-events-auto relative w-[280px] text-[16px] font-mono rounded-[0.4em] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden aspect-[21/9] grid grid-cols-[0.4em_auto] animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b]">
       <div className={`w-full h-full rounded-l-[1rem] ${BAR[data.type] ?? BAR.price}`} />
-      <div className="relative flex flex-col justify-between p-[0.6em_0.6em_0.5em_60px] min-w-0 text-[#d4d4d4]">
+      <div className="relative flex flex-col justify-between p-[0.7em_1em] min-w-0 text-[#d4d4d4]">
         <div className="flex items-center justify-between mb-[0.5em]">
           <span className="text-[0.85em] text-[#d4d4d4] truncate">{data.label}</span>
           <button
@@ -106,10 +107,11 @@ export function ToastContainer() {
       )}
 
       {right.length > 0 && (
-        <div className="fixed bottom-5 right-5 z-[100] flex flex-col gap-2 pointer-events-none">
+        <div className="fixed bottom-5 right-5 z-[100] pointer-events-none">
           {(() => {
             const counts = typeCounts(right)
-            return right.map((toast) => (
+            const toast = right[0]
+            return (
               <AlertCard
                 key={toast.id}
                 id={toast.id}
@@ -117,16 +119,17 @@ export function ToastContainer() {
                 count={counts.get(toast.alertData?.type ?? 'price') ?? 1}
                 onClose={handleClose}
               />
-            ))
+            )
           })()}
         </div>
       )}
 
       {left.length > 0 && (
-        <div className="fixed bottom-5 left-5 z-[100] flex flex-col gap-2 pointer-events-none">
+        <div className="fixed bottom-5 left-5 z-[100] pointer-events-none">
           {(() => {
             const counts = typeCounts(left)
-            return left.map((toast) => (
+            const toast = left[0]
+            return (
               <AlertCard
                 key={toast.id}
                 id={toast.id}
@@ -134,7 +137,7 @@ export function ToastContainer() {
                 count={counts.get(toast.alertData?.type ?? 'price') ?? 1}
                 onClose={handleClose}
               />
-            ))
+            )
           })()}
         </div>
       )}
