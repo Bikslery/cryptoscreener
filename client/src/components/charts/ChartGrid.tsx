@@ -7,7 +7,7 @@ import { registerGlider, unregisterGlider, type Glider } from '../../services/gl
 import { stepFormingAnimation, formingGlideK, type FormingTarget } from '../../services/candle-anim'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
-import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount } from '../../services/ws'
+import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount, getWsLastMessageAt } from '../../services/ws'
 import type { Timeframe, UnifiedCandle, Exchange, DrawingTool } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { ArrowLeft, Settings2 } from 'lucide-react'
@@ -980,7 +980,13 @@ function useStaleDataDetection(
       const last = lastUpdateRef.current
       // lastUpdate === 0 means "never received anything yet" — not stale.
       const elapsed = last > 0 ? Date.now() - last : 0
-      const shouldBeStale = elapsed > threshold
+      // A quiet pair can legitimately go 30s+ without a trade/kline while the
+      // connection is perfectly healthy (its chart is still fed by the price
+      // lane). The "reconnecting" overlay must only appear when the GLOBAL
+      // feed is silent too — the server broadcasts tickers to every client at
+      // ~25Hz, so a live socket always has a fresh global timestamp.
+      const globalSilent = Date.now() - getWsLastMessageAt() > threshold
+      const shouldBeStale = elapsed > threshold && globalSilent
       setIsStale(shouldBeStale)
     }, 1000)
 
@@ -1160,6 +1166,7 @@ function useWsTrade(
       if (!d || typeof d.price !== 'number' || !isFinite(d.price) || d.price <= 0) return
       if (exchange && d.exchange && d.exchange !== exchange) return
       lastMidTickAtRef.current = Date.now()
+      if (lastUpdateRef) lastUpdateRef.current = Date.now()
 
       const ev = eventsRef.current
       if (!ev) return

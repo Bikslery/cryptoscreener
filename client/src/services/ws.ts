@@ -59,6 +59,11 @@ let lastMessageAt = 0
 // 30s (see server hub), so 45s gives one full miss of slack.
 const STALE_THRESHOLD = 45000
 
+/** Last inbound frame timestamp — global feed liveness signal for the UI. */
+export function getWsLastMessageAt(): number {
+  return lastMessageAt
+}
+
 // --- Deterministic self-heal watchdog ------------------------------------
 // Event-driven recovery (onclose → scheduleReconnect, App's revive → 
 // ensureHealthyConnection) has gaps: a half-open TCP death delivers no FIN,
