@@ -59,6 +59,20 @@ let lastMessageAt = 0
 // 30s (see server hub), so 45s gives one full miss of slack.
 const STALE_THRESHOLD = 45000
 
+// --- Deterministic self-heal watchdog ------------------------------------
+// Event-driven recovery (onclose → scheduleReconnect, App's revive → 
+// ensureHealthyConnection) has gaps: a half-open TCP death delivers no FIN,
+// so onclose never fires; visibilitychange/focus are unreliable on Windows
+// minimize/restore; a handshake stuck in CONNECTING was never retried. The
+// watchdog polls every WATCHDOG_INTERVAL_MS and covers all three: dead/absent
+// socket → connect, stuck CONNECTING → kill+retry, silent OPEN → teardown
+// + reconnect. In hidden tabs the browser throttles setInterval to ~1/min,
+// which still guarantees eventual recovery without any event at all.
+const WATCHDOG_INTERVAL_MS = 15_000
+const CONNECT_TIMEOUT_MS = 10_000
+let watchdogTimer: ReturnType<typeof setInterval> | null = null
+let connectStartedAt = 0
+
 function dispatch(msg: WsMessage) {
   const t = msg.type as string | undefined
   if (t) {
@@ -87,21 +101,29 @@ function connect() {
   intentionalDisconnect = false
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const url = `${protocol}//${window.location.host}/ws`
-  ws = new WebSocket(url)
-  ws.binaryType = 'arraybuffer'
+  // Capture the socket in a closure local: a late event from an OLD socket
+  // (error/close racing a reconnect) must never act on the NEW one through
+  // the module-level `ws` reference.
+  const socket = new WebSocket(url)
+  ws = socket
+  connectStartedAt = Date.now()
+  socket.binaryType = 'arraybuffer'
 
-  ws.onopen = () => {
+  socket.onopen = () => {
     reconnectAttempt = 0
+    connectStartedAt = 0
     wsOpenCount++
     lastMessageAt = Date.now()
     dispatch({ type: 'open' })
     for (const ch of subscriptions.keys()) {
-      ws?.send(JSON.stringify({ type: 'subscribe', channel: ch }))
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'subscribe', channel: ch }))
+      }
     }
   }
 
   let frameQueue: Promise<void> = Promise.resolve()
-  ws.onmessage = (e) => {
+  socket.onmessage = (e) => {
     lastMessageAt = Date.now()
     wsDiag.framesReceived++
     const arrivedAt = Date.now()
@@ -134,10 +156,20 @@ function connect() {
       })
   }
 
-  ws.onclose = () => {
+  socket.onclose = () => {
+    if (ws === socket) ws = null
     if (!intentionalDisconnect) scheduleReconnect()
   }
-  ws.onerror = () => ws?.close()
+  socket.onerror = () => {
+    // Close THIS socket, never the module-level one: by the time a stale
+    // socket's error fires, `ws` may already point at a newer healthy socket
+    // (closing that one would kill a live connection needlessly).
+    try { socket.close() } catch { /* noop */ }
+  }
+
+  // The watchdog drives every recovery path deterministically — it must
+  // exist from the very first connect.
+  ensureWatchdog()
 }
 
 function scheduleReconnect() {
@@ -158,6 +190,56 @@ export function wsConnect() {
 }
 
 /**
+ * Deterministic self-heal loop (started by the first connect()). The
+ * event-driven paths (onclose → scheduleReconnect, App's revive →
+ * ensureHealthyConnection) are not enough:
+ *  - a half-open TCP death delivers no FIN → onclose never fires;
+ *  - visibilitychange/focus are unreliable on Windows minimize/restore;
+ *  - a handshake stuck in CONNECTING was never retried (no timeout anywhere).
+ * The watchdog closes all three gaps on a fixed cadence. In hidden tabs the
+ * browser throttles setInterval to ~1/min — slow but still guaranteed, with
+ * no dependency on any browser event.
+ */
+function ensureWatchdog() {
+  if (watchdogTimer !== null) return
+  watchdogTimer = setInterval(() => {
+    if (intentionalDisconnect) return
+    const socket = ws
+
+    // No socket / dying → connect now (unless a reconnect is already queued).
+    if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+      if (!reconnectTimer) connect()
+      return
+    }
+
+    // Stuck handshake: a CONNECTING socket that never settles blocks recovery
+    // forever (in some network states neither open nor error fires). Kill it
+    // and schedule the next attempt explicitly — its onclose is suppressed to
+    // avoid double-scheduling.
+    if (socket.readyState === WebSocket.CONNECTING) {
+      if (Date.now() - connectStartedAt > CONNECT_TIMEOUT_MS) {
+        if (ws === socket) ws = null
+        socket.onclose = null
+        socket.onerror = null
+        try { socket.close() } catch { /* noop */ }
+        scheduleReconnect()
+      }
+      return
+    }
+
+    // OPEN but silent: half-open TCP (no FIN ever arrives → no onclose → no
+    // scheduled reconnect). Tear down and reconnect from scratch.
+    if (Date.now() - lastMessageAt > STALE_THRESHOLD) {
+      if (ws === socket) ws = null
+      socket.onclose = null
+      socket.onerror = null
+      try { socket.close() } catch { /* noop */ }
+      connect()
+    }
+  }, WATCHDOG_INTERVAL_MS)
+}
+
+/**
  * Force the socket back to a healthy state immediately. Call this when the
  * user returns to the tab (visibilitychange/focus/pageshow) or the network
  * comes back (online). Background tabs get throttled, so the normal
@@ -174,36 +256,56 @@ export function ensureHealthyConnection() {
   }
   reconnectAttempt = 0
 
-  const state = ws?.readyState
+  const socket = ws
 
   // No socket, or it's closing/closed → (re)connect now.
-  if (!ws || state === WebSocket.CLOSED || state === WebSocket.CLOSING) {
+  if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
     connect()
     return
   }
 
-  // Socket still connecting → let it finish.
-  if (state === WebSocket.CONNECTING) return
+  // Still connecting → let it finish, UNLESS the handshake is stuck: a
+  // CONNECTING socket older than CONNECT_TIMEOUT_MS is killed and retried
+  // (previously this branch returned unconditionally, and a hung handshake
+  // left the app dead until a manual reload).
+  if (socket.readyState === WebSocket.CONNECTING) {
+    if (Date.now() - connectStartedAt > CONNECT_TIMEOUT_MS) {
+      if (ws === socket) ws = null
+      socket.onclose = null
+      socket.onerror = null
+      try { socket.close() } catch { /* noop */ }
+      connect()
+    }
+    return
+  }
 
   // OPEN but stale (half-open / suspended): no data for too long. Tear it down
   // and reconnect from scratch. onclose will be suppressed because we null the
   // handler, so we schedule the reconnect explicitly via connect().
-  if (state === WebSocket.OPEN && Date.now() - lastMessageAt > STALE_THRESHOLD) {
-    const dead = ws
-    ws = null
-    dead.onclose = null
-    dead.onerror = null
-    try { dead.close() } catch { /* noop */ }
+  if (Date.now() - lastMessageAt > STALE_THRESHOLD) {
+    if (ws === socket) ws = null
+    socket.onclose = null
+    socket.onerror = null
+    try { socket.close() } catch { /* noop */ }
     connect()
   }
 }
 
 export function wsDisconnect() {
   intentionalDisconnect = true
-  ws?.close()
+  const socket = ws
   ws = null
+  if (socket) {
+    socket.onclose = null
+    socket.onerror = null
+    try { socket.close() } catch { /* noop */ }
+  }
   if (reconnectTimer) clearTimeout(reconnectTimer)
   reconnectTimer = null
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer)
+    watchdogTimer = null
+  }
 }
 
 export function wsSubscribe(channel: string) {
