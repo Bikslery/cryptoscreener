@@ -136,10 +136,33 @@ const metricsMap = new Map<string, { range1m: number; natr5m: number }>()
 const tradeBuckets = new TradeBucketTracker()
 const BINANCE_EXCHANGES = new Set(['binance-spot', 'binance-futures'])
 
+// Persistent indicator values per symbol. Ticker objects are REPLACED on
+// every exchange update (parseTicker builds fresh ones with null fields), so
+// values must live here and be re-applied on each tick — same pattern as
+// metricsMap/range1m/natr5m.
+const indicatorMap = new Map<string, { corrBtc: number | null; volumeSpike: number | null; tradesSpike: number | null }>()
+
+function setIndicator(symbol: string, field: 'corrBtc' | 'volumeSpike' | 'tradesSpike', value: number | null): void {
+  const cur = indicatorMap.get(symbol) || { corrBtc: null, volumeSpike: null, tradesSpike: null }
+  cur[field] = value
+  indicatorMap.set(symbol, cur)
+  // Write straight into the live ticker map so the next delta carries the
+  // change immediately; tradesSpike stays Binance-only.
+  applyIndicator(tickerMap, symbol, { [field]: value }, field === 'tradesSpike' ? BINANCE_EXCHANGES : undefined)
+}
+
+function applyIndicatorsToTicker(ticker: UnifiedTicker): void {
+  const ind = indicatorMap.get(ticker.symbol)
+  if (!ind) return
+  ticker.corrBtc = ind.corrBtc
+  ticker.volumeSpike = ind.volumeSpike
+  ticker.tradesSpike = BINANCE_EXCHANGES.has(ticker.exchange) ? ind.tradesSpike : null
+}
+
 export function recordTradeBucket(symbol: string, timeMs: number): void {
   const res = tradeBuckets.recordTrade(symbol, timeMs)
   if (res) {
-    applyIndicator(tickerMap, symbol, { tradesSpike: Math.round(res.spike * 10000) / 10000 }, BINANCE_EXCHANGES)
+    setIndicator(symbol, 'tradesSpike', Math.round(res.spike * 10000) / 10000)
   }
 }
 
@@ -266,6 +289,7 @@ export function startAggregator() {
         ticker.range1m = m.range1m
         ticker.natr5m = m.natr5m
       }
+      applyIndicatorsToTicker(ticker)
       tickerMap.set(`${ticker.symbol}:${ticker.exchange}`, ticker)
       cachedBestMap = null
       cachedBest = null
@@ -480,7 +504,7 @@ async function computeMetrics() {
           // Volume spike: forming 5m candle vs the average of the 30 completed
           // before it. Cheap (cache-first) so it refreshes with every 30s pass.
           const spike = computeVolumeSpike(candles5m)
-          applyIndicator(tickerMap, coin.symbol, { volumeSpike: spike !== null ? Math.round(spike * 10000) / 10000 : null })
+          setIndicator(coin.symbol, 'volumeSpike', spike !== null ? Math.round(spike * 10000) / 10000 : null)
         } catch (e) {
           console.warn(`[Metrics] Failed for ${coin.symbol}:`, e instanceof Error ? e.message : e)
         }
@@ -490,13 +514,16 @@ async function computeMetrics() {
     // Re-apply every tracked tradesSpike so symbols whose bucket rolled over
     // without fresh trades still push the new value into the delta lane.
     for (const [symbol, spike] of tradeBuckets.entries()) {
-      applyIndicator(tickerMap, symbol, { tradesSpike: spike !== null ? Math.round(spike * 10000) / 10000 : null }, BINANCE_EXCHANGES)
+      setIndicator(symbol, 'tradesSpike', spike !== null ? Math.round(spike * 10000) / 10000 : null)
     }
 
     for (const [symbol] of metricsMap) {
       if (!best.has(symbol)) symbolsToRemove.push(symbol)
     }
-    for (const s of symbolsToRemove) metricsMap.delete(s)
+    for (const s of symbolsToRemove) {
+      metricsMap.delete(s)
+      indicatorMap.delete(s)
+    }
 
     console.log(`[Metrics] Updated range1m/natr5m for top ${topCoins.length} coins (cache hits preferred)`)
   }
@@ -550,7 +577,7 @@ async function computeCorrelation(): Promise<void> {
           candles = await fetchCandles(coin.symbol, '5m', CORR_WINDOW, coin.exchange)
         }
         if (!candles || candles.length < CORR_MIN_PAIRS) {
-          applyIndicator(tickerMap, coin.symbol, { corrBtc: null })
+          setIndicator(coin.symbol, 'corrBtc', null)
           nulled++
           return
         }
@@ -564,7 +591,7 @@ async function computeCorrelation(): Promise<void> {
           }
         }
         const r = pearson(xs, ys)
-        applyIndicator(tickerMap, coin.symbol, { corrBtc: r !== null ? Math.round(r * 10000) / 10000 : null })
+        setIndicator(coin.symbol, 'corrBtc', r !== null ? Math.round(r * 10000) / 10000 : null)
         if (r !== null) updated++
         else nulled++
       } catch (e) {
@@ -640,6 +667,7 @@ export function setTickersFromRedis(tickers: UnifiedTicker[]) {
     if (t.corrBtc === undefined) t.corrBtc = null
     if (t.tradesSpike === undefined) t.tradesSpike = null
     if (t.volumeSpike === undefined) t.volumeSpike = null
+    applyIndicatorsToTicker(t)
     tickerMap.set(`${t.symbol}:${t.exchange}`, t)
   }
   cachedBestMap = null
