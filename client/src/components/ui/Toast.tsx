@@ -3,7 +3,8 @@ import { useToastStore, type AlertToastData } from '../../store/toast'
 /** Left accent bar colors — scalpboard mapping: price yellow, impulse green, listing blue. */
 const BAR: Record<string, string> = {
   price: 'bg-[#facc15]',
-  impulse: 'bg-[#4ade80]',
+  impulseUp: 'bg-[#4ade80]',
+  impulseDown: 'bg-[#d24b4b]',
   listing: 'bg-[#60a5fa]',
 }
 
@@ -11,6 +12,14 @@ const ACCENT: Record<AlertToastData['accentTone'], string> = {
   up: 'text-[#4bd24b]',
   down: 'text-[#d24b4b]',
   neutral: 'text-[#d4d4d4]',
+}
+
+/** Impulse bar reflects the direction: green for an up move, red for a down move. */
+function barColor(data: AlertToastData): string {
+  if (data.type === 'impulse') {
+    return data.accentTone === 'down' ? BAR.impulseDown : BAR.impulseUp
+  }
+  return BAR[data.type] ?? BAR.price
 }
 
 /**
@@ -28,7 +37,7 @@ function AlertCard({ id, data, count, onClose }: {
 }) {
   return (
     <div className="pointer-events-auto relative w-[280px] text-[16px] font-mono rounded-[0.4em] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden grid grid-cols-[0.4em_auto] animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b]">
-      <div className={`w-full h-full rounded-l-[1rem] ${BAR[data.type] ?? BAR.price}`} />
+      <div className={`w-full h-full rounded-l-[1rem] ${barColor(data)}`} />
       <div className="relative flex flex-col justify-center p-[0.9em_1.25em] min-w-0 text-[#d4d4d4]">
         <div className="flex items-center justify-between mb-[0.5em]">
           <span className="text-[0.85em] text-[#d4d4d4] truncate">{data.label}</span>
