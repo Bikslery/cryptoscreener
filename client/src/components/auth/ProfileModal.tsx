@@ -13,6 +13,25 @@ import './ProfileModal.css'
 
 type ResetStep = 'idle' | 'code' | 'password' | 'done'
 
+/**
+ * Collapsible cabinet section: the header is a full-width button — content
+ * renders only while open. Every section is independent (plain toggle, not
+ * an accordion) and starts collapsed.
+ */
+function ProfileSection({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className={`profile-section ${open ? 'open' : 'collapsed'}`}>
+      <button type="button" className="section-header" onClick={() => setOpen(o => !o)}>
+        <div className="section-icon">{icon}</div>
+        <h2>{title}</h2>
+        <ChevronDown size={14} className="section-chevron" />
+      </button>
+      {open && children}
+    </div>
+  )
+}
+
 const EXCHANGE_LABELS: Record<Exchange, string> = {
   'binance-futures': 'Binance Futures',
   'binance-spot': 'Binance Spot',
@@ -427,13 +446,7 @@ export default function ProfileModal() {
         </div>
 
         {/* Account section */}
-        <div className="profile-section">
-          <div className="section-header">
-            <div className="section-icon">
-              <User size={14} />
-            </div>
-            <h2>Аккаунт</h2>
-          </div>
+        <ProfileSection icon={<User size={14} />} title="Аккаунт">
 
           <div className="profile-field">
             <label>Логин</label>
@@ -447,16 +460,10 @@ export default function ProfileModal() {
               {telegramVerified ? 'привязан' : 'не привязан'}
             </span>
           </div>
-        </div>
+        </ProfileSection>
 
         {/* Actions section */}
-        <div className="profile-section">
-          <div className="section-header">
-            <div className="section-icon">
-              <Shield size={14} />
-            </div>
-            <h2>Действия</h2>
-          </div>
+        <ProfileSection icon={<Shield size={14} />} title="Действия">
 
           {/* Change password — idle state: just a button */}
           {resetStep === 'idle' && (
@@ -575,16 +582,10 @@ export default function ProfileModal() {
             <LogOut size={15} />
             выйти
           </button>
-        </div>
+        </ProfileSection>
 
         {/* Chart settings section */}
-        <div className="profile-section">
-          <div className="section-header">
-            <div className="section-icon">
-              <BarChart3 size={14} />
-            </div>
-            <h2>График</h2>
-          </div>
+        <ProfileSection icon={<BarChart3 size={14} />} title="График">
 
           <div className="profile-field">
             <label>Баров на экране при открытии</label>
@@ -604,16 +605,10 @@ export default function ProfileModal() {
               Применяется к большому графику при открытии нового символа
             </div>
           </div>
-        </div>
+        </ProfileSection>
 
         {/* Cascades section — full engine configuration */}
-        <div className="profile-section">
-          <div className="section-header">
-            <div className="section-icon">
-              <Layers size={14} />
-            </div>
-            <h2>Каскады</h2>
-          </div>
+        <ProfileSection icon={<Layers size={14} />} title="Каскады">
 
           <div className="profile-field">
             <div className="profile-notify-row">
@@ -852,16 +847,10 @@ export default function ProfileModal() {
             <Layers size={15} />
             сбросить каскады по умолчанию
           </button>
-        </div>
+        </ProfileSection>
 
         {/* Indicators section — coin list columns + chart header fields */}
-        <div className="profile-section">
-          <div className="section-header">
-            <div className="section-icon">
-              <Table2 size={14} />
-            </div>
-            <h2>Индикаторы</h2>
-          </div>
+        <ProfileSection icon={<Table2 size={14} />} title="Индикаторы">
 
           <div className="profile-field">
             <label>Колонки списка монет</label>
@@ -954,16 +943,10 @@ export default function ProfileModal() {
             <Table2 size={15} />
             сбросить индикаторы
           </button>
-        </div>
+        </ProfileSection>
 
         {/* Alerts section — impulse alert creation (fires on closed candles) */}
-        <div className="profile-section">
-          <div className="section-header">
-            <div className="section-icon">
-              <Bell size={14} />
-            </div>
-            <h2>Алерты</h2>
-          </div>
+        <ProfileSection icon={<Bell size={14} />} title="Алерты">
 
           <form onSubmit={handleAlertSubmit}>
             <div className="profile-field">
@@ -1074,16 +1057,10 @@ export default function ProfileModal() {
               {alertCreating ? 'создание…' : 'создать импульс-алерт'}
             </button>
           </form>
-        </div>
+        </ProfileSection>
 
         {/* Notifications section */}
-        <div className="profile-section">
-          <div className="section-header">
-            <div className="section-icon">
-              <Bell size={14} />
-            </div>
-            <h2>Уведомления</h2>
-          </div>
+        <ProfileSection icon={<Bell size={14} />} title="Уведомления">
 
           <div className="profile-field">
             <div className="profile-notify-row">
@@ -1127,16 +1104,10 @@ export default function ProfileModal() {
             <Volume2 size={13} />
             проверить звук
           </button>
-        </div>
+        </ProfileSection>
 
         {/* Hotkeys section */}
-        <div className="profile-section">
-          <div className="section-header">
-            <div className="section-icon">
-              <Keyboard size={14} />
-            </div>
-            <h2>Горячие клавиши рисования</h2>
-          </div>
+        <ProfileSection icon={<Keyboard size={14} />} title="Горячие клавиши рисования">
 
           {hotkeyError && <div className="profile-reset-error">{hotkeyError}</div>}
 
@@ -1160,7 +1131,7 @@ export default function ProfileModal() {
             <Keyboard size={15} />
             сбросить по умолчанию
           </button>
-        </div>
+        </ProfileSection>
       </div>
     </div>,
     document.body,

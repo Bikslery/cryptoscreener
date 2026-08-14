@@ -159,7 +159,38 @@
   display: flex;
   align-items: center;
   gap: 0.6rem;
+  width: 100%;
   margin-bottom: 1rem;
+  padding: 0;
+  background: none;
+  border: none;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: opacity var(--transition);
+}
+
+.section-header:hover h2 {
+  color: #fff;
+}
+
+.profile-section.collapsed .section-header {
+  margin-bottom: 0;
+}
+
+.section-chevron {
+  margin-left: auto;
+  color: rgba(255, 255, 255, 0.35);
+  flex-shrink: 0;
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.section-header:hover .section-chevron {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.profile-section.open .section-chevron {
+  transform: rotate(180deg);
 }
 
 .section-icon {
