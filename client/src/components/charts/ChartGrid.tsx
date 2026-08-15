@@ -1565,8 +1565,9 @@ const MiniChart = memo(function MiniChart({
     const onMouseDown = (e: MouseEvent) => {
       if (e.button !== 0) return
 
-      // Ctrl/Cmd+ЛКМ — select a region (same as the expanded chart's drag).
-      if (e.ctrlKey || e.metaKey) {
+      // Shift+ЛКМ — select a region to measure % (same gesture as the
+      // expanded chart).
+      if (e.shiftKey) {
         const rect = container.getBoundingClientRect()
         selStartX = e.clientX - rect.left
         selStartY = e.clientY - rect.top
