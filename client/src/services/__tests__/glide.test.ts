@@ -26,9 +26,10 @@ describe('easeOutCubic', () => {
 })
 
 describe('glideDurationFor — adaptive speed', () => {
-  it('converges almost instantly on active pairs, glides long on quiet ones', () => {
-    expect(glideDurationFor(20)).toBe(45) // dozens of updates/sec → near-instant
-    expect(glideDurationFor(50)).toBe(75)
+  it('snaps on live pairs, glides long on quiet ones', () => {
+    expect(glideDurationFor(20)).toBe(0) // dozens of updates/sec → snap, no chase
+    expect(glideDurationFor(50)).toBe(0) // still live → snap
+    expect(glideDurationFor(100)).toBe(150) // barely-live → short glide
     expect(glideDurationFor(1000)).toBe(160) // quiet symbol → long smooth glide
     expect(glideDurationFor(0)).toBe(160) // unknown interval → default
   })
@@ -56,6 +57,16 @@ describe('scalar glide math', () => {
     g = r.glide
     r = advanceScalarGlide(g, 30)
     expect(r.next).toBe(108)
+  })
+
+  it('a zero-duration glide (live pair) snaps on the first step', () => {
+    let g = beginScalarGlide(100, 110, 0)
+    let r = advanceScalarGlide(g, 16.7)
+    expect(r.converged).toBe(true)
+    expect(r.next).toBe(110)
+    g = r.glide
+    r = advanceScalarGlide(g, 16.7)
+    expect(r.next).toBe(110)
   })
 })
 

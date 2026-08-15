@@ -281,6 +281,49 @@ function recompute(state: { coins: UnifiedTicker[]; sortBy: keyof UnifiedTicker;
 const livePrices = new Map<string, number>()
 const livePriceListeners = new Map<string, Set<() => void>>()
 
+// --- Exchange-scoped live-price lane ---------------------------------------
+// The symbol-keyed lane above is fed by ticker deltas of the highest-priority
+// exchange (binance-futures) and by trade lanes of ANY exchange, so it cannot
+// tell a spot chart from a futures chart — a spot/bybit chart's header would
+// show the futures price and precision. Charts write their OWN painted price
+// here (applyChartPatch → setLivePriceEx) and headers subscribe per exchange,
+// so the displayed number always matches the chart's candles exactly. Commits
+// are immediate (no cadence): the presentation glides smooth the frames.
+const livePricesEx = new Map<string, number>()
+const livePriceListenersEx = new Map<string, Set<() => void>>()
+
+function liveExKey(symbol: string, exchange: string): string {
+  return `${symbol}:${exchange}`
+}
+
+export function subscribeLivePriceEx(symbol: string, exchange: string, listener: () => void): () => void {
+  const key = liveExKey(symbol, exchange)
+  let set = livePriceListenersEx.get(key)
+  if (!set) { set = new Set(); livePriceListenersEx.set(key, set) }
+  set.add(listener)
+  return () => {
+    const s = livePriceListenersEx.get(key)
+    if (!s) return
+    s.delete(listener)
+    if (s.size === 0) livePriceListenersEx.delete(key)
+  }
+}
+
+/** Current exchange-scoped live price (imperative read — no React re-render). */
+export function getLivePriceEx(symbol: string, exchange: string): number | undefined {
+  return livePricesEx.get(liveExKey(symbol, exchange))
+}
+
+/** Publish a price for one specific exchange. Immediate, latest-wins. */
+export function setLivePriceEx(symbol: string, exchange: string, price: number): void {
+  if (!Number.isFinite(price) || price <= 0) return
+  const key = liveExKey(symbol, exchange)
+  if (livePricesEx.get(key) === price) return
+  livePricesEx.set(key, price)
+  const set = livePriceListenersEx.get(key)
+  if (set) for (const l of set) l()
+}
+
 // --- Live-price publisher: fixed cadence (default 50 ms). ----------------
 // All realtime sources (bookTicker mid, trades, ticker deltas, forming-candle
 // livePrice) funnel into setLivePrice. Instead of forwarding EVERY change (on
@@ -327,6 +370,8 @@ export function resetLivePriceStore(): void {
   lastPublishAt.clear()
   livePrices.clear()
   livePriceListeners.clear()
+  livePricesEx.clear()
+  livePriceListenersEx.clear()
 }
 
 export function subscribeLivePrice(symbol: string, listener: () => void): () => void {
@@ -509,6 +554,7 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
 
       for (const c of coins) {
         setLivePrice(c.symbol, c.price)
+        setLivePriceEx(c.symbol, c.exchange, c.price)
       }
 
       const patch = applyTickerFrame(s, coins, isDelta)
@@ -525,6 +571,9 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
       const p = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(p) || p <= 0) return
       setLivePrice(trade.symbol as string, p)
+      if (typeof trade.exchange === 'string' && trade.exchange) {
+        setLivePriceEx(trade.symbol as string, trade.exchange, p)
+      }
     })
 
     wsSubscribe('ticker')

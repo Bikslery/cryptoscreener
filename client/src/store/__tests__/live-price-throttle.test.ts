@@ -1,5 +1,5 @@
 ﻿import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { setLivePrice, getLivePrice, subscribeLivePrice, flushLivePrices, setLivePriceInterval, resetLivePriceStore } from '../index'
+import { setLivePrice, getLivePrice, subscribeLivePrice, flushLivePrices, setLivePriceInterval, resetLivePriceStore, setLivePriceEx, getLivePriceEx, subscribeLivePriceEx } from '../index'
 
 // Vitest fake timers also fake Date.now(), so sweeps scheduled on the
 // 1000ms cadence fire exactly when advanceTimersByTime moves the clock.
@@ -73,5 +73,39 @@ describe('live-price throttled publisher (1000ms cadence)', () => {
     expect(getLivePrice('A')).toBe(100)
     expect(listener).not.toHaveBeenCalled() // unchanged value → no re-notify
     unsub()
+  })
+})
+
+describe('exchange-scoped live-price lane (immediate, per-exchange)', () => {
+  beforeEach(() => {
+    resetLivePriceStore()
+    vi.useFakeTimers()
+    setLivePriceInterval(1000)
+  })
+
+  afterEach(() => {
+    flushLivePrices()
+    vi.useRealTimers()
+  })
+
+  it('publishes per exchange immediately, without the cadence throttle', () => {
+    const spotListener = vi.fn()
+    const futListener = vi.fn()
+    const unsubSpot = subscribeLivePriceEx('BTCUSDT', 'binance-spot', spotListener)
+    const unsubFut = subscribeLivePriceEx('BTCUSDT', 'binance-futures', futListener)
+
+    setLivePriceEx('BTCUSDT', 'binance-spot', 100.5)
+    expect(getLivePriceEx('BTCUSDT', 'binance-spot')).toBe(100.5)
+    expect(spotListener).toHaveBeenCalledTimes(1)
+    expect(futListener).not.toHaveBeenCalled() // other exchange untouched
+
+    setLivePriceEx('BTCUSDT', 'binance-futures', 100.2)
+    expect(getLivePriceEx('BTCUSDT', 'binance-futures')).toBe(100.2)
+    expect(futListener).toHaveBeenCalledTimes(1)
+
+    setLivePriceEx('BTCUSDT', 'binance-spot', 100.5) // unchanged → no re-notify
+    expect(spotListener).toHaveBeenCalledTimes(1)
+    unsubSpot()
+    unsubFut()
   })
 })

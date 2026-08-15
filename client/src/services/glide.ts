@@ -22,17 +22,26 @@ export function easeOutCubic(t: number): number {
 
 /** Longest glide for a quiet symbol (big jump after a pause). */
 export const GLIDE_DURATION_MAX = 160
-/** Shortest glide — frequent updates (active pair) converge almost instantly. */
+/** Shortest glide — updates that frequent but not live (interval > SNAP). */
 export const GLIDE_DURATION_MIN = 45
+/**
+ * Updates this frequent mean the pair is LIVE. Every retarget restarts the
+ * glide from the current displayed value, so a fixed-duration glide on a
+ * frequent feed never converges — the display chases the market forever.
+ * Below this interval the display SNAPS to the target instead (duration 0).
+ */
+export const GLIDE_SNAP_INTERVAL_MS = 80
 
 /**
  * Adaptive glide duration from the time since the last target change.
- * Frequent updates (interval ~20–50 ms on active pairs) → short glide so the
- * display never lags the market; quiet symbols (updates every second or two)
- * → long smooth glide. One constant multiplier, easy to retune.
+ * Frequent updates (interval ~20–80 ms on active pairs) → duration 0: the
+ * display snaps, so it can never lag the market; quiet symbols (updates
+ * every second or two) → long smooth glide. One constant multiplier, easy
+ * to retune.
  */
 export function glideDurationFor(updateIntervalMs: number): number {
   if (!Number.isFinite(updateIntervalMs) || updateIntervalMs <= 0) return GLIDE_DURATION_MAX
+  if (updateIntervalMs <= GLIDE_SNAP_INTERVAL_MS) return 0
   return Math.min(GLIDE_DURATION_MAX, Math.max(GLIDE_DURATION_MIN, updateIntervalMs * 1.5))
 }
 
@@ -48,13 +57,14 @@ export function beginScalarGlide(from: number, to: number, duration: number): Sc
   return { from, to, elapsed: 0, duration }
 }
 
-/** Advance a scalar glide by dt (ms). `converged` = elapsed passed duration. */
+/** Advance a scalar glide by dt (ms). `converged` = elapsed passed duration.
+ *  A zero-duration glide (live pair) converges on its first step. */
 export function advanceScalarGlide(
   g: ScalarGlide,
   dt: number,
 ): { next: number; converged: boolean; glide: ScalarGlide } {
   const elapsed = g.elapsed + dt
-  const p = easeOutCubic(elapsed / g.duration)
+  const p = g.duration <= 0 ? 1 : easeOutCubic(elapsed / g.duration)
   const next = g.from + (g.to - g.from) * p
   const converged = elapsed >= g.duration
   return { next, converged, glide: { ...g, elapsed } }

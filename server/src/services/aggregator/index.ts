@@ -309,9 +309,12 @@ export function startAggregator() {
           redis.publish('candles', JSON.stringify(candle)).catch(() => {})
         } catch {}
       }
-      if (isBroadcast) {
-        broadcastToChannel(`candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`, candle)
-      }
+      // NOTE: no local broadcast here. The candle manager's per-subscription
+      // callback (createCandleManager → candleCallback) already broadcasts
+      // the same candle IMMEDIATELY to subscribed charts. A second broadcast
+      // from here (batched at WS_BATCH_INTERVAL_MS) duplicated every kline
+      // frame on the wire and repainted the forming bar ~40 ms late with
+      // identical values.
     })
 
     adapter.onDepth((depth) => {

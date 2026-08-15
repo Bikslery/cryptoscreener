@@ -1,10 +1,10 @@
 import { useEffect, useRef, memo, useState, useMemo } from 'react'
 import { createChart, CandlestickSeries, BarSeries, LineSeries, HistogramSeries, PriceScaleMode } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time, SeriesType, DeepPartial, CandlestickSeriesOptions, BarSeriesOptions, LineSeriesOptions } from 'lightweight-charts'
-import { useCoinListStore, setLivePrice, useAuthStore } from '../../store'
+import { useCoinListStore, setLivePrice, setLivePriceEx, useAuthStore } from '../../store'
 import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
 import { registerGlider, unregisterGlider, type Glider } from '../../services/glide'
-import { stepFormingAnimation, formingGlideK, type FormingTarget } from '../../services/candle-anim'
+import { stepFormingAnimation, formingGlideK, FORMING_FAST_K, FORMING_SMOOTH_K, FORMING_FAST_INTERVAL_MS, type FormingTarget } from '../../services/candle-anim'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount, getWsLastMessageAt } from '../../services/ws'
@@ -85,6 +85,10 @@ export class FormingAnimator implements Glider {
   private running = false
   private readonly series: ISeriesApi<SeriesType>
   private readonly getRef: () => ISeriesApi<SeriesType> | null
+  /** When the last target was set — drives the adaptive glide speed. */
+  private lastTargetAt = 0
+  /** Current convergence factor: fast on live pairs, smooth on quiet ones. */
+  private k = FORMING_SMOOTH_K
 
   constructor(series: ISeriesApi<SeriesType>, getRef: () => ISeriesApi<SeriesType> | null) {
     this.series = series
@@ -134,10 +138,18 @@ export class FormingAnimator implements Glider {
       // server sent.)
       this.target = t
       this.displayed = { ...t }
+      this.lastTargetAt = performance.now()
       this.paintSeries(this.displayed)
       return true
     }
     this.target = t
+    // Adaptive convergence: on a live pair (retargets every few dozen ms) the
+    // body must converge fast or it chases the market forever — every retarget
+    // restarts the glide from the current displayed value, so a slow fixed k
+    // never catches up. Quiet symbols keep the smooth long glide.
+    const now = performance.now()
+    this.k = now - this.lastTargetAt <= FORMING_FAST_INTERVAL_MS ? FORMING_FAST_K : FORMING_SMOOTH_K
+    this.lastTargetAt = now
     this.ensureLoop()
     return true
   }
@@ -167,7 +179,7 @@ export class FormingAnimator implements Glider {
   /** Shared-coordinator entry: advance one frame, false = converged/stop. */
   tick(dt: number): boolean {
     if (this.getRef() !== this.series || !this.target || !this.displayed) return false
-    const { next, converged } = stepFormingAnimation(this.displayed, this.target, formingGlideK(dt))
+    const { next, converged } = stepFormingAnimation(this.displayed, this.target, formingGlideK(dt, this.k))
     if (converged) {
       this.displayed = { ...this.target }
       this.paintSeries(this.displayed)
@@ -323,6 +335,7 @@ function applyChartPatch(
   }
   if (patch.livePrice != null) {
     setLivePrice(symbol, patch.livePrice)
+    if (exchange) setLivePriceEx(symbol, exchange, patch.livePrice)
   }
   if (patch.cacheWrites && exchange) {
     for (const c of patch.cacheWrites) {
@@ -1925,7 +1938,9 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
     }
   }))
   // Smoothed price display (presentation only — chart/store data stays exact).
-  const priceRef = useSmoothedPriceRef(symbol, coin?.pricePrecision ?? 2, coin?.price, '$')
+  // Scoped to the chart's exchange so the header always shows THIS chart's
+  // last print with THIS venue's precision — never the best-exchange price.
+  const priceRef = useSmoothedPriceRef(symbol, coin?.pricePrecision ?? 2, coin?.price, '$', chartExchange)
   const isUp = coin ? coin.change24h >= 0 : true
   const badge = exchangeBadge(chartExchange)
   const precision = coin?.pricePrecision ?? 2
