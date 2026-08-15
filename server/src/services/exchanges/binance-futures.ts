@@ -8,6 +8,7 @@ import { BinanceRateLimiter } from './rate-limiter.js'
 import { RateLimitError, ExchangeRequestError } from './errors.js'
 import { WsStreamPool } from './ws-pool.js'
 import { BinanceDepthBook, type DiffDepthEvent } from './binance-depth-book.js'
+import { withDepthSnapshotSlot } from './depth-snapshot-limiter.js'
 import { getWsAgent, getFetchDispatcher } from './proxy.js'
 import type { ProxyAgent } from 'undici'
 
@@ -766,28 +767,37 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   }
 
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
-    const url = `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol}&limit=${limit}`
-    await this.rateLimiter.waitIfThrottled()
-    try {
-      const res = await fetchWithTimeout(url, 10000, this.fetchDispatcher)
-      this.rateLimiter.updateFromHeaders(res.headers)
-      if (res.status === 429) { this.rateLimiter.handle429(res.headers); return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() } }
-      if (res.status === 418) { this.rateLimiter.handle418(res.headers); return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() } }
-      if (!res.ok) { this.rateLimiter.recordError(); return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() } }
-      const data = await res.json()
-      if (!data.bids || !data.asks) { this.rateLimiter.recordError(); return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() } }
-      this.rateLimiter.recordSuccess()
-      return {
-        symbol,
-        exchange: this.exchange,
-        bids: data.bids.map((b: string[]) => [parseFloat(b[0]), parseFloat(b[1])]),
-        asks: data.asks.map((a: string[]) => [parseFloat(a[0]), parseFloat(a[1])]),
-        timestamp: Date.now(),
-        lastUpdateId: typeof data.lastUpdateId === 'number' ? data.lastUpdateId : undefined,
-      }
-    } catch (e) {
-      this.rateLimiter.recordError()
-      throw e
+    // Never queue while the exchange is throttled or already over threshold —
+    // snapshots must yield to candle history (charts) instead of starving it.
+    if (this.rateLimiter.isThrottled() || this.rateLimiter.isOverThreshold()) {
+      return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() }
     }
+    const empty = { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() } as UnifiedDepth
+    return withDepthSnapshotSlot(async () => {
+      await this.rateLimiter.waitIfThrottled()
+      if (this.rateLimiter.isOverThreshold()) return empty
+      const url = `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol}&limit=${limit}`
+      try {
+        const res = await fetchWithTimeout(url, 10000, this.fetchDispatcher)
+        this.rateLimiter.updateFromHeaders(res.headers)
+        if (res.status === 429) { this.rateLimiter.handle429(res.headers); return empty }
+        if (res.status === 418) { this.rateLimiter.handle418(res.headers); return empty }
+        if (!res.ok) { this.rateLimiter.recordError(); return empty }
+        const data = await res.json()
+        if (!data.bids || !data.asks) { this.rateLimiter.recordError(); return empty }
+        this.rateLimiter.recordSuccess()
+        return {
+          symbol,
+          exchange: this.exchange,
+          bids: data.bids.map((b: string[]) => [parseFloat(b[0]), parseFloat(b[1])]),
+          asks: data.asks.map((a: string[]) => [parseFloat(a[0]), parseFloat(a[1])]),
+          timestamp: Date.now(),
+          lastUpdateId: typeof data.lastUpdateId === 'number' ? data.lastUpdateId : undefined,
+        }
+      } catch (e) {
+        this.rateLimiter.recordError()
+        throw e
+      }
+    })
   }
 }
