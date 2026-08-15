@@ -6,7 +6,7 @@ import { VolumeSlider } from './VolumeSlider'
 import { useChartSettings } from '../../services/chart-settings'
 import './TopBar.css'
 
-const SCANNER_URL = (import.meta.env.VITE_SCANNER_URL as string | undefined) ?? 'http://localhost:5174'
+const SCANNER_URL = (import.meta.env.VITE_SCANNER_URL as string | undefined) ?? 'https://redscalp.ru/screener'
 
 const TF_OPTIONS: { value: Timeframe; label: string }[] = [
   { value: '1s', label: '1С' },
@@ -118,11 +118,11 @@ export function TopBar() {
       <div className="flex items-center gap-[2px] shrink-0">
         <button
           className="clinic-btn clinic-btn-ghost clinic-btn-sm flex items-center gap-1.5 text-[11px]"
-          title="Открыть CryptoScanner: уровни, лои/хаи, близость к пробою"
+          title="Открыть скринер плотностей"
           onClick={() => window.open(SCANNER_URL, '_blank', 'noopener,noreferrer')}
         >
           <Layers size={13} />
-          <span>Уровни</span>
+          <span>Плотности</span>
         </button>
 
         <button
