@@ -21,7 +21,7 @@ export interface ExchangeAdapter {
   subscribeCandle(symbol: string, tf: string, cb: CandleCallback): void
   unsubscribeCandle(symbol: string, tf: string): void
   subscribeDepth(symbol: string, cb: DepthCallback): void
-  unsubscribeDepth(symbol: string): void
+  unsubscribeDepth(symbol: string, cb?: DepthCallback): void
   fetchCandles(symbol: string, tf: string, limit: number, startTime?: number, endTime?: number, options?: FetchCandlesOptions): Promise<UnifiedCandle[]>
   fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth>
   getRateLimiter?(): BinanceRateLimiter | null

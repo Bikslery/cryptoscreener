@@ -233,6 +233,7 @@ interface CoinListStore {
   sortDir: 'asc' | 'desc'
   selectedSymbol: string | null
   expandedSymbol: string | null
+  expandedFocusPrice: number | null
   activeTimeframe: Timeframe
   chartExchange: ChartExchange
   minVolume24h: number
@@ -245,6 +246,8 @@ interface CoinListStore {
   setSort: (col: keyof UnifiedTicker) => void
   selectCoin: (symbol: string) => void
   expandChart: (symbol: string | null) => void
+  expandChartAtPrice: (symbol: string, price: number) => void
+  clearExpandedFocusPrice: () => void
   setTimeframe: (tf: Timeframe) => void
   setChartExchange: (ce: ChartExchange) => void
   setMinVolume24h: (v: number) => void
@@ -457,6 +460,7 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   sortDir: 'desc',
   selectedSymbol: null,
   expandedSymbol: null,
+  expandedFocusPrice: null,
   activeTimeframe: '5m',
   chartExchange: readStoredChartExchange(),
   minVolume24h: readStoredMinVolume(),
@@ -504,8 +508,17 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
       const coin = s.coinMap.get(symbol)
       getOrFetchHistory(symbol, s.activeTimeframe, EXPANDED_CANDLE_LIMIT, coin?.exchange)
     }
-    set({ expandedSymbol: symbol, selectedSymbol: symbol })
+    set({ expandedSymbol: symbol, selectedSymbol: symbol, expandedFocusPrice: null })
   },
+
+  expandChartAtPrice: (symbol, price) => {
+    const s = get()
+    const coin = s.coinMap.get(symbol)
+    getOrFetchHistory(symbol, s.activeTimeframe, EXPANDED_CANDLE_LIMIT, coin?.exchange)
+    set({ expandedSymbol: symbol, selectedSymbol: symbol, expandedFocusPrice: price })
+  },
+
+  clearExpandedFocusPrice: () => set({ expandedFocusPrice: null }),
 
   setTimeframe: (tf) => set({ activeTimeframe: tf }),
 

@@ -6,9 +6,10 @@ import api from '../../services/api'
 import { playAlertSound } from '../../services/alert-notify'
 import { X, User, LogOut, Shield, KeyRound, Keyboard, BarChart3, Bell, Volume2, Layers, Table2, ChevronUp, ChevronDown } from 'lucide-react'
 import { resolveCascadesConfig } from '../../services/chart-overlays'
+import { resolveDensitySettings } from '../../services/density'
 import { resolveIndicators, INDICATOR_LABELS, VALID_INDICATOR_KEYS } from '../../services/indicators'
 import { useAlertStore } from '../../store'
-import type { CascadesConfig, IndicatorKey, CoinListColKey, Exchange, Alert as AlertType } from '../../types'
+import type { CascadesConfig, DensitySettings, IndicatorKey, CoinListColKey, Exchange, Alert as AlertType } from '../../types'
 import './ProfileModal.css'
 
 type ResetStep = 'idle' | 'code' | 'password' | 'done'
@@ -178,6 +179,45 @@ export default function ProfileModal() {
       if (cascadesSaveTimer.current) clearTimeout(cascadesSaveTimer.current)
     }
   }, [])
+
+  // Density (orderbook walls) config — БРП mode/manual value, category
+  // multipliers and per-symbol overrides.
+  const [density, setDensity] = useState<DensitySettings>(() =>
+    resolveDensitySettings(settings?.density),
+  )
+  const [densitySymbolInput, setDensitySymbolInput] = useState('')
+  const densitySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    setDensity(resolveDensitySettings(settings?.density))
+  }, [settings?.density])
+
+  const saveDensity = (next: DensitySettings) => {
+    setDensity(next)
+    if (densitySaveTimer.current) clearTimeout(densitySaveTimer.current)
+    densitySaveTimer.current = setTimeout(() => {
+      updateSettings({ density: next }).catch(() => {})
+    }, 400)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (densitySaveTimer.current) clearTimeout(densitySaveTimer.current)
+    }
+  }, [])
+
+  const handleDensityReset = () => {
+    setDensity(resolveDensitySettings(undefined))
+    if (densitySaveTimer.current) clearTimeout(densitySaveTimer.current)
+    updateSettings({ density: undefined }).catch(() => {})
+  }
+
+  const addDensitySymbolOverride = () => {
+    const symbol = densitySymbolInput.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+    if (!symbol || symbol.length < 2) return
+    saveDensity({ ...density, perSymbol: { ...density.perSymbol, [symbol]: density.manualBrp } })
+    setDensitySymbolInput('')
+  }
 
   useEffect(() => {
     return () => {
@@ -974,6 +1014,128 @@ export default function ProfileModal() {
           <button className="profile-action-btn" onClick={handleCascadesReset}>
             <Layers size={15} />
             сбросить каскады по умолчанию
+          </button>
+        </ProfileSection>
+
+        {/* Density section — БРП, multipliers, per-symbol overrides */}
+        <ProfileSection icon={<BarChart3 size={14} />} title="Плотности">
+
+          <div className="profile-field">
+            <label>БРП (базовый размерный порог)</label>
+            <div className="profile-notify-row">
+              <span className="profile-scale-hint" style={{ fontSize: '11px' }}>
+                {density.mode === 'auto' ? 'авто (медиана топ-квартиля кластеров за 24ч)' : 'вручную'}
+              </span>
+              <label className="profile-switch">
+                <input
+                  type="checkbox"
+                  checked={density.mode === 'manual'}
+                  onChange={(e) => saveDensity({ ...density, mode: e.target.checked ? 'manual' : 'auto' })}
+                  data-testid="density-mode-toggle"
+                />
+                <span className="track" />
+              </label>
+            </div>
+            <div className="profile-scale-hint">
+              Пока у сервера нет 24ч истории — действует ручной порог
+            </div>
+          </div>
+
+          {density.mode === 'manual' && (
+            <div className="profile-field">
+              <label>Ручной БРП, USDT</label>
+              <div className="profile-scale-row">
+                <input
+                  type="number"
+                  min={1000}
+                  step={10000}
+                  value={density.manualBrp}
+                  onChange={(e) => saveDensity({ ...density, manualBrp: Math.max(1000, Number(e.target.value) || 300000) })}
+                  className="profile-reset-code-input"
+                  style={{ width: '140px' }}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="profile-field">
+            <label>Средняя категория, ×БРП</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={1.5}
+                max={3}
+                step={0.1}
+                value={density.multMedium}
+                onChange={(e) => saveDensity({ ...density, multMedium: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">×{density.multMedium}</span>
+            </div>
+            <div className="profile-scale-hint">Плотность ≥ БРП × это число — «средняя»</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Большая категория, ×БРП</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={3.5}
+                max={8}
+                step={0.5}
+                value={density.multLarge}
+                onChange={(e) => saveDensity({ ...density, multLarge: Number(e.target.value) })}
+                className="profile-scale-slider"
+              />
+              <span className="profile-scale-value">×{density.multLarge}</span>
+            </div>
+            <div className="profile-scale-hint">Плотность ≥ БРП × это число — «большая»</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Индивидуальный БРП на символ</label>
+            {Object.keys(density.perSymbol).length > 0 && (
+              <div className="indicator-order-row" style={{ flexWrap: 'wrap', gap: '4px' }}>
+                {Object.entries(density.perSymbol).map(([sym, v]) => (
+                  <div key={sym} className="flex items-center gap-[6px] px-[6px] py-[2px] border border-[#2a2a2a] rounded-[3px]">
+                    <span className="text-[11px] text-[#ccc]">{sym}: {v.toLocaleString('ru-RU')}</span>
+                    <button
+                      className="indicator-order-btn danger"
+                      title="Убрать"
+                      onClick={() => {
+                        const perSymbol = { ...density.perSymbol }
+                        delete perSymbol[sym]
+                        saveDensity({ ...density, perSymbol })
+                      }}
+                    >
+                      <X size={10} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center gap-[6px] mt-1">
+              <input
+                value={densitySymbolInput}
+                onChange={(e) => setDensitySymbolInput(e.target.value.toUpperCase())}
+                placeholder="BTCUSDT"
+                className="profile-reset-code-input"
+                style={{ width: '100px' }}
+              />
+              <button
+                className="profile-reset-confirm"
+                style={{ padding: '4px 8px', fontSize: '11px' }}
+                onClick={addDensitySymbolOverride}
+              >
+                добавить
+              </button>
+            </div>
+            <div className="profile-scale-hint">Перекрывает и авто, и ручной БРП для выбранного символа</div>
+          </div>
+
+          <button className="profile-action-btn" onClick={handleDensityReset}>
+            <BarChart3 size={15} />
+            сбросить плотности по умолчанию
           </button>
         </ProfileSection>
 

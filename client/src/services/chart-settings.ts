@@ -43,6 +43,7 @@ export interface ChartSettings {
   showDrawings: boolean
   showTriggeredAlerts: boolean
   showCountdown: boolean
+  showDensities: boolean
   priceScaleMode: PriceScaleMode
   vertGrid: boolean
   horzGrid: boolean
@@ -63,6 +64,7 @@ export const DEFAULT_CHART_SETTINGS: ChartSettings = {
   showDrawings: true,
   showTriggeredAlerts: true,
   showCountdown: false,
+  showDensities: true,
   priceScaleMode: 'default',
   vertGrid: true,
   horzGrid: true,

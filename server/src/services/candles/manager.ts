@@ -225,7 +225,7 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
   }
 
   const depthCallback = (depth: any) => {
-    const channel = `depth:${depth.symbol}`
+    const channel = `depth:${depth.exchange}:${depth.symbol}`
     broadcastToChannel(channel, depth, true)
   }
 

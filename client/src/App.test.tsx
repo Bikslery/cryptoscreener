@@ -71,6 +71,19 @@ vi.mock('./store', () => {
   }
 })
 
+vi.mock('./store/density', () => {
+  const store = {
+    getState: () => ({ init: () => vi.fn() }),
+    setState: vi.fn(),
+    subscribe: vi.fn(),
+    destroy: vi.fn(),
+  }
+  const hook = (selector: (s: { init: () => () => void }) => unknown) => selector(store.getState() as any)
+  hook.getState = store.getState
+  hook.setState = store.setState
+  return { useDensityStore: hook }
+})
+
 vi.mock('./store/drawingHotkeys', () => {
   const store = {
     getState: () => ({

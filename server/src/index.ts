@@ -21,6 +21,9 @@ import watchlistRoutes from './routes/watchlists.js'
 import alertRoutes from './routes/alerts.js'
 import drawingRoutes from './routes/drawings.js'
 import debugRoutes from './routes/debug.js'
+import densityRoutes from './routes/density.js'
+import { startDensityService, stopDensityService } from './services/density/index.js'
+import { OkxSpotAdapter } from './services/exchanges/okx-spot.js'
 import { prisma } from './db/index.js'
 import { disconnectRedis } from './redis.js'
 import { register } from './metrics.js'
@@ -77,6 +80,7 @@ async function main() {
   app.use('/api/watchlists', authMiddleware, requireTelegramVerified, watchlistRoutes)
   app.use('/api/alerts', authMiddleware, requireTelegramVerified, alertRoutes)
   app.use('/api/drawings', authMiddleware, requireTelegramVerified, drawingRoutes)
+  app.use('/api/density', authMiddleware, requireTelegramVerified, densityRoutes)
   app.use('/api/debug', authMiddleware, debugRoutes)
 
   app.use('/api/health', (_req, res) => res.json({ ok: true, role: ROLE }))
@@ -112,6 +116,8 @@ async function main() {
   // guarantees history never serves those holes again (they refetch on demand).
   await flushHistoryChunkCache()
 
+  let okxDepthAdapter: OkxSpotAdapter | null = null
+
   if (isBroadcast) setupWsHub(wss)
 
   if (isIngestion) {
@@ -124,6 +130,13 @@ async function main() {
     startCacheRepairWatchdog()
     startAlertEngine()
     startTelegramPolling()
+    // Density (orderbook walls) engine — subscribes depth for top-N symbols
+    // across all exchanges and broadcasts the global snapshot every ~2s.
+    // OKX spot joins density only (its ticker feed isn't wired into the
+    // aggregator yet), on its own adapter instance.
+    okxDepthAdapter = new OkxSpotAdapter()
+    okxDepthAdapter.connect()
+    startDensityService([...adapters, okxDepthAdapter])
     // Broadcast nodes forward client candle/depth subscriptions here via Redis.
     startIngestionRedisListener()
     console.log(`[Role] Ingestion node${isBroadcast ? ' + Broadcast (all-in-one)' : ''}`)
@@ -148,9 +161,11 @@ async function main() {
       if (c.readyState === WebSocket.OPEN) c.close(1001, 'server shutting down')
     })
     for (const adapter of adapters) adapter.disconnect()
+    if (okxDepthAdapter) okxDepthAdapter.disconnect()
     flushTradeLane()
     flushCandleLane()
     stopAlertEngine()
+    stopDensityService()
     stopWsHub()
     server.close()
     await disconnectRedis()

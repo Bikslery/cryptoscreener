@@ -7,6 +7,7 @@ import { fetchWithTimeout } from '../../utils/fetch.js'
 import { BinanceRateLimiter } from './rate-limiter.js'
 import { RateLimitError, ExchangeRequestError } from './errors.js'
 import { WsStreamPool } from './ws-pool.js'
+import { BinanceDepthBook, type DiffDepthEvent } from './binance-depth-book.js'
 import { getFetchDispatcher } from './proxy.js'
 import type { ProxyAgent } from 'undici'
 
@@ -42,7 +43,11 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private usingRestFallback = false
   private candleSubs = new Map<string, CandleCallback>()
-  private depthSubs = new Map<string, DepthCallback>()
+  private depthSubs = new Map<string, Set<DepthCallback>>()
+  private depthBooks = new Map<string, BinanceDepthBook>()
+  private depthStreams = new Set<string>()
+  private depthBookLoading = new Set<string>()
+  private lastDepthEmitAt = new Map<string, number>()
   private tickerCbs: TickerCallback[] = []
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
@@ -84,9 +89,11 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
       'Binance Depth',
       (msg) => {
         try {
-          const depth = this.parseDepth(msg)
+          const depth = this.handleDepthMsg(msg)
           if (depth) {
             for (const cb of this.depthCbs) cb(depth)
+            const subs = this.depthSubs.get(depth.symbol)
+            if (subs) for (const cb of subs) cb(depth)
           }
         } catch {}
       },
@@ -313,15 +320,75 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   }
 
   subscribeDepth(symbol: string, cb: DepthCallback) {
-    const stream = `${symbol.toLowerCase()}@depth20@100ms`
-    this.depthSubs.set(stream, cb)
-    this.depthPool.addStream(stream)
+    let set = this.depthSubs.get(symbol)
+    if (!set) {
+      set = new Set()
+      this.depthSubs.set(symbol, set)
+    }
+    set.add(cb)
+
+    const stream = `${symbol.toLowerCase()}@depth@100ms`
+    if (!this.depthStreams.has(stream)) {
+      this.depthStreams.add(stream)
+      this.depthPool.addStream(stream)
+    }
+    if (!this.depthBooks.has(symbol)) this.initDepthBook(symbol)
   }
 
-  unsubscribeDepth(symbol: string) {
-    const stream = `${symbol.toLowerCase()}@depth20@100ms`
-    this.depthSubs.delete(stream)
-    this.depthPool.removeStream(stream)
+  unsubscribeDepth(symbol: string, cb?: DepthCallback) {
+    const set = this.depthSubs.get(symbol)
+    if (set && cb) set.delete(cb)
+    if (!set || set.size === 0) {
+      this.depthSubs.delete(symbol)
+      const stream = `${symbol.toLowerCase()}@depth@100ms`
+      if (this.depthStreams.delete(stream)) this.depthPool.removeStream(stream)
+      this.depthBooks.delete(symbol)
+      this.depthBookLoading.delete(symbol)
+      this.lastDepthEmitAt.delete(symbol)
+    }
+  }
+
+  /** Diff-depth assembly: seed the local book with a REST snapshot, then
+   *  replay buffered diff events (Binance's standard snapshot+delta dance). */
+  private async initDepthBook(symbol: string) {
+    if (this.depthBookLoading.has(symbol)) return
+    this.depthBookLoading.add(symbol)
+    try {
+      const snap = await this.fetchDepth(symbol, 1000)
+      const book = this.depthBooks.get(symbol) ?? new BinanceDepthBook()
+      this.depthBooks.set(symbol, book)
+      if (snap.bids.length > 0 && typeof snap.lastUpdateId === 'number') {
+        book.setSnapshot(snap.bids, snap.asks, snap.lastUpdateId)
+      }
+    } catch {
+      // snapshot failed — retry on the next diff event gap or subscription
+    } finally {
+      this.depthBookLoading.delete(symbol)
+    }
+  }
+
+  private handleDepthMsg(msg: any): UnifiedDepth | null {
+    const d = msg.data || msg
+    const symbol = d.s || d.symbol || ''
+    if (!symbol || d.U === undefined || d.u === undefined) return null
+    const book = this.depthBooks.get(symbol)
+    if (!book) return null
+
+    const ev: DiffDepthEvent = { U: d.U, u: d.u, b: d.b ?? [], a: d.a ?? [] }
+    const result = book.applyDiff(ev)
+    if (result === 'resync') {
+      this.initDepthBook(symbol)
+      return null
+    }
+    if (result !== 'applied') return null
+
+    // Emit full snapshots at most every 200ms per symbol — the book is
+    // cumulative, so latest-wins loses nothing and bounds per-symbol cost.
+    const now = Date.now()
+    const last = this.lastDepthEmitAt.get(symbol) ?? 0
+    if (now - last < 200) return null
+    this.lastDepthEmitAt.set(symbol, now)
+    return book.toDepth(symbol, this.exchange)
   }
 
   private parseCandle(msg: any): UnifiedCandle | null {
@@ -338,18 +405,6 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
       close: parseFloat(k.c),
       volume: parseFloat(k.v),
       isFinal: !!k.x,
-    }
-  }
-
-  private parseDepth(msg: any): UnifiedDepth | null {
-    const d = msg.data || msg
-    if (!d.bids || !d.asks) return null
-    return {
-      symbol: d.s || d.symbol || '',
-      exchange: this.exchange,
-      bids: d.bids.map((b: string[]) => [parseFloat(b[0]), parseFloat(b[1])]),
-      asks: d.asks.map((a: string[]) => [parseFloat(a[0]), parseFloat(a[1])]),
-      timestamp: Date.now(),
     }
   }
 
@@ -408,6 +463,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
         bids: data.bids.map((b: string[]) => [parseFloat(b[0]), parseFloat(b[1])]),
         asks: data.asks.map((a: string[]) => [parseFloat(a[0]), parseFloat(a[1])]),
         timestamp: Date.now(),
+        lastUpdateId: typeof data.lastUpdateId === 'number' ? data.lastUpdateId : undefined,
       }
     } catch (e) {
       this.rateLimiter.recordError()

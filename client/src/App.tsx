@@ -12,6 +12,7 @@ const ProfileModalGate = lazy(() => import('./components/auth/ProfileModal').the
 const ExchangeModalGate = lazy(() => import('./components/exchange/ExchangeModal').then(m => ({ default: m.ExchangeModalGate })))
 const TickerSearchModalGate = lazy(() => import('./components/search/TickerSearchModal').then(m => ({ default: m.TickerSearchModalGate })))
 import { useCoinListStore, useAuthStore, useUIStore, useAlertStore } from './store'
+import { useDensityStore } from './store/density'
 import { useDrawingHotkeysStore } from './store/drawingHotkeys'
 import { wsConnect, wsDisconnect, ensureHealthyConnection } from './services/ws'
 import { initAlertNotifications } from './services/alert-notify'
@@ -48,6 +49,7 @@ function readPanelWidth(): number {
 function App() {
   const coinListInit = useCoinListStore(s => s.init)
   const alertInit = useAlertStore(s => s.init)
+  const densityInit = useDensityStore(s => s.init)
   const [panelWidth, setPanelWidth] = useState(readPanelWidth)
 
   const startPanelDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -103,6 +105,8 @@ function App() {
     // Fired alerts must reach the page (cards + sound + native notifications) —
     // without this WS listener they only ever arrive in Telegram.
     const unsubAlerts = alertInit()
+    // Global density (orderbook walls) snapshot subscription.
+    const unsubDensity = densityInit()
 
     // Browsers throttle/suspend background tabs, which can silently kill the
     // WebSocket. Re-validate the connection the instant the user comes back or
@@ -128,10 +132,11 @@ function App() {
       window.removeEventListener('online', revive)
       window.removeEventListener('pageshow', revive)
       unsubAlerts()
+      unsubDensity()
       unsub()
       wsDisconnect()
     }
-  }, [coinListInit, alertInit, isChecking, isLoggedIn])
+  }, [coinListInit, alertInit, densityInit, isChecking, isLoggedIn])
 
   // Пробел — перейти к следующей странице мини-графиков (на последней останавливается).
   // Любая буква — открыть модалку поиска тикера и ввести её в поле.

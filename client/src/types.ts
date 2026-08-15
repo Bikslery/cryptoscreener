@@ -247,6 +247,9 @@ export interface UserSettings {
   notifyToastDurationSec?: number
   // Cascade engine configuration (all parameters, cabinet UI).
   cascades?: Partial<CascadesConfig>
+  // Density (orderbook walls) engine configuration: БРП, category multipliers,
+  // per-symbol overrides and the map zoom.
+  density?: Partial<DensitySettings>
   // Indicator column configuration: coin list columns + chart header fields.
   indicators?: { coinList: CoinListColKey[]; chartHeader: IndicatorKey[] }
 }
@@ -254,7 +257,7 @@ export interface UserSettings {
 export type Timeframe = '1s' | '5s' | '15s' | '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
 
 export interface WsMessage {
-  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'alert' | 'listing' | 'initial-candles' | 'open'
+  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'density' | 'alert' | 'listing' | 'initial-candles' | 'open'
   channel?: string
   data?: unknown
   delta?: boolean // ticker message carries only changed entries (merge in place)
@@ -270,13 +273,47 @@ export interface ChartBlock {
   selected: boolean
 }
 
+export interface DensityWall {
+  symbol: string
+  exchange: Exchange
+  side: 'bid' | 'ask'
+  price: number
+  sizeUsdt: number
+  bornAt: number
+  roundNumber: boolean
+}
+
+export interface DensitySymbolBrp {
+  symbol: string
+  exchange: Exchange
+  autoBrp: number | null
+}
+
+export interface DensitySnapshot {
+  ts: number
+  walls: DensityWall[]
+  autoBrps: DensitySymbolBrp[]
+}
+
+export interface DensitySettings {
+  mode: 'auto' | 'manual'
+  manualBrp: number
+  multSmall: number
+  multMedium: number
+  multLarge: number
+  perSymbol: Record<string, number>
+  zoomPct: number
+}
+
 export interface DensityCell {
   symbol: string
   exchange: Exchange
   side: 'bid' | 'ask'
   price: number
-  volume: number
+  sizeUsdt: number
+  bornAt: number
+  roundNumber: boolean
   distancePct: number
-  marketCap: 'large' | 'medium' | 'small'
+  category: 'small' | 'medium' | 'large'
   pricePrecision: number
 }

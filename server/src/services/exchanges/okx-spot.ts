@@ -13,6 +13,7 @@ export class OkxSpotAdapter implements ExchangeAdapter {
   private tickerCbs: TickerCallback[] = []
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
+  private depthSubs = new Map<string, Set<DepthCallback>>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private precisionMap = new Map<string, number>()
@@ -30,6 +31,13 @@ export class OkxSpotAdapter implements ExchangeAdapter {
       this.pingTimer = setInterval(() => {
         this.ws?.send('ping')
       }, 20000)
+      // Re-establish depth subscriptions after reconnect.
+      if (this.depthSubs.size > 0) {
+        this.ws?.send(JSON.stringify({
+          op: 'subscribe',
+          args: Array.from(this.depthSubs.keys()).map(symbol => ({ channel: 'books', instId: this.toInstId(symbol) })),
+        }))
+      }
     })
     this.ws.on('message', (raw) => {
       const str = raw.toString()
@@ -44,7 +52,11 @@ export class OkxSpotAdapter implements ExchangeAdapter {
           if (candle) for (const cb of this.candleCbs) cb(candle)
         } else if (msg.arg?.channel?.startsWith('books')) {
           const depth = this.parseDepth(msg.data?.[0], msg.arg.instId)
-          if (depth) for (const cb of this.depthCbs) cb(depth)
+          if (depth) {
+            for (const cb of this.depthCbs) cb(depth)
+            const subs = this.depthSubs.get(depth.symbol)
+            if (subs) for (const cb of subs) cb(depth)
+          }
         }
       } catch {}
     })
@@ -131,12 +143,34 @@ export class OkxSpotAdapter implements ExchangeAdapter {
     // TODO
   }
 
-  subscribeDepth(_symbol: string, _cb: DepthCallback) {
-    // TODO: implement OKX orderbook subscription
+  subscribeDepth(symbol: string, cb: DepthCallback) {
+    let set = this.depthSubs.get(symbol)
+    if (!set) {
+      set = new Set()
+      this.depthSubs.set(symbol, set)
+      // OKX 'books' = 400-level full snapshots pushed on change (not bbo-tbt
+      // deltas) — the correct feed for density clustering; books5 is only
+      // the top 5 levels and useless for walls.
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ op: 'subscribe', args: [{ channel: 'books', instId: this.toInstId(symbol) }] }))
+      }
+    }
+    set.add(cb)
   }
 
-  unsubscribeDepth(_symbol: string) {
-    // TODO
+  unsubscribeDepth(symbol: string, cb?: DepthCallback) {
+    const set = this.depthSubs.get(symbol)
+    if (set && cb) set.delete(cb)
+    if (!set || set.size === 0) {
+      this.depthSubs.delete(symbol)
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ op: 'unsubscribe', args: [{ channel: 'books', instId: this.toInstId(symbol) }] }))
+      }
+    }
+  }
+
+  private toInstId(symbol: string): string {
+    return symbol.replace(/USDT$/, '-USDT')
   }
 
   disconnect() {

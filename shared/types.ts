@@ -163,7 +163,7 @@ export interface UserSettings {
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
 
 export interface WsMessage {
-  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'alert' | 'listing' | 'initial-candles' | 'open'
+  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'density' | 'alert' | 'listing' | 'initial-candles' | 'open'
   channel?: string
   data?: unknown
 }
@@ -176,13 +176,37 @@ export interface ChartBlock {
   selected: boolean
 }
 
+export interface DensityWall {
+  symbol: string
+  exchange: Exchange
+  side: 'bid' | 'ask'
+  price: number
+  sizeUsdt: number
+  bornAt: number
+  roundNumber: boolean
+}
+
+export interface DensitySymbolBrp {
+  symbol: string
+  exchange: Exchange
+  autoBrp: number | null
+}
+
+export interface DensitySnapshot {
+  ts: number
+  walls: DensityWall[]
+  autoBrps: DensitySymbolBrp[]
+}
+
 export interface DensityCell {
   symbol: string
   exchange: Exchange
   side: 'bid' | 'ask'
   price: number
-  volume: number
+  sizeUsdt: number
+  bornAt: number
+  roundNumber: boolean
   distancePct: number
-  marketCap: 'large' | 'medium' | 'small'
+  category: 'small' | 'medium' | 'large'
   pricePrecision: number
 }

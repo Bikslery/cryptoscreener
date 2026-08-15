@@ -1,8 +1,9 @@
 import { useState, memo } from 'react'
 import { CoinList } from '../coinlist/CoinList'
 import { AlertStack } from '../alerts/AlertStack'
+import { DensityMap } from '../density/DensityMap'
 
-type Tab = 'charts' | 'alerts'
+type Tab = 'charts' | 'map' | 'alerts'
 
 export const RightPanel = memo(function RightPanel({ width }: { width: number }) {
   const [tab, setTab] = useState<Tab>('charts')
@@ -23,6 +24,16 @@ export const RightPanel = memo(function RightPanel({ width }: { width: number })
         </button>
         <button
           className={`flex-1 h-full text-[11px] font-medium cursor-pointer border-b-2 transition-all ${
+            tab === 'map'
+              ? 'text-white border-white text-shadow-[var(--glow-text-strong)]'
+              : 'text-[#666] border-transparent hover:text-[#999] hover:border-[rgba(255,255,255,0.1)]'
+          }`}
+          onClick={() => setTab('map')}
+        >
+          Карта
+        </button>
+        <button
+          className={`flex-1 h-full text-[11px] font-medium cursor-pointer border-b-2 transition-all ${
             tab === 'alerts'
               ? 'text-white border-white text-shadow-[var(--glow-text-strong)]'
               : 'text-[#666] border-transparent hover:text-[#999] hover:border-[rgba(255,255,255,0.1)]'
@@ -36,6 +47,7 @@ export const RightPanel = memo(function RightPanel({ width }: { width: number })
       {/* Content */}
       <div className="flex-1 overflow-hidden">
         {tab === 'charts' && <CoinList />}
+        {tab === 'map' && <DensityMap />}
         {tab === 'alerts' && <AlertStack />}
       </div>
     </div>

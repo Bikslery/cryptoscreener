@@ -23,6 +23,7 @@ import { recordDiag } from '../../services/candle-diag'
 import { useDrawings } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
 import { useChartOverlays } from './overlays/useChartOverlays'
+import { useDensityOverlay } from './overlays/useDensityOverlay'
 import { useChartSettings, resetChartSettings, type WatermarkPlace } from '../../services/chart-settings'
 import {
   buildChartOptions, candleSeriesOptions, volumeSeriesOptions,
@@ -1955,6 +1956,10 @@ function ChartSettingsPanel() {
         <Toggle checked={s.showTriggeredAlerts} onChange={v => setSetting('showTriggeredAlerts', v)} label="Алерты" />
       </div>
 
+      <div className="mt-2 flex items-center gap-3">
+        <Toggle checked={s.showDensities} onChange={v => setSetting('showDensities', v)} label="Плотности" />
+      </div>
+
       <div className="mt-1 text-[10px] text-[#666]">{'{ticker}'} — тикер в тексте знака</div>
     </div>
   )
@@ -2202,6 +2207,26 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
 
   useChartOverlays(candleRef, candlesDataRef, dataVersion, chartVersion, pricePrecision)
+  useDensityOverlay(candleRef, chartVersion, symbol, pricePrecision)
+
+  const focusPrice = useCoinListStore(s => s.expandedFocusPrice)
+  const clearFocusPrice = useCoinListStore(s => s.clearExpandedFocusPrice)
+  useEffect(() => {
+    if (!focusPrice || !isFinite(focusPrice) || focusPrice <= 0) return
+    // Wait until history painted — setVisibleRange is a no-op on an empty
+    // series and would be overwritten by the fit afterwards.
+    if (isInitialLoading || dataVersion === 0) return
+    const chart = chartRef.current
+    if (!chart) return
+    try {
+      // Center the price scale on the wall price: disable autoscale so the
+      // range sticks, then set a ±1.5% window around the target.
+      chart.priceScale('right').applyOptions({ autoScale: false })
+      const span = focusPrice * 0.015
+      chart.priceScale('right').setVisibleRange({ from: focusPrice - span, to: focusPrice + span })
+    } catch { /* chart mid-teardown */ }
+    clearFocusPrice()
+  }, [focusPrice, isInitialLoading, dataVersion, clearFocusPrice])
 
   const isStale = useStaleDataDetection(lastUpdateRef)
 

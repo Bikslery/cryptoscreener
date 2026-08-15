@@ -17,6 +17,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   private tickerCbs: TickerCallback[] = []
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
+  private depthSubs = new Map<string, Set<DepthCallback>>()
   private bookTickerCbs: Array<(symbol: string, midPrice: number) => void> = []
   private bookTickerSubs = new Set<string>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -25,6 +26,11 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   private candleSubs = new Map<string, CandleCallback>()
   private precisionMap = new Map<string, number>()
   private intentionalClose = false
+
+  // orderbook.200: 200 levels per side, pushed at 100ms — deep enough for
+  // density clustering (±several % of mid on liquid pairs) without the
+  // 500-level payload cost.
+  private static readonly DEPTH_DEPTH = 200
 
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
@@ -72,7 +78,11 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
             }
           } else if (msg.topic.startsWith('orderbook.')) {
             const depth = this.parseDepth(msg.data, msg.topic)
-            if (depth) for (const cb of this.depthCbs) cb(depth)
+            if (depth) {
+              for (const cb of this.depthCbs) cb(depth)
+              const subs = this.depthSubs.get(depth.symbol)
+              if (subs) for (const cb of subs) cb(depth)
+            }
           } else if (msg.topic.startsWith('bookTicker.')) {
             // Best bid/ask — fires on every top-of-book change (dozens/sec on
             // liquid pairs), the same "live" price feed Binance bookTicker is.
@@ -172,22 +182,26 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     for (const symbol of this.precisionMap.keys()) args.push(`tickers.${symbol}`)
     for (const symbol of this.bookTickerSubs) args.push(`bookTicker.${symbol}`)
     for (const topic of this.candleSubs.keys()) args.push(topic)
+    for (const symbol of this.depthSubs.keys()) args.push(`orderbook.${BybitFuturesAdapter.DEPTH_DEPTH}.${symbol}`)
     for (let i = 0; i < args.length; i += 10) {
       this.ws.send(JSON.stringify({ op: 'subscribe', args: args.slice(i, i + 10) }))
     }
     if (args.length > 0) {
-      console.log(`[${this.name}] Subscribed ${args.length} topics (tickers + klines)`)
+      console.log(`[${this.name}] Subscribed ${args.length} topics (tickers + klines + depth)`)
     }
   }
 
   private parseDepth(d: any, topic: string): UnifiedDepth | null {
-    if (!d.bids || !d.asks) return null
-    const symbol = topic.split('.').pop() || ''
+    // orderbook.<depth>.<symbol> push: { s, b: [[price,size]..], a: [...], u, ts }
+    const bids = d.bids ?? d.b
+    const asks = d.asks ?? d.a
+    if (!bids || !asks) return null
+    const symbol = d.s || topic.split('.').pop() || ''
     return {
       symbol,
       exchange: this.exchange,
-      bids: d.bids.map((b: any[]) => [parseFloat(String(b[0])), parseFloat(String(b[1]))]),
-      asks: d.asks.map((a: any[]) => [parseFloat(String(a[0])), parseFloat(String(a[1]))]),
+      bids: bids.map((b: any[]) => [parseFloat(String(b[0])), parseFloat(String(b[1]))]),
+      asks: asks.map((a: any[]) => [parseFloat(String(a[0])), parseFloat(String(a[1]))]),
       timestamp: Date.now(),
     }
   }
@@ -214,12 +228,29 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     }
   }
 
-  subscribeDepth(_symbol: string, _cb: DepthCallback) {
-    // TODO: implement Bybit orderbook subscription
+  subscribeDepth(symbol: string, cb: DepthCallback) {
+    let set = this.depthSubs.get(symbol)
+    if (!set) {
+      set = new Set()
+      this.depthSubs.set(symbol, set)
+      const topic = `orderbook.${BybitFuturesAdapter.DEPTH_DEPTH}.${symbol}`
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ op: 'subscribe', args: [topic] }))
+      }
+    }
+    set.add(cb)
   }
 
-  unsubscribeDepth(_symbol: string) {
-    // TODO
+  unsubscribeDepth(symbol: string, cb?: DepthCallback) {
+    const set = this.depthSubs.get(symbol)
+    if (set && cb) set.delete(cb)
+    if (!set || set.size === 0) {
+      this.depthSubs.delete(symbol)
+      const topic = `orderbook.${BybitFuturesAdapter.DEPTH_DEPTH}.${symbol}`
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ op: 'unsubscribe', args: [topic] }))
+      }
+    }
   }
 
   disconnect() {

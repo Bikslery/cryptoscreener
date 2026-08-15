@@ -494,6 +494,10 @@ export function startRedisListener() {
         } else if (channel === 'depth') {
           const depth = JSON.parse(message)
           broadcastToChannel(`depth:${depth.symbol}`, depth)
+        } else if (channel === 'density') {
+          // Global density (orderbook walls) snapshot — broadcast nodes relay
+          // it to every client subscribed to the 'density' channel.
+          broadcastToChannel('density', JSON.parse(message), true)
         } else if (channel === 'trades') {
           const trade = JSON.parse(message)
           broadcastToChannel(`trade:${trade.exchange}:${trade.symbol}`, trade)
