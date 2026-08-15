@@ -1563,11 +1563,9 @@ const MiniChart = memo(function MiniChart({
     }
 
     const onMouseDown = (e: MouseEvent) => {
-      if (e.button !== 0) return
-
-      // Shift+ЛКМ — select a region to measure % (same gesture as the
-      // expanded chart).
-      if (e.shiftKey) {
+      // Shift+ЛКМ or middle-click (Колёсико) — select a region to measure %
+      // (same gestures as the expanded chart).
+      if ((e.button === 0 && e.shiftKey) || e.button === 1) {
         const rect = container.getBoundingClientRect()
         selStartX = e.clientX - rect.left
         selStartY = e.clientY - rect.top
@@ -1577,6 +1575,8 @@ const MiniChart = memo(function MiniChart({
         setSelection(computeSelection(selStartX, selStartY))
         return
       }
+
+      if (e.button !== 0) return
 
       if (activeTool !== null) {
         mouseDownX = e.clientX - container.getBoundingClientRect().left
@@ -1679,7 +1679,14 @@ const MiniChart = memo(function MiniChart({
       }
     }
     container.addEventListener('contextmenu', onCtx)
-    return () => container.removeEventListener('contextmenu', onCtx)
+    // Middle-click is consumed by the %-measure selection on mousedown —
+    // block the browser's autoscroll on auxclick too (expanded-chart parity).
+    const onAuxclick = (e: MouseEvent) => { if (e.button === 1) e.preventDefault() }
+    container.addEventListener('auxclick', onAuxclick)
+    return () => {
+      container.removeEventListener('contextmenu', onCtx)
+      container.removeEventListener('auxclick', onAuxclick)
+    }
   }, [primitiveRef, removeDrawing])
 
   return (
