@@ -17,15 +17,13 @@ export interface FormingTarget {
 }
 
 /**
- * Forming-candle glide speed selection (adaptive, mirroring glide.ts):
- * a live pair retargets the glide every few dozen ms, so a fixed slow k
- * never lets the body catch up — it chases the tape forever. Frequent
- * paints (interval <= FORMING_FAST_INTERVAL_MS) use a fast k (converges in
- * ~2–3 frames), quiet symbols keep the smooth long glide.
+ * Forming-candle behavior on LIVE pairs (mirroring glide.ts):
+ * a live pair retargets the glide every few dozen ms, so a glide restarted
+ * by every retarget never converges — the body visibly chases the стакан.
+ * Paints closer than this interval SNAP to the target instead of gliding;
+ * quiet symbols keep the smooth long glide (formingGlideK's k60=0.45).
  */
-export const FORMING_FAST_K = 0.8
-export const FORMING_SMOOTH_K = 0.45
-export const FORMING_FAST_INTERVAL_MS = 80
+export const FORMING_SNAP_INTERVAL_MS = 80
 
 /**
  * One interpolation step. `k` is the per-step convergence factor (0..1]:

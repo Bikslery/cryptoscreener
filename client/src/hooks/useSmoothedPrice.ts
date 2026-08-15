@@ -9,7 +9,7 @@ import {
   glideDurationFor,
   type Glider,
 } from '../services/glide'
-import { formatPrice } from '../utils/format'
+import { formatPrice, snapToTick } from '../utils/format'
 
 /**
  * Gliding price text — direct DOM updates, zero React re-renders per frame.
@@ -55,7 +55,10 @@ export function useSmoothedPriceRef(
   const paint = useCallback(() => {
     const el = ref.current
     if (el && st.displayed !== undefined) {
-      el.textContent = prefixRef.current + formatPrice(st.displayed, precisionRef.current)
+      // Snap to the exchange tick grid so the shown value always exists as a
+      // стакан level (a glide mid-flight would otherwise pass through
+      // off-grid prices the book cannot display).
+      el.textContent = prefixRef.current + formatPrice(snapToTick(st.displayed, precisionRef.current), precisionRef.current)
     }
   }, [st])
 
@@ -115,7 +118,7 @@ export function useSmoothedPriceRef(
           // chase the market forever). Converge immediately.
           st.glide = null
           st.displayed = t
-          el.textContent = prefixRef.current + formatPrice(t, precisionRef.current)
+          el.textContent = prefixRef.current + formatPrice(snapToTick(t, precisionRef.current), precisionRef.current)
           return false
         }
         if (!st.glide) {
@@ -129,11 +132,11 @@ export function useSmoothedPriceRef(
         if (converged) {
           st.glide = null
           st.displayed = t
-          el.textContent = prefixRef.current + formatPrice(t, precisionRef.current)
+          el.textContent = prefixRef.current + formatPrice(snapToTick(t, precisionRef.current), precisionRef.current)
           return false
         }
         st.displayed = next
-        el.textContent = prefixRef.current + formatPrice(next, precisionRef.current)
+        el.textContent = prefixRef.current + formatPrice(snapToTick(next, precisionRef.current), precisionRef.current)
         return true
       },
     }

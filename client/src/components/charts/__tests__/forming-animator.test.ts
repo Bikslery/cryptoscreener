@@ -19,8 +19,14 @@ function flushRaf(now: number) {
   for (const cb of cbs) cb(now)
 }
 
+// Deterministic clock: the animator snaps on live pairs (paints <= 80ms
+// apart) and glides on quiet ones, so tests control `now` explicitly.
+let nowValue = 0
+
 beforeEach(() => {
   rafCallbacks = []
+  nowValue = 0
+  vi.spyOn(performance, 'now').mockImplementation(() => nowValue)
   vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
     rafCallbacks.push(cb)
     return rafCallbacks.length
@@ -29,6 +35,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
 
@@ -42,14 +49,60 @@ function makeSeries() {
   return { series, updates }
 }
 
+describe('FormingAnimator — live pairs SNAP (стакан parity)', () => {
+  it('snaps straight to the target on a live pair (updates <= 80ms apart)', () => {
+    const { series, updates } = makeSeries()
+    const animator = new FormingAnimator(series, () => series)
+
+    nowValue = 0
+    animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 100, high: 101, low: 99, close: 100, volume: 1 })
+    expect(animator.isAnimating).toBe(false) // first paint snaps immediately, no glide yet
+
+    // 10ms later — a live pair retarget: the body must move EXACTLY to the
+    // new price (like the стакан), not interpolate.
+    nowValue = 10
+    animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 100, high: 102, low: 99, close: 101.5, volume: 1 })
+
+    expect(animator.isAnimating).toBe(false) // snapped — no glide registered
+    const last = updates[updates.length - 1]
+    expect(last.time).toBe(toChartTime(300))
+    expect(last.close).toBe(101.5) // exact target, zero chase
+    expect(last.high).toBe(102)
+    flushRaf(16.7)
+    expect(updates.length).toBe(2) // no extra glide frames
+  })
+
+  it('glides smoothly on a quiet pair (updates > 80ms apart)', () => {
+    const { series, updates } = makeSeries()
+    const animator = new FormingAnimator(series, () => series)
+
+    nowValue = 0
+    animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 100, high: 101, low: 99, close: 100, volume: 1 })
+    nowValue = 200 // quiet interval → glide, not snap
+    animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 100, high: 102, low: 99, close: 101.5, volume: 1 })
+    expect(animator.isAnimating).toBe(true)
+
+    flushRaf(16.7)
+    const partial = updates[updates.length - 1]
+    expect(partial.close).toBeGreaterThan(100)
+    expect(partial.close).toBeLessThan(101.5) // mid-glide, not yet converged
+
+    // Leave the shared coordinator in a clean state for the next test.
+    animator.finalizeAndReset()
+  })
+})
+
 describe('FormingAnimator — bar-transition handoff (Stage 2 item 3)', () => {
   it('finalizes the previous bar to its exact last target before snapping to a new bar (paint() path)', () => {
     const { series, updates } = makeSeries()
     const animator = new FormingAnimator(series, () => series)
 
-    // Bar A forming: paint moves the target, animator starts gliding.
+    // Bar A forming: paint moves the target, animator starts gliding
+    // (quiet pair: updates 200ms apart).
+    nowValue = 0
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 100, high: 101, low: 99, close: 100, volume: 1 })
     expect(animator.isAnimating).toBe(false) // first paint snaps immediately, no glide yet
+    nowValue = 200
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 100, high: 102, low: 99, close: 101.5, volume: 1 })
     expect(animator.isAnimating).toBe(true) // now gliding toward close=101.5
 
@@ -63,6 +116,7 @@ describe('FormingAnimator — bar-transition handoff (Stage 2 item 3)', () => {
     // must be finalized to its exact last target (close=101.5) BEFORE the
     // new bar's exact snap is painted, so it never freezes on the partial
     // interpolated frame once it's no longer the series' last bar.
+    nowValue = 400
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 360, open: 101.5, high: 101.5, low: 101.5, close: 101.5, volume: 0 })
 
     const finalizeCall = updates[updates.length - 2]
@@ -77,7 +131,9 @@ describe('FormingAnimator — bar-transition handoff (Stage 2 item 3)', () => {
     const { series, updates } = makeSeries()
     const animator = new FormingAnimator(series, () => series)
 
+    nowValue = 0
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 10, high: 10, low: 10, close: 10, volume: 1 })
+    nowValue = 200
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 10, high: 13, low: 10, close: 12, volume: 1 })
     expect(animator.isAnimating).toBe(true)
     flushRaf(16.7) // partial glide frame, close somewhere between 10 and 12
@@ -96,7 +152,9 @@ describe('FormingAnimator — bar-transition handoff (Stage 2 item 3)', () => {
     const { series, updates } = makeSeries()
     const animator = new FormingAnimator(series, () => series)
 
+    nowValue = 0
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 10, high: 10, low: 10, close: 10, volume: 1 })
+    nowValue = 200
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 10, high: 13, low: 10, close: 12, volume: 1 })
     expect(animator.isAnimating).toBe(true)
     const callsBeforeReset = updates.length
@@ -111,7 +169,9 @@ describe('FormingAnimator — bar-transition handoff (Stage 2 item 3)', () => {
     const { series } = makeSeries()
     const animator = new FormingAnimator(series, () => series)
 
+    nowValue = 0
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 10, high: 10, low: 10, close: 10, volume: 1 })
+    nowValue = 200
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 10, high: 13, low: 10, close: 12, volume: 1 })
     expect(rafCallbacks.length).toBe(1) // registered with the shared coordinator
 
@@ -127,6 +187,7 @@ describe('FormingAnimator — bar-transition handoff (Stage 2 item 3)', () => {
     } as unknown as ISeriesApi<SeriesType>
     const animator = new FormingAnimator(series, () => series)
 
+    nowValue = 0
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 10, high: 10, low: 10, close: 10, volume: 1 })
     // First paint() call already hits paintSeries which throws — must not
     // throw OUT of paint() itself, and must leave the animator inert.

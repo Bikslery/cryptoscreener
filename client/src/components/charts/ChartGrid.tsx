@@ -4,12 +4,12 @@ import type { IChartApi, ISeriesApi, Time, SeriesType, DeepPartial, CandlestickS
 import { useCoinListStore, setLivePrice, setLivePriceEx, useAuthStore } from '../../store'
 import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
 import { registerGlider, unregisterGlider, type Glider } from '../../services/glide'
-import { stepFormingAnimation, formingGlideK, FORMING_FAST_K, FORMING_SMOOTH_K, FORMING_FAST_INTERVAL_MS, type FormingTarget } from '../../services/candle-anim'
+import { stepFormingAnimation, formingGlideK, FORMING_SNAP_INTERVAL_MS, type FormingTarget } from '../../services/candle-anim'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount, getWsLastMessageAt } from '../../services/ws'
 import type { Timeframe, UnifiedCandle, Exchange, DrawingTool } from '../../types'
-import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
+import { formatPrice, formatCompact, extractBaseAsset, snapToTick } from '../../utils/format'
 import { resolveIndicators, formatIndicator } from '../../services/indicators'
 import { ArrowLeft, Settings2 } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
@@ -85,10 +85,9 @@ export class FormingAnimator implements Glider {
   private running = false
   private readonly series: ISeriesApi<SeriesType>
   private readonly getRef: () => ISeriesApi<SeriesType> | null
-  /** When the last target was set — drives the adaptive glide speed. */
+  /** When the last target was set — a retarget sooner than the snap
+   *  interval means a live pair, which SNAPS instead of gliding. */
   private lastTargetAt = 0
-  /** Current convergence factor: fast on live pairs, smooth on quiet ones. */
-  private k = FORMING_SMOOTH_K
 
   constructor(series: ISeriesApi<SeriesType>, getRef: () => ISeriesApi<SeriesType> | null) {
     this.series = series
@@ -143,12 +142,21 @@ export class FormingAnimator implements Glider {
       return true
     }
     this.target = t
-    // Adaptive convergence: on a live pair (retargets every few dozen ms) the
-    // body must converge fast or it chases the market forever — every retarget
-    // restarts the glide from the current displayed value, so a slow fixed k
-    // never catches up. Quiet symbols keep the smooth long glide.
     const now = performance.now()
-    this.k = now - this.lastTargetAt <= FORMING_FAST_INTERVAL_MS ? FORMING_FAST_K : FORMING_SMOOTH_K
+    if (now - this.lastTargetAt <= FORMING_SNAP_INTERVAL_MS) {
+      // LIVE pair: snap straight to the target — a glide restarted by every
+      // retarget never converges and visibly chases the стакан. The body
+      // then moves on the exact frame the trade arrives, like the book.
+      this.lastTargetAt = now
+      if (this.running) {
+        unregisterGlider(this)
+        this.running = false
+      }
+      this.displayed = { ...t }
+      this.paintSeries(this.displayed)
+      return true
+    }
+    // Quiet pair — smooth glide toward the new target.
     this.lastTargetAt = now
     this.ensureLoop()
     return true
@@ -179,7 +187,7 @@ export class FormingAnimator implements Glider {
   /** Shared-coordinator entry: advance one frame, false = converged/stop. */
   tick(dt: number): boolean {
     if (this.getRef() !== this.series || !this.target || !this.displayed) return false
-    const { next, converged } = stepFormingAnimation(this.displayed, this.target, formingGlideK(dt, this.k))
+    const { next, converged } = stepFormingAnimation(this.displayed, this.target, formingGlideK(dt))
     if (converged) {
       this.displayed = { ...this.target }
       this.paintSeries(this.displayed)
@@ -1011,6 +1019,27 @@ function useWsCandle(
   }, [symbol, exchange, tf, adjustingRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
 }
 
+/**
+ * Price precision for a chart's displays, resolved to the CHART's exchange —
+ * the same tick grid the стакан (order book) is built on. coinMap is keyed by
+ * symbol and keeps the highest-priority exchange entry, so for a symbol not
+ * listed on the chart exchange it would leak a foreign venue's tick (BTC
+ * futures 0.1 vs spot 0.01) — the source of the "rounded differently than the
+ * стакан" look. The per-exchange master list is consulted first; falls back
+ * to coinMap, then 2.
+ */
+function useCoinPrecision(symbol: string, exchange?: string): number {
+  return useCoinListStore(s => {
+    const coin = s.coinMap.get(symbol)
+    if (coin && (!exchange || coin.exchange === exchange)) return coin.pricePrecision ?? 2
+    if (exchange) {
+      const byEx = s.coins.find(c => c.symbol === symbol && c.exchange === exchange)
+      if (byEx && typeof byEx.pricePrecision === 'number') return byEx.pricePrecision
+    }
+    return coin?.pricePrecision ?? 2
+  })
+}
+
 function useWsTrade(
   symbol: string,
   exchange: Exchange | undefined,
@@ -1032,6 +1061,7 @@ function useWsTrade(
   // price flicker). Second timeframes (1s/5s/15s) are the exception: they
   // run on the trade lane only, exactly like scalpboard's chart.
   const lastTradeAtRef = useRef(0)
+  const precision = useCoinPrecision(symbol, exchange)
 
   useEffect(() => {
     if (!exchange) return
@@ -1135,7 +1165,7 @@ function useWsTrade(
       // ordering here so the tick's tail-events queue and the painted
       // candlesDataRef/series can never diverge (the tail no longer "gets
       // ahead" of the series during the adjusting window).
-      const patch = ev.applyTick({ price: d.price, timeSec: Math.floor(Date.now() / 1000) } as TickPayload)
+      const patch = ev.applyTick({ price: snapToTick(d.price, precision), timeSec: Math.floor(Date.now() / 1000) } as TickPayload)
       if (adjustingRef?.current) {
         if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
           recordDiag('adjusting_drop_unbuffered', {
@@ -1297,7 +1327,7 @@ const MiniChart = memo(function MiniChart({
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
-  const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
+  const pricePrecision = useCoinPrecision(symbol, chartExchange)
   const exchange: Exchange | undefined = chartExchange
   const candlesDataRef = useRef<UnifiedCandle[]>([])
   const lastUpdateRef = useRef(0)
@@ -1932,18 +1962,19 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
       change24h: c.change24h,
       price: c.price,
       quoteVolume24h: c.quoteVolume24h,
-      pricePrecision: c.pricePrecision,
       high24h: c.high24h,
       low24h: c.low24h,
     }
   }))
   // Smoothed price display (presentation only — chart/store data stays exact).
   // Scoped to the chart's exchange so the header always shows THIS chart's
-  // last print with THIS venue's precision — never the best-exchange price.
-  const priceRef = useSmoothedPriceRef(symbol, coin?.pricePrecision ?? 2, coin?.price, '$', chartExchange)
+  // last print with THIS venue's tick precision — never the best-exchange
+  // price or precision. Displayed values are snapped to the tick grid, so
+  // every shown number exists as a стакан level.
+  const precision = useCoinPrecision(symbol, chartExchange)
+  const priceRef = useSmoothedPriceRef(symbol, precision, coin?.price, '$', chartExchange)
   const isUp = coin ? coin.change24h >= 0 : true
   const badge = exchangeBadge(chartExchange)
-  const precision = coin?.pricePrecision ?? 2
   const volDisplay = coin ? formatCompact(coin.quoteVolume24h) : '-'
 
   return (
@@ -2025,7 +2056,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   const tf = useCoinListStore(s => s.activeTimeframe)
   const destroyedRef = useRef(false)
   const adjustingRef = useRef(false)
-  const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
+  const pricePrecision = useCoinPrecision(symbol, chartExchange)
   const baseSettings = useChartSettings()
   const settingsRef = useRef(baseSettings)
   settingsRef.current = baseSettings

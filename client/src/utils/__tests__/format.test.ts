@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatCompact, getPrecisionFromTickSize, getPrecisionFromPrice, formatPrice, extractBaseAsset } from '../format'
+import { formatCompact, getPrecisionFromTickSize, getPrecisionFromPrice, formatPrice, snapToTick, extractBaseAsset } from '../format'
 
 describe('formatCompact', () => {
   it('formats plain numbers below 1K without a suffix', () => {
@@ -60,6 +60,28 @@ describe('formatPrice', () => {
   it('groups thousands for big prices', () => {
     expect(formatPrice(65432.1, 2)).toBe('65,432.10')
     expect(formatPrice(12.345, 2)).toBe('12.35')
+  })
+})
+
+describe('snapToTick — the стакан grid', () => {
+  it('rounds a price onto the exchange tick grid', () => {
+    // Mid of bid 67123.5 / ask 67123.6 = 67123.55 — off-grid, must land on a
+    // book level (round-half-up → the nearest tick, 67123.6).
+    expect(snapToTick(67123.55, 1)).toBeCloseTo(67123.6, 10)
+    expect(snapToTick(0.123456, 4)).toBeCloseTo(0.1235, 10)
+    expect(snapToTick(1.23456, 3)).toBeCloseTo(1.235, 10)
+    expect(snapToTick(100, 0)).toBe(100)
+  })
+
+  it('is a no-op for values already on the grid', () => {
+    expect(snapToTick(67123.5, 1)).toBe(67123.5)
+    expect(snapToTick(2.3456, 4)).toBeCloseTo(2.3456, 10)
+  })
+
+  it('passes through non-positive and non-finite prices untouched', () => {
+    expect(snapToTick(0, 2)).toBe(0)
+    expect(snapToTick(-5, 2)).toBe(-5)
+    expect(snapToTick(Number.NaN, 2)).toBeNaN()
   })
 })
 

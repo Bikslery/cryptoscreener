@@ -55,6 +55,41 @@ const candleDiagState = {
 }
 const MAX_RECENT_GAPS = 50
 
+// --- Candle-lane coalescing --------------------------------------------------
+// Exchange kline streams push an update per TRADE while a period forms, so an
+// active symbol produced a per-trade WS frame flood (on top of the per-trade
+// trade lane) that saturated the client's parse queue — the chart fell behind
+// the real стакан. Kline snapshots are CUMULATIVE, so latest-wins coalescing
+// loses nothing: the newest snapshot fully replaces the pending one. A CLOSED
+// bar (isFinal) flushes immediately — the client's bar handoff waits on it.
+const CANDLE_LANE_INTERVAL_MS = parseInt(process.env.CANDLE_LANE_INTERVAL_MS || '50', 10)
+const pendingCandles = new Map<string, UnifiedCandle>()
+let candleFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+function queueCandle(channel: string, candle: UnifiedCandle): void {
+  pendingCandles.set(channel, candle)
+  if (candleFlushTimer === null) {
+    candleFlushTimer = setTimeout(flushPendingCandles, CANDLE_LANE_INTERVAL_MS)
+  }
+}
+
+function flushPendingCandles(): void {
+  candleFlushTimer = null
+  for (const [channel, candle] of pendingCandles) {
+    pendingCandles.delete(channel)
+    broadcastToChannel(channel, candle, true)
+  }
+}
+
+/** Flush the coalesced candle lane immediately (closed bars, teardown). */
+export function flushCandleLane(): void {
+  if (candleFlushTimer !== null) {
+    clearTimeout(candleFlushTimer)
+    candleFlushTimer = null
+  }
+  flushPendingCandles()
+}
+
 function recordInboundCandle(candle: UnifiedCandle): GapEvent | null {
   candleDiagState.candlesReceived++
   const key = `${candle.exchange}:${candle.symbol}:${candle.timeframe}`
@@ -166,7 +201,15 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
   const candleCallback: CandleCallback = (candle: UnifiedCandle) => {
     const channel = `candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`
     const gap = recordInboundCandle(candle)
-    broadcastToChannel(channel, candle, true)
+    if (candle.isFinal) {
+      // A closed bar lands immediately: pending forming klines for the same
+      // channel are superseded by this final snapshot, and the client's bar
+      // handoff (next period's open) waits on it.
+      queueCandle(channel, candle)
+      flushCandleLane()
+    } else {
+      queueCandle(channel, candle)
+    }
     if (gap) {
       // INSTANT REPAIR: the stream skipped periods → the cache just got flat
       // placeholders for them. Replace them with real exchange rows right away

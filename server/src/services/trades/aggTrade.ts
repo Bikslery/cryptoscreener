@@ -16,6 +16,67 @@ interface AggTradeStream {
   msgCount: number
 }
 
+// --- Trade-lane coalescing ---------------------------------------------------
+// Active symbols print dozens of aggTrades/sec; broadcasting EVERY print as
+// its own immediate WS frame flooded the client (per trade: 1 trade frame +
+// 1 kline frame), so the browser's serial parse queue backed up and the
+// chart visibly fell behind the real стакан. Instead, per (exchange, symbol)
+// the LATEST trade is flushed every TRADE_LANE_INTERVAL_MS — latest price +
+// latest time for the forming candle (latest-wins) and the window's SUMMED
+// base volume so the client's second-candle aggregator keeps exact totals.
+interface PendingTrade {
+  symbol: string
+  exchange: Exchange
+  price: number
+  volume: number
+  time: number
+  isBuyerMaker: boolean
+}
+
+const TRADE_LANE_INTERVAL_MS = parseInt(process.env.TRADE_LANE_INTERVAL_MS || '30', 10)
+const pendingTrades = new Map<string, PendingTrade>()
+let tradeFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+function queueTrade(symbol: string, exchange: Exchange, payload: PendingTrade): void {
+  const key = `${exchange}:${symbol}`
+  const prev = pendingTrades.get(key)
+  if (prev) {
+    // Latest-wins price/time; volume accumulates so nothing is lost.
+    prev.price = payload.price
+    prev.time = payload.time
+    prev.volume += payload.volume
+    prev.isBuyerMaker = payload.isBuyerMaker
+  } else {
+    pendingTrades.set(key, { ...payload })
+  }
+  if (tradeFlushTimer === null) {
+    tradeFlushTimer = setTimeout(flushPendingTrades, TRADE_LANE_INTERVAL_MS)
+  }
+}
+
+function flushPendingTrades(): void {
+  tradeFlushTimer = null
+  for (const [key, t] of pendingTrades) {
+    pendingTrades.delete(key)
+    const payload = { symbol: t.symbol, exchange: t.exchange, price: t.price, volume: t.volume, time: t.time, isBuyerMaker: t.isBuyerMaker }
+    broadcastToChannel(`trade:${t.exchange}:${t.symbol}`, payload, true)
+    if (REDIS_ENABLED) {
+      try {
+        getRedisPub().publish('trades', JSON.stringify(payload)).catch(() => {})
+      } catch { /* redis down */ }
+    }
+  }
+}
+
+/** Flush immediately (reconnect/teardown safety). */
+export function flushTradeLane(): void {
+  if (tradeFlushTimer !== null) {
+    clearTimeout(tradeFlushTimer)
+    tradeFlushTimer = null
+  }
+  flushPendingTrades()
+}
+
 function createStream(): AggTradeStream {
   return {
     ws: null,
@@ -114,7 +175,7 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
         // Bybit/OKX trade lanes are not Binance aggTrade streams).
         recordTradeBucket(symbol, data.T)
 
-        const tradePayload = {
+        const tradePayload: PendingTrade = {
           symbol,
           exchange,
           price,
@@ -130,15 +191,11 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
           isBuyerMaker,
         }
 
-        broadcastToChannel(`trade:${exchange}:${symbol}`, tradePayload, true)
-
-        // Publish to Redis so broadcast nodes (which have no exchange
-        // connections) can fan the trade out to their clients.
-        if (REDIS_ENABLED) {
-          try {
-            getRedisPub().publish('trades', JSON.stringify(tradePayload)).catch(() => {})
-          } catch { /* redis down */ }
-        }
+        // Coalesced latest-wins broadcast — the chart needs the newest price
+        // (not every print), and the client's second-candle aggregator needs
+        // the summed volume (accumulated above). This cuts the per-trade
+        // frame flood that saturated the client's parse queue.
+        queueTrade(symbol, exchange, tradePayload)
       }
     } catch (e) {
       console.error(`[AggTrade${label}] Parse error:`, e)

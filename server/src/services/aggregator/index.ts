@@ -22,6 +22,43 @@ const tickerMap = new Map<string, UnifiedTicker>()
 // `price:` fast lane so an unchanged mid isn't re-broadcast on every event.
 const lastMidCache = new Map<string, number>()
 
+// --- Price-lane coalescing ---------------------------------------------------
+// bookTicker fires on EVERY top-of-book change — dozens/sec on liquid pairs.
+// Broadcasting each change immediately, on top of the per-trade trade+kline
+// lanes, flooded the client's serial parse queue (the visible "chart lags the
+// стакан"). The mid is a FALLBACK price source (trades are primary), so it is
+// fully coalescable: latest-wins flush every PRICE_LANE_INTERVAL_MS.
+interface PendingMid {
+  symbol: string
+  exchange: string
+  price: number
+}
+
+const PRICE_LANE_INTERVAL_MS = parseInt(process.env.PRICE_LANE_INTERVAL_MS || '40', 10)
+const pendingMids = new Map<string, PendingMid>()
+let midFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+function queueMid(symbol: string, exchange: string, mid: number): void {
+  pendingMids.set(`${symbol}:${exchange}`, { symbol, exchange, price: mid })
+  if (midFlushTimer === null) {
+    midFlushTimer = setTimeout(flushPendingMids, PRICE_LANE_INTERVAL_MS)
+  }
+}
+
+function flushPendingMids(): void {
+  midFlushTimer = null
+  for (const [key, m] of pendingMids) {
+    pendingMids.delete(key)
+    const payload = { symbol: m.symbol, exchange: m.exchange, price: m.price, ts: Date.now() }
+    if (isBroadcast) broadcastToChannel(`price:${m.symbol}`, payload, true)
+    if (isIngestion && REDIS_ENABLED) {
+      try {
+        getRedisPub().publish('price', JSON.stringify(payload)).catch(() => {})
+      } catch { /* redis down */ }
+    }
+  }
+}
+
 // --- Configurable exchange priority (env overrides hardcoded defaults) ---
 
 const DEFAULT_PRIORITY: Record<string, number> = {
@@ -344,16 +381,10 @@ export function startAggregator() {
       const lastKey = `${symbol}:${adapter.exchange}`
       if (lastMidCache.get(lastKey) === mid) return
       lastMidCache.set(lastKey, mid)
-      // Fast-lane: focused charts subscribe to `price:<symbol>` and get the
-      // mid instantly (no 40ms batch) — the same immediacy candle/trade
-      // channels already have. Redis keeps broadcast-only nodes in sync.
-      const payload = { symbol, exchange: adapter.exchange, price: mid, ts: Date.now() }
-      if (isBroadcast) broadcastToChannel(`price:${symbol}`, payload, true)
-      if (isIngestion && REDIS_ENABLED) {
-        try {
-          getRedisPub().publish('price', JSON.stringify(payload)).catch(() => {})
-        } catch {}
-      }
+      // Coalesced latest-wins fast lane (see queueMid) — the mid is a
+      // fallback source; the chart needs the newest value, not every book
+      // change, and coalescing keeps the client's frame queue clear.
+      queueMid(symbol, adapter.exchange, mid)
     })
 
     console.log(`[Aggregator] Starting adapter: ${adapter.name} (${adapter.exchange})`)

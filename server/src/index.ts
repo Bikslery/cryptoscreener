@@ -7,6 +7,8 @@ import { createServer } from 'http'
 import type { Request, Response, NextFunction } from 'express'
 import { setupWsHub, setCandleManager, startRedisListener, startIngestionRedisListener, stopWsHub, refreshMetrics } from './ws/hub.js'
 import { startAggregator, adapters } from './services/aggregator/index.js'
+import { flushTradeLane } from './services/trades/aggTrade.js'
+import { flushCandleLane } from './services/candles/manager.js'
 import { startAlertEngine, stopAlertEngine } from './services/alerts/index.js'
 import { startTelegramPolling } from './services/telegram/bot.js'
 import { createCandleManager, createRemoteCandleManager } from './services/candles/manager.js'
@@ -146,6 +148,8 @@ async function main() {
       if (c.readyState === WebSocket.OPEN) c.close(1001, 'server shutting down')
     })
     for (const adapter of adapters) adapter.disconnect()
+    flushTradeLane()
+    flushCandleLane()
     stopAlertEngine()
     stopWsHub()
     server.close()

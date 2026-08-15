@@ -36,6 +36,19 @@ export function formatPrice(price: number, precision: number): string {
   return price.toFixed(precision)
 }
 
+/**
+ * Snap a price to the exchange's tick grid (10^-precision) — the same grid
+ * the order book (стакан) is built on. Displayed prices then always exist as
+ * a book level: e.g. the mid of bid 67123.5 / ask 67123.6 = 67123.55 snaps to
+ * 67123.5 (or 67123.6), never an off-grid value the стакан cannot show.
+ */
+export function snapToTick(price: number, precision: number): number {
+  if (!Number.isFinite(price) || price <= 0) return price
+  const p = Math.max(0, Math.min(10, Math.floor(precision)))
+  const tick = Math.pow(10, -p)
+  return Math.round(price / tick) * tick
+}
+
 const COMPACT_UNITS: [number, string][] = [
   [1e12, 'T'],
   [1e9, 'B'],
