@@ -14,8 +14,31 @@ import { hueIndexFor, claimHue, wallColor } from '../../utils/claimHue'
 import { extractBaseAsset } from '../../utils/format'
 
 const TIER_COUNT = 3
-/** Вертикальный шаг слота (в % высоты зоны) — блоки одной колонки не накладываются. */
-const SLOT_PCT = 8
+/** scalpboard dark theme: asks zone red, bids zone green */
+const MAP_TOP = '#bc3838'
+const MAP_BOTTOM = '#38bc38'
+const FOREGROUND_FULL = '#0d0d0d'
+
+/** Точная копия их zone-фона (yt из бандла): linear-gradient(to left) из
+ *  tier-колонок с альфой 0.11 → 0.02 — правая колонка (Малые) насыщеннее. */
+function zoneBackground(color: string, tiers = TIER_COUNT): string {
+  const colW = 100 / tiers
+  const aFrom = 0.11
+  const aTo = 0.02
+  const step = (aFrom - aTo) / (tiers - 1)
+  const stops: string[] = []
+  for (let u = 0; u < tiers; u++) {
+    const alpha = Number((aTo + step * u).toFixed(3))
+    const rgba = withAlpha(color, alpha)
+    stops.push(`${rgba} ${u * colW}%`, `${rgba} ${(u + 1) * colW}%`)
+  }
+  return `linear-gradient(to left, ${stops.join(', ')})`
+}
+
+function withAlpha(hex: string, alpha: number): string {
+  const n = parseInt(hex.slice(1), 16)
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`
+}
 
 /** Строка карты: одна стена/плотность с позицией по тиру и расстоянию. */
 interface MapBlock {
@@ -84,11 +107,11 @@ const TIER_LABEL: Record<Tier, string> = {
 }
 
 /**
- * Двумерная карта плотностей — копия scalpboard AppMapDensity/AppMapWall:
- * центральная линия — спред; верхняя зона — аски, нижняя — биды; блок
- * позиционируется расстоянием от цены внутри своей зоны
- * (bottom/top = distance/depth×100%). По горизонтали 3 колонки-тира,
- * легенда-шапка grid-cols-3 uppercase 10px, фоновая сетка каждые 0.5%.
+ * Карта плотностей — копия scalpboard AppMap/AppMapWall: центр — спред,
+ * верхняя зона (аски) с красным градиентом, нижняя (биды) с зелёным;
+ * полосы расстояний каждые 0.5% с подписями (0.5%…3% при глубине 3);
+ * блок стоит ровно на своей дистанции и ПЛАВНО перетекает между полосами
+ * и колонками тиров (CSS transition).
  */
 export const DensityMap = memo(function DensityMap() {
   const walls = useDensityStore(s => s.walls)
@@ -128,59 +151,42 @@ export const DensityMap = memo(function DensityMap() {
     [walls, autoBrps, settingsPatch, coinMap],
   )
 
-  /** Жадная раскладка по слотам внутри каждой (side, tier)-колонки. */
-  const slots = useMemo(() => {
-    const slotOf = new Map<MapBlock, number>()
-    const cols = new Map<string, MapBlock[]>()
-    for (const b of blocks) {
-      if (Math.abs(b.distancePct) > zoomPct) continue
-      const ck = `${b.side}:${b.tier}`
-      const arr = cols.get(ck)
-      if (arr) arr.push(b)
-      else cols.set(ck, [b])
-    }
-    for (const group of cols.values()) {
-      group.sort((a, b) => Math.abs(a.distancePct) - Math.abs(b.distancePct))
-      const used = new Set<number>()
-      for (const b of group) {
-        const yPct = Math.min(100, Math.max(0, (Math.abs(b.distancePct) / zoomPct) * 100))
-        let slot = Math.round(yPct / SLOT_PCT) * SLOT_PCT
-        while (used.has(slot) && slot < 100) slot += SLOT_PCT
-        used.add(slot)
-        slotOf.set(b, Math.min(slot, 100 - SLOT_PCT / 2))
-      }
-    }
-    return slotOf
-  }, [blocks, zoomPct])
-
-  const colW = 100 / TIER_COUNT
-  const gridlines = useMemo(() => {
-    const n = Math.ceil(zoomPct / 0.5)
-    return Array.from({ length: n - 1 }, (_, i) => (((i + 1) * 0.5) / zoomPct) * 100)
+  /** Полосы расстояний: ceil(глубина/0.5) тиков, подпись i/2% (их формула). */
+  const ticks = useMemo(() => {
+    const count = Math.ceil(zoomPct / 0.5)
+    return Array.from({ length: Math.max(0, count - 1) }, (_, i) => ({
+      pos: ((i + 1) * (100 / count)),
+      label: `${(i + 1) / 2}%`,
+      big: (i + 1) % 2 === 1,
+    }))
   }, [zoomPct])
 
+  const colW = 100 / TIER_COUNT
+
   const renderBlock = (b: MapBlock) => {
-    const slot = slots.get(b)
-    if (slot === undefined) return null
-    const key = `${b.exchange}:${b.symbol}:${b.side}:${b.price}:${b.tier}`
+    if (Math.abs(b.distancePct) > zoomPct) return null
+    const key = `${b.exchange}:${b.symbol}:${b.side}:${b.price}`
     const left = colW * b.tier - colW / 2
     const color = wallColor(b.hue, b.lOffset)
     const focused = focusedKey === key
+    const yPct = Math.min(100, Math.max(0, (Math.abs(b.distancePct) / zoomPct) * 100))
     return (
       <button
         key={key}
-        className={`absolute flex items-center gap-[3px] px-[5px] h-[20px] rounded-[3px] cursor-pointer border text-left ${
+        className={`absolute flex items-center gap-[3px] px-[5px] h-[20px] rounded-[3px] cursor-pointer border text-left will-change-[top,bottom,left] ${
           focused ? 'brightness-150' : 'hover:brightness-125'
         }`}
         style={{
           zIndex: focused ? 200 : 99,
           left: `${left}%`,
           width: `${colW - 6}%`,
-          // аски прижаты к линии сверху, биды — снизу, с отступом 2px
+          // аски прижаты к линии сверху, биды — снизу (2px от центра);
+          // переходы — блоки плавно текут между полосами и колонками тиров
           ...(b.side === 'ask'
-            ? { bottom: `${slot}%`, transform: 'translateX(-50%) translateY(calc(-100% - 2px))' }
-            : { top: `${slot}%`, transform: 'translateX(-50%) translateY(2px)' }),
+            ? { bottom: `${yPct}%`, transform: 'translateX(-50%) translateY(calc(-100% - 2px))' }
+            : { top: `${yPct}%`, transform: 'translateX(-50%) translateY(2px)' }),
           backgroundColor: color,
+          transition: 'top 600ms ease-out, bottom 600ms ease-out, left 600ms ease-out, background-color 600ms ease-out',
         }}
         title={`${b.symbol} ${b.side === 'bid' ? 'BID' : 'ASK'} @ ${b.price} — ${formatUsdt(b.sumUsdt)} · ${formatAge(b.bornAt)}${b.roundNumber ? ' · круглое число' : ''}`}
         onMouseEnter={() => setFocusedKey(key)}
@@ -205,54 +211,77 @@ export const DensityMap = memo(function DensityMap() {
 
   const asks = blocks.filter(b => b.side === 'ask')
   const bids = blocks.filter(b => b.side === 'bid')
+  const askZoneBg = useMemo(() => zoneBackground(MAP_TOP), [])
+  const bidZoneBg = useMemo(() => zoneBackground(MAP_BOTTOM), [])
 
   return (
-    <div className="w-full h-full flex flex-col bg-[#0a0a0a]">
-      {/* Легенда-шапка (scalpboard: grid-cols-3 uppercase text-10px) */}
-      <div className="grid grid-cols-3 uppercase text-[10px] leading-5 items-center text-center text-[#777] select-none h-[20px] border-b border-[#1f1f1f] bg-[#0e0e0e] flex-shrink-0">
-        <div>{TIER_LABEL[1]}</div>
-        <div>{TIER_LABEL[2]}</div>
-        <div>{TIER_LABEL[3]}</div>
-      </div>
-
-      <div className="relative flex-1 min-h-0" onWheel={onWheel} data-testid="density-map">
-        {/* АСКИ — верхняя зона */}
-        <div className="absolute inset-x-0 top-0 h-1/2 overflow-hidden">
-          {gridlines.map(y => (
-            <div key={`ga-${y}`} className="absolute left-0 right-0 h-px bg-white/5 pointer-events-none" style={{ bottom: `${y}%` }} />
-          ))}
-          {asks.map(renderBlock)}
-        </div>
-
-        {/* БИДЫ — нижняя зона */}
-        <div className="absolute inset-x-0 bottom-0 h-1/2 overflow-hidden">
-          {gridlines.map(y => (
-            <div key={`gb-${y}`} className="absolute left-0 right-0 h-px bg-white/5 pointer-events-none" style={{ top: `${y}%` }} />
-          ))}
-          {bids.map(renderBlock)}
-        </div>
-
-        {/* колонки-тиры */}
-        {[1, 2].map(i => (
+    <div className="relative w-full h-full bg-[#0a0a0a]" onWheel={onWheel} data-testid="density-map">
+      {/* АСКИ — верхняя зона (красный градиент тиров) */}
+      <div className="absolute inset-x-0 top-0 h-1/2 overflow-hidden" style={{ background: askZoneBg }}>
+        {ticks.map(t => (
           <div
-            key={i}
-            className="absolute top-0 bottom-0 w-px bg-white/5 pointer-events-none"
-            style={{ left: `${colW * i}%` }}
-          />
-        ))}
-
-        {/* спред (центр) */}
-        <div className="absolute left-0 right-0 top-1/2 h-px bg-[#444] pointer-events-none z-10" />
-        <div className="absolute left-0 top-1/2 -translate-y-1/2 text-[9px] text-[#666] px-1 bg-[#0a0a0a] pointer-events-none select-none z-10">
-          {zoomPct.toFixed(1)}%
-        </div>
-
-        {slots.size === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center text-[10px] text-[#555]">
-            Плотностей нет — сервер собирает стаканы…
+            key={`ta-${t.label}`}
+            className="absolute left-0 right-0 flex items-center pointer-events-none"
+            style={{ bottom: `${t.pos}%`, height: 0 }}
+            data-testid="density-map-tick"
+          >
+            <div className="flex-1 h-px bg-white/8" />
+            <span className={`absolute left-1 ${t.big ? 'text-[11px]' : 'text-[9px]'} text-[#888] bg-transparent pl-[2px]`}>
+              {t.label}
+            </span>
           </div>
-        )}
+        ))}
+        {asks.map(renderBlock)}
+        {/* легенда тиров — у линии центра, как у них */}
+        <div className="absolute inset-x-0 bottom-0 h-[20px] grid grid-cols-3 uppercase text-[10px] leading-[20px] items-center text-center text-[#999] select-none pointer-events-none z-[6]">
+          <div>{TIER_LABEL[1]}</div>
+          <div>{TIER_LABEL[2]}</div>
+          <div>{TIER_LABEL[3]}</div>
+        </div>
       </div>
+
+      {/* БИДЫ — нижняя зона (зелёный градиент тиров) */}
+      <div className="absolute inset-x-0 bottom-0 h-1/2 overflow-hidden" style={{ background: bidZoneBg }}>
+        {ticks.map(t => (
+          <div
+            key={`tb-${t.label}`}
+            className="absolute left-0 right-0 flex items-center pointer-events-none"
+            style={{ top: `${t.pos}%`, height: 0 }}
+            data-testid="density-map-tick"
+          >
+            <div className="flex-1 h-px bg-white/8" />
+            <span className={`absolute left-1 ${t.big ? 'text-[11px]' : 'text-[9px]'} text-[#888] bg-transparent pl-[2px]`}>
+              {t.label}
+            </span>
+          </div>
+        ))}
+        {bids.map(renderBlock)}
+      </div>
+
+      {/* виньетки 5% (их before/after слои) */}
+      <div className="absolute inset-x-0 top-0 h-[5%] pointer-events-none z-[7]" style={{ opacity: 0.05, background: `linear-gradient(to bottom, ${FOREGROUND_FULL}, transparent)` }} />
+      <div className="absolute inset-x-0 bottom-0 h-[5%] pointer-events-none z-[7]" style={{ opacity: 0.05, background: `linear-gradient(to top, ${FOREGROUND_FULL}, transparent)` }} />
+
+      {/* колонки-тиры */}
+      {[1, 2].map(i => (
+        <div
+          key={i}
+          className="absolute top-0 bottom-0 w-px bg-white/5 pointer-events-none"
+          style={{ left: `${colW * i}%` }}
+        />
+      ))}
+
+      {/* спред (центр) */}
+      <div className="absolute left-0 right-0 top-1/2 h-px bg-[#444] pointer-events-none z-10" />
+      <div className="absolute left-1 top-1/2 -translate-y-1/2 text-[9px] text-[#777] px-1 bg-[#0a0a0a]/80 pointer-events-none select-none z-10">
+        {zoomPct.toFixed(1)}%
+      </div>
+
+      {asks.length === 0 && bids.length === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center text-[10px] text-[#555] z-20">
+          Плотностей нет — сервер собирает стаканы…
+        </div>
+      )}
     </div>
   )
 })
