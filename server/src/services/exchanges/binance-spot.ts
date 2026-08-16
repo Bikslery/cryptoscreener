@@ -355,10 +355,14 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
   private async initDepthBook(symbol: string) {
     if (this.depthBookLoading.has(symbol)) return
     this.depthBookLoading.add(symbol)
+    // Create the book BEFORE the fetch: diff events arriving during the
+    // snapshot window must BUFFER into it. Creating it after the fetch
+    // drops those events, so the first post-snapshot event shows a gap
+    // (U > lastUpdateId + 1) → instant resync → permanent reseed loop.
+    const book = this.depthBooks.get(symbol) ?? new BinanceDepthBook()
+    this.depthBooks.set(symbol, book)
     try {
       const snap = await this.fetchDepth(symbol, 100)
-      const book = this.depthBooks.get(symbol) ?? new BinanceDepthBook()
-      this.depthBooks.set(symbol, book)
       if (snap.bids.length > 0 && typeof snap.lastUpdateId === 'number') {
         book.setSnapshot(snap.bids, snap.asks, snap.lastUpdateId)
       }

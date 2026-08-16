@@ -294,7 +294,9 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
 
       existing.count--
       if (existing.count <= 0) {
-        existing.adapter.unsubscribeDepth(symbol)
+        // Pass the callback: without it the adapter can't remove the
+        // subscription entry and the depth stream leaks forever.
+        existing.adapter.unsubscribeDepth(symbol, depthCallback)
         activeDepthSubs.delete(key)
         console.log(`[CandleManager] Unsubscribed from depth ${key}`)
       }

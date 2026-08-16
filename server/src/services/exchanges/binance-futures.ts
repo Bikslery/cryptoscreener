@@ -65,7 +65,7 @@ const STABLECOIN_BASES = new Set([
 // new futures stream domain fstream.binancefuture.com is NOT blocked and
 // delivers tickers/klines/aggTrades in realtime from those regions (verified
 // live from the German VPS). Overridable via env if Binance ever re-routes it.
-const WS_BASE = process.env.BINANCE_FUTURES_WS_BASE || 'wss://fstream.binancefuture.com'
+const WS_BASE = process.env.BINANCE_FUTURES_WS_BASE || 'wss://fstream.binance.com'
 const TICKER_WS_URL = `${WS_BASE}/ws/!miniTicker@arr`
 const TICKER_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/24hr'
 const TICKER_PRICE_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/price'
@@ -576,21 +576,42 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   /** Diff-depth assembly: seed the local book with a REST snapshot, then
    *  replay buffered diff events (Binance's standard snapshot+delta dance).
    *  A 100-level seed is enough — WS diffs grow the book from there. */
+  private depthSeedDiag = { attempts: 0, seeded: 0, empty: 0, httpErr: 0, lastLog: 0 }
+
   private async initDepthBook(symbol: string) {
     if (this.depthBookLoading.has(symbol)) return
     this.depthBookLoading.add(symbol)
+    this.depthSeedDiag.attempts++
+    // Create the book BEFORE the fetch: diff events arriving during the
+    // snapshot window must BUFFER into it. Creating it after the fetch
+    // drops those events, so the first post-snapshot event shows a gap
+    // (U > lastUpdateId + 1) → instant resync → permanent reseed loop.
+    const book = this.depthBooks.get(symbol) ?? new BinanceDepthBook()
+    this.depthBooks.set(symbol, book)
     try {
       const snap = await this.fetchDepth(symbol, 100)
-      const book = this.depthBooks.get(symbol) ?? new BinanceDepthBook()
-      this.depthBooks.set(symbol, book)
       if (snap.bids.length > 0 && typeof snap.lastUpdateId === 'number') {
         book.setSnapshot(snap.bids, snap.asks, snap.lastUpdateId)
+        this.depthSeedDiag.seeded++
+      } else {
+        this.depthSeedDiag.empty++
       }
     } catch {
-      // snapshot failed — the retry loop re-seeds
+      this.depthSeedDiag.httpErr++
     } finally {
       this.depthBookLoading.delete(symbol)
       this.scheduleDepthBookRetry(symbol)
+      const now = Date.now()
+      if (now - this.depthSeedDiag.lastLog > 60_000) {
+        this.depthSeedDiag.lastLog = now
+        let synced = 0
+        for (const b of this.depthBooks.values()) if (b.synced) synced++
+        console.log(
+          `[BinanceFutures] depthSeed attempts=${this.depthSeedDiag.attempts} seeded=${this.depthSeedDiag.seeded} ` +
+          `empty=${this.depthSeedDiag.empty} httpErr=${this.depthSeedDiag.httpErr} ` +
+          `syncedBooks=${synced} throttled=${this.rateLimiter.isThrottled()} weight=${this.rateLimiter.getWeight()}`,
+        )
+      }
     }
   }
 
@@ -606,27 +627,58 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     }, 15_000)
   }
 
+  private depthMsgDiag = {
+    applied: 0, buffered: 0, resync: 0, emitted: 0, noBook: 0, badShape: 0, lastLog: 0,
+    noBookSamples: new Set<string>(), bufferedSamples: new Set<string>(),
+  }
+
   private handleDepthMsg(msg: any): UnifiedDepth | null {
+    const now = Date.now()
+    if (now - this.depthMsgDiag.lastLog > 60_000) {
+      this.depthMsgDiag.lastLog = now
+      console.log(
+        `[BinanceFutures] depthMsg applied=${this.depthMsgDiag.applied} buffered=${this.depthMsgDiag.buffered} ` +
+        `resync=${this.depthMsgDiag.resync} emitted=${this.depthMsgDiag.emitted} ` +
+        `noBook=${this.depthMsgDiag.noBook} badShape=${this.depthMsgDiag.badShape} ` +
+        `noBookSym=[${Array.from(this.depthMsgDiag.noBookSamples).slice(0, 10).join(',')}] ` +
+        `bufferedSym=[${Array.from(this.depthMsgDiag.bufferedSamples).slice(0, 5).join(',')}]`,
+      )
+      this.depthMsgDiag.noBookSamples.clear()
+      this.depthMsgDiag.bufferedSamples.clear()
+    }
     const d = msg.data || msg
     const symbol = d.s || d.symbol || ''
-    if (!symbol || d.U === undefined || d.u === undefined) return null
+    if (!symbol || d.U === undefined || d.u === undefined) {
+      this.depthMsgDiag.badShape++
+      return null
+    }
     const book = this.depthBooks.get(symbol)
-    if (!book) return null
+    if (!book) {
+      this.depthMsgDiag.noBook++
+      if (this.depthMsgDiag.noBookSamples.size < 10) this.depthMsgDiag.noBookSamples.add(symbol)
+      return null
+    }
 
     const ev: DiffDepthEvent = { U: d.U, u: d.u, b: d.b ?? [], a: d.a ?? [] }
     const result = book.applyDiff(ev)
     if (result === 'resync') {
+      this.depthMsgDiag.resync++
       this.initDepthBook(symbol)
       return null
     }
-    if (result !== 'applied') return null
+    if (result === 'buffered') {
+      this.depthMsgDiag.buffered++
+      if (this.depthMsgDiag.bufferedSamples.size < 5) this.depthMsgDiag.bufferedSamples.add(symbol)
+      return null
+    }
+    this.depthMsgDiag.applied++
 
     // Emit full snapshots at most every 200ms per symbol — the book is
     // cumulative, so latest-wins loses nothing and bounds per-symbol cost.
-    const now = Date.now()
     const last = this.lastDepthEmitAt.get(symbol) ?? 0
     if (now - last < 200) return null
     this.lastDepthEmitAt.set(symbol, now)
+    this.depthMsgDiag.emitted++
     return book.toDepth(symbol, this.exchange)
   }
 
