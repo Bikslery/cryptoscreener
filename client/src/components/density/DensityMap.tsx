@@ -15,7 +15,7 @@ import { extractBaseAsset } from '../../utils/format'
 
 const TIER_COUNT = 3
 /** Вертикальный шаг слота (в % высоты зоны) — блоки одной колонки не накладываются. */
-const SLOT_PCT = 6
+const SLOT_PCT = 8
 
 /** Строка карты: одна стена/плотность с позицией по тиру и расстоянию. */
 interface MapBlock {
@@ -84,10 +84,11 @@ const TIER_LABEL: Record<Tier, string> = {
 }
 
 /**
- * Двумерная карта плотностей (scalpboard AppMapDensity): верхняя зона —
- * аски, нижняя — биды, между ними линия текущей цены; по горизонтали 3
- * колонки-тира (Большие/Средние/Малые), по вертикали — расстояние от цены
- * в процентах внутри окна «глубины». Цвет блока — hue монеты.
+ * Двумерная карта плотностей — копия scalpboard AppMapDensity/AppMapWall:
+ * центральная линия — спред; верхняя зона — аски, нижняя — биды; блок
+ * позиционируется расстоянием от цены внутри своей зоны
+ * (bottom/top = distance/depth×100%). По горизонтали 3 колонки-тира,
+ * легенда-шапка grid-cols-3 uppercase 10px, фоновая сетка каждые 0.5%.
  */
 export const DensityMap = memo(function DensityMap() {
   const walls = useDensityStore(s => s.walls)
@@ -152,97 +153,105 @@ export const DensityMap = memo(function DensityMap() {
     return slotOf
   }, [blocks, zoomPct])
 
+  const colW = 100 / TIER_COUNT
+  const gridlines = useMemo(() => {
+    const n = Math.ceil(zoomPct / 0.5)
+    return Array.from({ length: n - 1 }, (_, i) => (((i + 1) * 0.5) / zoomPct) * 100)
+  }, [zoomPct])
+
+  const renderBlock = (b: MapBlock) => {
+    const slot = slots.get(b)
+    if (slot === undefined) return null
+    const key = `${b.exchange}:${b.symbol}:${b.side}:${b.price}:${b.tier}`
+    const left = colW * b.tier - colW / 2
+    const color = wallColor(b.hue, b.lOffset)
+    const focused = focusedKey === key
+    return (
+      <button
+        key={key}
+        className={`absolute flex items-center gap-[3px] px-[5px] h-[20px] rounded-[3px] cursor-pointer border text-left ${
+          focused ? 'brightness-150' : 'hover:brightness-125'
+        }`}
+        style={{
+          zIndex: focused ? 200 : 99,
+          left: `${left}%`,
+          width: `${colW - 6}%`,
+          // аски прижаты к линии сверху, биды — снизу, с отступом 2px
+          ...(b.side === 'ask'
+            ? { bottom: `${slot}%`, transform: 'translateX(-50%) translateY(calc(-100% - 2px))' }
+            : { top: `${slot}%`, transform: 'translateX(-50%) translateY(2px)' }),
+          backgroundColor: color,
+        }}
+        title={`${b.symbol} ${b.side === 'bid' ? 'BID' : 'ASK'} @ ${b.price} — ${formatUsdt(b.sumUsdt)} · ${formatAge(b.bornAt)}${b.roundNumber ? ' · круглое число' : ''}`}
+        onMouseEnter={() => setFocusedKey(key)}
+        onMouseLeave={() => setFocusedKey(null)}
+        onClick={() => expandChartAtPrice(b.symbol, b.price)}
+      >
+        <span className="truncate text-[10px] font-bold text-white/95">
+          {extractBaseAsset(b.symbol)}
+        </span>
+        {resolved.showMarket && (
+          <span className="shrink-0 text-[7px] text-white/70">{EXCHANGE_BADGE[b.exchange]}</span>
+        )}
+        {b.roundNumber && (
+          <span className="shrink-0 w-[4px] h-[4px] rounded-full bg-white/90" />
+        )}
+        <span className="shrink-0 text-[9px] text-white/90 tabular-nums">
+          {b.count > 1 ? `${b.count} ` : ''}{formatUsdt(b.sumUsdt)}
+        </span>
+      </button>
+    )
+  }
+
+  const asks = blocks.filter(b => b.side === 'ask')
+  const bids = blocks.filter(b => b.side === 'bid')
+
   return (
     <div className="w-full h-full flex flex-col bg-[#0a0a0a]">
-      <div className="flex items-center justify-between px-3 h-[28px] border-b border-[#1f1f1f] bg-[#0e0e0e] flex-shrink-0 select-none">
-        <span className="text-[10px] font-medium text-[#888]">Карта плотностей</span>
-        <span className="text-[9px] text-[#666]">
-          стен: {walls.length} · блоков: {slots.size} · глубина {zoomPct.toFixed(1)}%
-        </span>
+      {/* Легенда-шапка (scalpboard: grid-cols-3 uppercase text-10px) */}
+      <div className="grid grid-cols-3 uppercase text-[10px] leading-5 items-center text-center text-[#777] select-none h-[20px] border-b border-[#1f1f1f] bg-[#0e0e0e] flex-shrink-0">
+        <div>{TIER_LABEL[1]}</div>
+        <div>{TIER_LABEL[2]}</div>
+        <div>{TIER_LABEL[3]}</div>
       </div>
 
-      <div
-        className="relative flex-1 min-h-0 overflow-hidden"
-        onWheel={onWheel}
-        data-testid="density-map"
-      >
-        {/* mid line (current price) */}
+      <div className="relative flex-1 min-h-0" onWheel={onWheel} data-testid="density-map">
+        {/* АСКИ — верхняя зона */}
+        <div className="absolute inset-x-0 top-0 h-1/2 overflow-hidden">
+          {gridlines.map(y => (
+            <div key={`ga-${y}`} className="absolute left-0 right-0 h-px bg-white/5 pointer-events-none" style={{ bottom: `${y}%` }} />
+          ))}
+          {asks.map(renderBlock)}
+        </div>
+
+        {/* БИДЫ — нижняя зона */}
+        <div className="absolute inset-x-0 bottom-0 h-1/2 overflow-hidden">
+          {gridlines.map(y => (
+            <div key={`gb-${y}`} className="absolute left-0 right-0 h-px bg-white/5 pointer-events-none" style={{ top: `${y}%` }} />
+          ))}
+          {bids.map(renderBlock)}
+        </div>
+
+        {/* колонки-тиры */}
+        {[1, 2].map(i => (
+          <div
+            key={i}
+            className="absolute top-0 bottom-0 w-px bg-white/5 pointer-events-none"
+            style={{ left: `${colW * i}%` }}
+          />
+        ))}
+
+        {/* спред (центр) */}
         <div className="absolute left-0 right-0 top-1/2 h-px bg-[#444] pointer-events-none z-10" />
         <div className="absolute left-0 top-1/2 -translate-y-1/2 text-[9px] text-[#666] px-1 bg-[#0a0a0a] pointer-events-none select-none z-10">
           {zoomPct.toFixed(1)}%
         </div>
-
-        {/* tier column separators */}
-        {[1, 2].map(i => (
-          <div
-            key={i}
-            className="absolute top-0 bottom-0 w-px bg-[#141414] pointer-events-none"
-            style={{ left: `${(100 / TIER_COUNT) * i}%` }}
-          />
-        ))}
 
         {slots.size === 0 && (
           <div className="absolute inset-0 flex items-center justify-center text-[10px] text-[#555]">
             Плотностей нет — сервер собирает стаканы…
           </div>
         )}
-
-        {blocks.map((b) => {
-          const slot = slots.get(b)
-          if (slot === undefined) return null
-          const key = `${b.exchange}:${b.symbol}:${b.side}:${b.price}:${b.tier}`
-          const colW = 100 / TIER_COUNT
-          const left = colW * b.tier - colW / 2
-          const zonePos = 50 + slot / 2
-          const color = wallColor(b.hue, b.lOffset)
-          const focused = focusedKey === key
-          return (
-            <button
-              key={key}
-              className={`absolute flex items-center gap-[3px] justify-center px-[4px] rounded-[3px] cursor-pointer border transition-[filter] text-left z-[5] ${
-                focused ? 'brightness-150' : 'hover:brightness-150'
-              }`}
-              style={{
-                left: `${left}%`,
-                width: `${colW - 6}%`,
-                height: '20px',
-                // Как в стакане scalpboard: центр — спред, аски прижаты к линии
-                // СВЕРХУ, биды — СНИЗУ, ни одна плотность не лежит на середине.
-                transform: b.side === 'ask' ? 'translateX(-50%) translateY(calc(-100% - 2px))' : 'translateX(-50%) translateY(2px)',
-                bottom: b.side === 'ask' ? `${zonePos}%` : 'auto',
-                top: b.side === 'bid' ? `${zonePos}%` : 'auto',
-                background: color,
-                borderColor: color.replace(/0\.9\)$/, '1)'),
-              }}
-              title={`${b.symbol} ${b.side === 'bid' ? 'BID' : 'ASK'} @ ${b.price} — ${formatUsdt(b.sumUsdt)} · ${TIER_LABEL[b.tier]} · ${formatAge(b.bornAt)}${b.roundNumber ? ' · круглое число' : ''}`}
-              onMouseEnter={() => setFocusedKey(key)}
-              onMouseLeave={() => setFocusedKey(null)}
-              onClick={() => expandChartAtPrice(b.symbol, b.price)}
-            >
-              {resolved.showMarket && (
-                <span className="shrink-0 text-[7px] font-semibold text-white/70">{EXCHANGE_BADGE[b.exchange]}</span>
-              )}
-              <span className="truncate text-[10px] font-bold text-white/95">
-                {extractBaseAsset(b.symbol)}
-              </span>
-              {b.roundNumber && (
-                <span className="shrink-0 w-[4px] h-[4px] rounded-full bg-white/90" title="Круглое число" />
-              )}
-              <span className="shrink-0 text-[9px] text-white/90 tabular-nums">
-                {b.count > 1 ? `${b.count}·` : ''}{formatUsdt(b.sumUsdt)}
-              </span>
-            </button>
-          )
-        })}
-      </div>
-
-      {/* tier legend */}
-      <div className="flex items-center h-[24px] border-t border-[#1f1f1f] bg-[#0e0e0e] flex-shrink-0 select-none">
-        {([1, 2, 3] as Tier[]).map(t => (
-          <div key={t} className="flex-1 text-center text-[9px] text-[#777]">
-            {TIER_LABEL[t]}
-          </div>
-        ))}
       </div>
     </div>
   )
