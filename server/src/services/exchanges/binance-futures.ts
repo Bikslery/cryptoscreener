@@ -671,7 +671,11 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     const result = book.applyDiff(ev)
     if (result === 'resync') {
       this.depthMsgDiag.resync++
-      this.initDepthBook(symbol)
+      // NOT a direct reseed: a flapping book can desync many times per
+      // minute, and an immediate REST fetch per desync burns the exchange
+      // budget (candle history starves). The backoff scheduler re-seeds
+      // soon enough — meanwhile events keep buffering in the book.
+      this.scheduleDepthBookRetry(symbol)
       return null
     }
     if (result === 'buffered') {

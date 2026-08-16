@@ -62,6 +62,8 @@ const subscribed = new Set<string>()
  *  (up to WARMUP_MINUTES), thresholds would otherwise fall back to the flat
  *  DEFAULT_BRP and most walls would drop below detection after every restart. */
 const startupBrps = new Map<string, number>()
+/** per-symbol max БРП across exchanges — borrowed while own ring warms up */
+const borrowedBrps = new Map<string, number>()
 
 let tickCounter = 0
 let sliceTimer: ReturnType<typeof setInterval> | null = null
@@ -122,9 +124,11 @@ function computeAutoBrp(exchange: Exchange, symbol: string): number | null {
   return quartile.length % 2 === 1 ? quartile[mid] : (quartile[mid - 1] + quartile[mid]) / 2
 }
 
-/** Warm ring value, else the Redis-restored boot value; null = use DEFAULT_BRP. */
+/** Warm ring value, else the Redis-restored boot value, else the best value
+ *  borrowed from another exchange's ring for the same symbol (the scale of
+ *  an "ordinary order" is comparable across venues); null = use DEFAULT_BRP. */
 function effectiveAutoBrp(exchange: Exchange, symbol: string): number | null {
-  return computeAutoBrp(exchange, symbol) ?? startupBrps.get(key(exchange, symbol)) ?? null
+  return computeAutoBrp(exchange, symbol) ?? startupBrps.get(key(exchange, symbol)) ?? borrowedBrps.get(symbol) ?? null
 }
 
 const BRP_REDIS_KEY = 'density:autobrp'
@@ -160,9 +164,29 @@ function loadStartupBrps(): void {
           }
         }
         if (n > 0) console.log(`[Density] restored ${n} auto-БРП values from redis`)
+        rebuildBorrowedBrps()
       })
       .catch(() => {})
   } catch { /* redis down */ }
+}
+
+/** Rebuild the per-symbol cross-exchange БРП fallback: for each symbol keep
+ *  the max of all computed/restored values — used when a venue's own ring is
+ *  still warming (e.g. futures books resyncing), so its thresholds don't fall
+ *  back to the flat default and let ordinary orders through as "densities". */
+function rebuildBorrowedBrps(): void {
+  borrowedBrps.clear()
+  const consider = (k: string, v: number | null) => {
+    if (v === null || !isFinite(v) || v <= 0) return
+    const sym = k.slice(k.indexOf(':') + 1)
+    const cur = borrowedBrps.get(sym)
+    if (cur === undefined || v > cur) borrowedBrps.set(sym, v)
+  }
+  for (const k of brpRings.keys()) {
+    const [ex, sym] = k.split(':')
+    consider(k, computeAutoBrp(ex as Exchange, sym))
+  }
+  for (const [k, v] of startupBrps) consider(k, v)
 }
 
 function onDepth(depth: UnifiedDepth): void {
@@ -341,8 +365,10 @@ function rescanSymbols(adapters: ExchangeAdapter[]): void {
     adapter?.unsubscribeDepth(symbol, cb)
   }
 
-  // Keep the Redis copy fresh so restarts skip the warmup fallback.
+  // Keep the Redis copy fresh so restarts skip the warmup fallback, and
+  // refresh the cross-exchange borrow map.
   persistBrps()
+  rebuildBorrowedBrps()
   console.log(`[Density] top=${top.length} subscribed=${subscribed.size} adapters=${depthAdapters.length}`)
 }
 
@@ -357,12 +383,14 @@ function buildSnapshot(): DensitySnapshot {
   }
   all.sort((a, b) => b.sizeUsdt - a.sizeUsdt)
   const capped = all.slice(0, CAP_WALLS)
-  const autoBrps = Array.from(brpRings.entries()).map(([k, ring]) => {
-    const [exchange, symbol] = k.split(':')
-    // Only report symbols that still have a live book.
-    if (!books.has(k)) return null
-    return { symbol, exchange: exchange as Exchange, autoBrp: effectiveAutoBrp(exchange as Exchange, symbol) }
-  }).filter((v): v is { symbol: string; exchange: Exchange; autoBrp: number | null } => v !== null)
+  // Report БРП for every live book (not only warmed rings): the effective
+  // value includes cross-exchange borrowing, so a venue whose books are
+  // still syncing still gets real per-symbol thresholds on the client.
+  const autoBrps = Array.from(books.values()).map((state) => ({
+    symbol: state.symbol,
+    exchange: state.exchange,
+    autoBrp: effectiveAutoBrp(state.exchange, state.symbol),
+  }))
   return { ts: Date.now(), walls: capped, autoBrps }
 }
 
@@ -475,5 +503,11 @@ export const __test = {
   },
   publish(): void {
     publishSnapshot()
+  },
+  setStartupBrps(values: Record<string, number>): void {
+    for (const [k, v] of Object.entries(values)) {
+      if (isFinite(v) && v > 0) startupBrps.set(k, v)
+    }
+    rebuildBorrowedBrps()
   },
 }

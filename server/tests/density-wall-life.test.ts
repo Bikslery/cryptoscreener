@@ -177,4 +177,19 @@ describe('density wall lifecycle', () => {
       true,
     )
   })
+
+  it('borrows БРП across exchanges while a venue\'s ring warms up', () => {
+    __test.seedBook('binance-futures', 'ETHUSDT', 2500)
+    __test.publish()
+    // Своего кольца нет → null → клиент свалился бы на плоский фоллбэк.
+    let snap = getDensitySnapshot()
+    expect(snap.autoBrps.find(b => b.exchange === 'binance-futures' && b.symbol === 'ETHUSDT')?.autoBrp ?? null).toBeNull()
+
+    // Появилось значение другой биржи для того же символа → фьючерсы
+    // заимствуют его, и «обычные заявки» не проходят как плотности.
+    __test.setStartupBrps({ 'binance-spot:ETHUSDT': 5_020_000 })
+    __test.publish()
+    snap = getDensitySnapshot()
+    expect(snap.autoBrps.find(b => b.exchange === 'binance-futures' && b.symbol === 'ETHUSDT')?.autoBrp).toBe(5_020_000)
+  })
 })

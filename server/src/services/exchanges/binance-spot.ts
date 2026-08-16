@@ -404,7 +404,9 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     const ev: DiffDepthEvent = { U: d.U, u: d.u, b: d.b ?? [], a: d.a ?? [] }
     const result = book.applyDiff(ev)
     if (result === 'resync') {
-      this.initDepthBook(symbol)
+      // Backoff scheduler instead of an immediate reseed: a flapping book
+      // must not burn the REST budget (candle history starves).
+      this.scheduleDepthBookRetry(symbol)
       return null
     }
     if (result !== 'applied') return null
