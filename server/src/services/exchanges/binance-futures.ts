@@ -100,6 +100,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private depthBooks = new Map<string, BinanceDepthBook>()
   private depthStreams = new Set<string>()
   private depthBookLoading = new Set<string>()
+  /** per-symbol reseed backoff (ms); doubles on each failed retry, caps at 2 min */
+  private depthRetryDelay = new Map<string, number>()
   private lastDepthEmitAt = new Map<string, number>()
   private tickerCbs: TickerCallback[] = []
   private candleCbs: CandleCallback[] = []
@@ -617,14 +619,20 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
 
   /** Budget-gated snapshots can be skipped for a long time under heavy
    *  history churn; keep re-seeding until the book syncs (stops on its own
-   *  once synced or unsubscribed). */
+   *  once synced or unsubscribed). Backoff doubles per failure so a starved
+   *  rate limiter isn't hammered by hundreds of retries every 15s. */
   private scheduleDepthBookRetry(symbol: string) {
     const book = this.depthBooks.get(symbol)
-    if (!book || book.synced) return
+    if (!book || book.synced) {
+      this.depthRetryDelay.delete(symbol)
+      return
+    }
+    const delay = Math.min(120_000, (this.depthRetryDelay.get(symbol) ?? 7_500) * 2)
+    this.depthRetryDelay.set(symbol, delay)
     setTimeout(() => {
       const cur = this.depthBooks.get(symbol)
       if (this.depthSubs.has(symbol) && cur && !cur.synced) this.initDepthBook(symbol)
-    }, 15_000)
+    }, delay)
   }
 
   private depthMsgDiag = {

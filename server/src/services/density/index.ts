@@ -56,6 +56,10 @@ const books = new Map<string, BookState>()
 const walls = new Map<string, WallState>()
 const brpRings = new Map<string, BrpRing>()
 const subscribed = new Set<string>()
+/** auto-БРП values restored from Redis on boot: while the 24h ring warms up
+ *  (up to WARMUP_MINUTES), thresholds would otherwise fall back to the flat
+ *  DEFAULT_BRP and most walls would drop below detection after every restart. */
+const startupBrps = new Map<string, number>()
 
 let tickCounter = 0
 let sliceTimer: ReturnType<typeof setInterval> | null = null
@@ -98,7 +102,8 @@ function recordClusterSize(exchange: Exchange, symbol: string, size: number): vo
 /** Median of the top quartile of per-minute max cluster sizes over the
  *  rolling window. Returns null until WARMUP_MINUTES minutes of data exist. */
 function computeAutoBrp(exchange: Exchange, symbol: string): number | null {
-  const ring = brpRingOf(exchange, symbol)
+  const ring = brpRings.get(key(exchange, symbol))
+  if (!ring) return null
   const nowMinute = Math.floor(Date.now() / 60000)
   const values: number[] = []
   for (const s of ring.slots) {
@@ -113,6 +118,49 @@ function computeAutoBrp(exchange: Exchange, symbol: string): number | null {
   if (quartile.length === 0) return null
   const mid = Math.floor(quartile.length / 2)
   return quartile.length % 2 === 1 ? quartile[mid] : (quartile[mid - 1] + quartile[mid]) / 2
+}
+
+/** Warm ring value, else the Redis-restored boot value; null = use DEFAULT_BRP. */
+function effectiveAutoBrp(exchange: Exchange, symbol: string): number | null {
+  return computeAutoBrp(exchange, symbol) ?? startupBrps.get(key(exchange, symbol)) ?? null
+}
+
+const BRP_REDIS_KEY = 'density:autobrp'
+
+/** Persist computed auto-БРП values so the next boot skips the flat-default
+ *  warmup window. Best-effort: Redis down must never break the engine. */
+function persistBrps(): void {
+  if (!REDIS_ENABLED) return
+  try {
+    const out: Record<string, number> = {}
+    for (const k of books.keys()) {
+      const v = computeAutoBrp(k.split(':')[0] as Exchange, k.split(':')[1])
+      if (v !== null && isFinite(v) && v > 0) out[k] = v
+    }
+    if (Object.keys(out).length === 0) return
+    getRedisPub().set(BRP_REDIS_KEY, JSON.stringify(out)).catch(() => {})
+  } catch { /* redis down */ }
+}
+
+function loadStartupBrps(): void {
+  if (!REDIS_ENABLED) return
+  try {
+    getRedisPub()
+      .get(BRP_REDIS_KEY)
+      .then((raw) => {
+        if (!raw) return
+        const parsed = JSON.parse(raw) as Record<string, number>
+        let n = 0
+        for (const [k, v] of Object.entries(parsed)) {
+          if (isFinite(v) && v > 0) {
+            startupBrps.set(k, v)
+            n++
+          }
+        }
+        if (n > 0) console.log(`[Density] restored ${n} auto-БРП values from redis`)
+      })
+      .catch(() => {})
+  } catch { /* redis down */ }
 }
 
 function onDepth(depth: UnifiedDepth): void {
@@ -181,7 +229,7 @@ function tickBook(state: BookState): void {
   if (step <= 0) return
 
   const k = key(state.exchange, state.symbol)
-  const autoBrp = computeAutoBrp(state.exchange, state.symbol)
+  const autoBrp = effectiveAutoBrp(state.exchange, state.symbol)
   const threshold = (autoBrp ?? DEFAULT_BRP) * MIN_MULT
 
   const bidBuckets = clusterSide(state.bids, step)
@@ -291,6 +339,8 @@ function rescanSymbols(adapters: ExchangeAdapter[]): void {
     adapter?.unsubscribeDepth(symbol, cb)
   }
 
+  // Keep the Redis copy fresh so restarts skip the warmup fallback.
+  persistBrps()
   console.log(`[Density] top=${top.length} subscribed=${subscribed.size} adapters=${depthAdapters.length}`)
 }
 
@@ -309,7 +359,7 @@ function buildSnapshot(): DensitySnapshot {
     const [exchange, symbol] = k.split(':')
     // Only report symbols that still have a live book.
     if (!books.has(k)) return null
-    return { symbol, exchange: exchange as Exchange, autoBrp: computeAutoBrp(exchange as Exchange, symbol) }
+    return { symbol, exchange: exchange as Exchange, autoBrp: effectiveAutoBrp(exchange as Exchange, symbol) }
   }).filter((v): v is { symbol: string; exchange: Exchange; autoBrp: number | null } => v !== null)
   return { ts: Date.now(), walls: capped, autoBrps }
 }
@@ -340,6 +390,7 @@ function scheduleRescan(adapters: ExchangeAdapter[]): void {
 }
 
 export function startDensityService(adapters: ExchangeAdapter[]): void {
+  loadStartupBrps()
   rescanSymbols(adapters)
   scheduleRescan(adapters)
 
