@@ -58,12 +58,13 @@ export function useDensityOverlay(
     const specs: DensityLineSpec[] = []
     for (const wall of walls) {
       if (wall.symbol !== symbol) continue
-      if (wall.bornAt > now) continue
+      // tolerate up to 1 min of server/client clock skew
+      if (wall.bornAt - now > 60_000) continue
       const tier = calcTier(wall, settings, brps.get(`${wall.exchange}:${wall.symbol}`) ?? null, now)
       if (tier === undefined) continue
       specs.push({
         price: wall.price,
-        birthTimeSec: wall.bornAt / 1000,
+        birthTimeSec: Math.floor(wall.bornAt / 1000),
         color: wall.side === 'bid' ? DENSITY_DOWN : DENSITY_UP,
         text: `${EXCHANGE_BADGE[wall.exchange]} ${formatUsdt(wall.sizeUsdt)} ${wall.price.toFixed(pricePrecision)}`,
         baseline: wall.side === 'ask' ? 'bottom' : 'top',

@@ -113,11 +113,20 @@ class DensityPaneView implements IPrimitivePaneView {
         const y0 = series.priceToCoordinate(s.price)
         if (y0 === null || !isFinite(y0)) continue
 
-        // Line starts when the wall was born; walls born outside the visible
-        // data range are not drawn (their "history" is gone with the wall).
+        // Line starts when the wall was born. timeToCoordinate returns null
+        // when the time maps outside the loaded data: if the birth is BEFORE
+        // the visible range the line continues from the left edge, otherwise
+        // (born in the future — impossible) it is skipped.
         const timeScale = chart.timeScale()
-        const x0 = timeScale.timeToCoordinate(s.birthTimeSec as Time)
-        if (x0 === null || !isFinite(x0)) continue
+        const rawX = timeScale.timeToCoordinate(s.birthTimeSec as Time)
+        let x0: number
+        if (rawX !== null && isFinite(rawX)) {
+          x0 = rawX
+        } else {
+          const range = timeScale.getVisibleRange()
+          if (!range || s.birthTimeSec >= (range.from as number)) continue
+          x0 = 0
+        }
 
         const A = s.text.length * 6 + 8 + 8
         const p = width - A

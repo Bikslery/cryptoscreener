@@ -16,7 +16,7 @@ export function calcTier(
 ): Tier | undefined {
   const brp = effectiveBrp(wall.symbol, settings, autoBrp)
   if (!(brp > 0)) return undefined
-  const ageMin = (now - wall.bornAt) / 60000
+  const ageMin = Math.max(0, (now - wall.bornAt) / 60000)
   const tiers: { mult: number; life: number }[] = [
     { mult: settings.multLarge, life: settings.lifeLarge },
     { mult: settings.multMedium, life: settings.lifeMedium },
