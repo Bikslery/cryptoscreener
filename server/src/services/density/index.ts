@@ -8,11 +8,21 @@ import { pickInheritCandidate, type InheritCandidate } from './wall-life.js'
 // --- Density engine -------------------------------------------------------
 // Every DENSITY_TICK_MS per symbol the current book state is clustered into
 // 0.05% price buckets on an ABSOLUTE price grid (a real wall keeps its
-// bucket while the price moves). Local maxima above the base threshold are
-// "walls" (плотности); their bornAt is the first tick they crossed the
-// threshold. The server broadcasts a neutral snapshot (sizes + bornAt +
-// roundNumber + per-symbol auto БРП) — category thresholds are personal
-// settings and are applied CLIENT-side.
+// bucket while the price moves). A wall («плотность») is a LOCAL MAXIMUM
+// that stands out from the coin's own ordinary orders:
+//
+//   threshold = max(STANDOUT × ordinary_scale, BRP_FLOOR)
+//
+// where ordinary_scale is the TRIMMED MEDIAN bucket size in the ±WINDOW_PCT
+// window (top 10% of buckets dropped — walls and the spread stack cannot
+// inflate their own baseline), computed fresh from the live book every tick:
+// no warmup, no persisted state, no restart artifacts. The top-of-book
+// exclusion zone (±SPREAD_EXCL_PCT from the best price) keeps the ordinary
+// spread stack out of candidacy entirely. Thin books (< MIN_BUCKETS) are
+// skipped — a half-seeded book must not emit garbage.
+//
+// The broadcast snapshot carries the per-symbol threshold as БРП; the
+// ×2/×3.5/×5 tiering is a CLIENT-side personal setting (scalpboard calcTier).
 
 const TOP_N = parseInt(process.env.DENSITY_TOP_N || '300', 10)
 const TICK_MS = parseInt(process.env.DENSITY_TICK_MS || '250', 10)
@@ -22,11 +32,16 @@ const RESCAN_MS = parseInt(process.env.DENSITY_RESCAN_MS || '60000', 10)
 const STEP_PCT = parseFloat(process.env.DENSITY_STEP_PCT || '0.0005')
 const TOP_K_PER_SIDE = parseInt(process.env.DENSITY_TOP_K || '5', 10)
 const CAP_WALLS = parseInt(process.env.DENSITY_CAP || '1000', 10)
-// scalpboard architecture: the SERVER detects and sends everything ≥ БРП ×1
-// (their server does the same); the ×2/×3.5/×5 tiering is a CLIENT-side
-// personal setting (their calcTier). Detecting at ×2 here would double-multiply.
-const DEFAULT_BRP = parseFloat(process.env.DENSITY_DEFAULT_BRP || '500000')
-const MIN_MULT = parseFloat(process.env.DENSITY_MIN_MULT || '1')
+/** detection window around mid, % */
+const WINDOW_PCT = parseFloat(process.env.DENSITY_WINDOW_PCT || '5')
+/** top-of-book exclusion zone from the best price, % */
+const SPREAD_EXCL_PCT = parseFloat(process.env.DENSITY_SPREAD_EXCL_PCT || '0.1')
+/** a wall must be ≥ this × the coin's ordinary bucket scale */
+const STANDOUT = parseFloat(process.env.DENSITY_STANDOUT || '5')
+/** absolute floor for the threshold (dead-book noise) */
+const BRP_FLOOR = parseFloat(process.env.DENSITY_BRP_FLOOR || '50000')
+/** buckets in the window required to trust the ordinary scale */
+const MIN_BUCKETS = parseInt(process.env.DENSITY_MIN_BUCKETS || '6', 10)
 const WALL_GRACE_MS = parseInt(process.env.DENSITY_WALL_GRACE_MS || '15000', 10)
 const WALL_GRACE_TICKS = Math.max(2, Math.ceil(WALL_GRACE_MS / TICK_MS))
 const MATCH_TOL_PCT = parseFloat(process.env.DENSITY_MATCH_TOL || '0.1')
@@ -37,9 +52,11 @@ interface BookState {
   bids: Map<number, number>
   asks: Map<number, number>
   mid: number
+  bestBid: number
+  bestAsk: number
   dirty: boolean
-  /** per-coin БРП from the coin's 24h traded volume (scalpboard auto mode) */
-  brp: number | null
+  /** last computed threshold — reported to clients as the symbol's БРП */
+  lastBrp: number | null
 }
 
 interface WallState {
@@ -69,24 +86,6 @@ function isRoundPrice(price: number): boolean {
 }
 
 
-// scalpboard's auto-БРП is "рассчитывается на основе проторгованных объёмов"
-// (their docs): the per-coin base density size is a fraction of the coin's
-// 24h traded volume, clamped. The scale matches their screenshots (BTC walls
-// of 200-900K visible at the ×2 small tier → their BTC БРП ≈ 300-450K).
-const BRP_VOL_DIV = parseFloat(process.env.DENSITY_BRP_VOLUME_DIV || '3000')
-const BRP_MIN = parseFloat(process.env.DENSITY_BRP_MIN || '50000')
-const BRP_MAX = parseFloat(process.env.DENSITY_BRP_MAX || '25000000')
-
-function volumeBrp(quoteVolume24h: number | undefined | null): number | null {
-  if (!quoteVolume24h || !isFinite(quoteVolume24h) || quoteVolume24h <= 0) return null
-  return Math.min(BRP_MAX, Math.max(BRP_MIN, quoteVolume24h / BRP_VOL_DIV))
-}
-
-/** Per-coin БРП from the coin's traded volume; null = DEFAULT_BRP. */
-function effectiveAutoBrp(exchange: Exchange, symbol: string): number | null {
-  return books.get(key(exchange, symbol))?.brp ?? null
-}
-
 function onDepth(depth: UnifiedDepth): void {
   const k = key(depth.exchange, depth.symbol)
   const existing = books.get(k)
@@ -96,6 +95,8 @@ function onDepth(depth: UnifiedDepth): void {
   const bestBid = depth.bids[0]?.[0]
   const bestAsk = depth.asks[0]?.[0]
   if (bestBid && bestAsk && bestBid > 0 && bestAsk > 0) {
+    existing.bestBid = bestBid
+    existing.bestAsk = bestAsk
     existing.mid = (bestBid + bestAsk) / 2
   }
   existing.dirty = true
@@ -123,11 +124,36 @@ function clusterSide(
   return buckets
 }
 
-/** Local maxima (strictly larger than both neighbours) above threshold. */
+/** The coin's ordinary-order scale for one side: trimmed median bucket size
+ *  in [loPrice, hiPrice] (top 10% dropped so walls and the spread stack
+ *  cannot inflate their own baseline). Null when the book is too thin. */
+function ordinaryScale(
+  buckets: Map<number, { size: number; maxPrice: number }>,
+  loPrice: number,
+  hiPrice: number,
+): number | null {
+  const sizes: number[] = []
+  for (const b of buckets.values()) {
+    if (b.maxPrice < loPrice || b.maxPrice > hiPrice) continue
+    sizes.push(b.size)
+  }
+  if (sizes.length < MIN_BUCKETS) return null
+  sizes.sort((a, b) => a - b)
+  const drop = Math.ceil(sizes.length * 0.1)
+  const kept = sizes.slice(0, sizes.length - drop)
+  if (kept.length === 0) return null
+  const mid = Math.floor(kept.length / 2)
+  return kept.length % 2 === 1 ? kept[mid] : (kept[mid - 1] + kept[mid]) / 2
+}
+
+/** Local maxima (strictly larger than both neighbours) above threshold,
+ *  candidates restricted to [loPrice, hiPrice] (window minus spread zone). */
 function detectWalls(
   buckets: Map<number, { size: number; maxPrice: number; maxSize: number }>,
   threshold: number,
   topK: number,
+  loPrice: number,
+  hiPrice: number,
 ): { idx: number; size: number; price: number }[] {
   const idxs = Array.from(buckets.keys()).sort((a, b) => a - b)
   const found: { idx: number; size: number; price: number }[] = []
@@ -135,6 +161,7 @@ function detectWalls(
     const idx = idxs[i]
     const bucket = buckets.get(idx)!
     if (bucket.size < threshold) continue
+    if (bucket.maxPrice < loPrice || bucket.maxPrice > hiPrice) continue
     const left = i > 0 ? buckets.get(idxs[i - 1]) : undefined
     const right = i < idxs.length - 1 ? buckets.get(idxs[i + 1]) : undefined
     if (left && left.size >= bucket.size) continue
@@ -153,14 +180,25 @@ function tickBook(state: BookState): void {
   if (step <= 0) return
 
   const k = key(state.exchange, state.symbol)
-  const autoBrp = effectiveAutoBrp(state.exchange, state.symbol)
-  const threshold = (autoBrp ?? DEFAULT_BRP) * MIN_MULT
+  const win = WINDOW_PCT / 100
+  const excl = SPREAD_EXCL_PCT / 100
+  // bids: [mid×(1−win), bestBid×(1−excl)]; asks: [bestAsk×(1+excl), mid×(1+win)]
+  const bidLo = mid * (1 - win)
+  const bidHi = state.bestBid > 0 ? state.bestBid * (1 - excl) : mid
+  const askLo = state.bestAsk > 0 ? state.bestAsk * (1 + excl) : mid
+  const askHi = mid * (1 + win)
 
   const bidBuckets = clusterSide(state.bids, step)
   const askBuckets = clusterSide(state.asks, step)
 
-  const bidWalls = detectWalls(bidBuckets, threshold, TOP_K_PER_SIDE)
-  const askWalls = detectWalls(askBuckets, threshold, TOP_K_PER_SIDE)
+  const bidScale = ordinaryScale(bidBuckets, bidLo, bidHi)
+  const askScale = ordinaryScale(askBuckets, askLo, askHi)
+  const bidThr = bidScale !== null ? Math.max(STANDOUT * bidScale, BRP_FLOOR) : null
+  const askThr = askScale !== null ? Math.max(STANDOUT * askScale, BRP_FLOOR) : null
+  state.lastBrp = Math.max(bidThr ?? 0, askThr ?? 0) || null
+
+  const bidWalls = bidThr !== null ? detectWalls(bidBuckets, bidThr, TOP_K_PER_SIDE, bidLo, bidHi) : []
+  const askWalls = askThr !== null ? detectWalls(askBuckets, askThr, TOP_K_PER_SIDE, askLo, askHi) : []
 
   const seen = new Set<string>()
   for (const side of ['bid', 'ask'] as const) {
@@ -231,17 +269,12 @@ function rescanSymbols(adapters: ExchangeAdapter[]): void {
   const cb: DepthCallback = onDepth
 
   for (const ticker of top) {
-    // scalpboard auto mode: per-coin БРП from the coin's 24h traded volume.
-    const brp = volumeBrp(ticker.quoteVolume24h)
     for (const adapter of depthAdapters) {
       const k = key(adapter.exchange, ticker.symbol)
       wanted.add(k)
-      if (subscribed.has(k)) {
-        books.get(k)!.brp = brp
-        continue
-      }
+      if (subscribed.has(k)) continue
       subscribed.add(k)
-      books.set(k, { exchange: adapter.exchange, symbol: ticker.symbol, bids: new Map(), asks: new Map(), mid: ticker.price, dirty: true, brp })
+      books.set(k, { exchange: adapter.exchange, symbol: ticker.symbol, bids: new Map(), asks: new Map(), mid: ticker.price, bestBid: 0, bestAsk: 0, dirty: true, lastBrp: null })
       adapter.subscribeDepth(ticker.symbol, cb)
     }
   }
@@ -278,7 +311,7 @@ function buildSnapshot(): DensitySnapshot {
   const autoBrps = Array.from(books.values()).map((state) => ({
     symbol: state.symbol,
     exchange: state.exchange,
-    autoBrp: effectiveAutoBrp(state.exchange, state.symbol),
+    autoBrp: state.lastBrp,
   }))
   return { ts: Date.now(), walls: capped, autoBrps }
 }
@@ -372,8 +405,8 @@ export const __test = {
     tickCounter = 0
     lastSnapshot = { ts: 0, walls: [], autoBrps: [] }
   },
-  seedBook(exchange: Exchange, symbol: string, mid: number, brp?: number): void {
-    books.set(key(exchange, symbol), { exchange, symbol, bids: new Map(), asks: new Map(), mid, dirty: true, brp: brp ?? null })
+  seedBook(exchange: Exchange, symbol: string, mid: number): void {
+    books.set(key(exchange, symbol), { exchange, symbol, bids: new Map(), asks: new Map(), mid, bestBid: 0, bestAsk: 0, dirty: true, lastBrp: null })
   },
   feed(depth: UnifiedDepth): void {
     onDepth(depth)

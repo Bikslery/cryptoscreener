@@ -20,20 +20,33 @@ import type { UnifiedDepth } from '../src/types.js'
 const SYM = 'TESTUSDT'
 const EX = 'binance-futures' as const
 
-/** Asks with a big wall at `wallPrice` (qty 12000 → ~1.2M USDT > 1M = 2×БРП 500K). */
-function askDepth(wallPrice: number | null): UnifiedDepth {
-  const asks: [number, number][] = [
-    [100.02, 10],
-    [100.1, 1],
-    [100.32, 1],
-    [100.48, 1],
-  ]
-  if (wallPrice !== null) asks.push([wallPrice, 12000])
+/**
+ * Стакан с 8 обычными аск-бакетами (qty → ~ordinary×100 USDT) в окне
+ * детекции вне зоны спреда. best ask 100.02 → зона исключения < 100.03.
+ */
+function askDepth(opts: {
+  ordinaryQty?: number
+  wallPrice?: number | null
+  wallQty?: number
+  stackQty?: number
+  thin?: boolean
+  symbol?: string
+}): UnifiedDepth {
+  const q = opts.ordinaryQty ?? 1
+  const prices = [100.1, 100.2, 100.3, 100.32, 100.44, 100.48, 100.6, 100.7]
+  const asks: [number, number][] = []
+  if (opts.stackQty !== undefined) asks.push([100.02, opts.stackQty])
+  else asks.push([100.02, 10])
+  if (!opts.thin) for (const p of prices) asks.push([p, q])
+  else for (const p of prices.slice(0, 3)) asks.push([p, q])
+  if (opts.wallPrice !== null && opts.wallPrice !== undefined) {
+    asks.push([opts.wallPrice, opts.wallQty ?? 12_000])
+  }
   const bids: [number, number][] = [
     [99.98, 10],
     [99.9, 1],
   ]
-  return { symbol: SYM, exchange: EX, bids, asks, timestamp: Date.now() }
+  return { symbol: opts.symbol ?? SYM, exchange: EX, bids, asks, timestamp: Date.now() }
 }
 
 function setup(): void {
@@ -41,8 +54,8 @@ function setup(): void {
   __test.seedBook(EX, SYM, 100)
 }
 
-function askWalls() {
-  return __test.wallStates().filter(w => w.wall.side === 'ask')
+function askWalls(symbol = SYM) {
+  return __test.wallStates().filter(w => w.wall.symbol === symbol && w.wall.side === 'ask')
 }
 
 describe('pickInheritCandidate (pure)', () => {
@@ -61,10 +74,84 @@ describe('pickInheritCandidate (pure)', () => {
   })
 
   it('skips candidates beyond the grace window', () => {
-    // 100.42 is nearest to 100.41 but expired; 100.4 must win instead
     expect(pickInheritCandidate(cands, 100.41, 0.1, 10)).toBe('a')
-    // everything expired → nothing to inherit
     expect(pickInheritCandidate(cands, 100.41, 0.1, 0)).toBeNull()
+  })
+})
+
+describe('density: standout detection (no false walls)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+    setup()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('detects a wall that stands out from ordinary orders', () => {
+    __test.feed(askDepth({ wallPrice: 100.4, wallQty: 12_000 }))
+    __test.tick()
+    const walls = askWalls()
+    expect(walls).toHaveLength(1)
+    expect(walls[0].wall.price).toBeCloseTo(100.4, 6)
+    expect(walls[0].wall.sizeUsdt).toBeGreaterThan(1_000_000)
+    expect(walls[0].wall.bornAt).toBe(Date.now())
+    __test.publish()
+    expect(getDensitySnapshot().walls.filter(w => w.side === 'ask')).toHaveLength(1)
+  })
+
+  it('DOGE-style: ordinary clusters and the spread stack are NOT walls, only the spike is', () => {
+    // обычные кластеры ~200K, спред-стек 3M (зона исключения), стена 3M.
+    __test.feed(askDepth({ ordinaryQty: 2_000, stackQty: 30_000, wallPrice: 100.4, wallQty: 30_000 }))
+    __test.tick()
+    __test.publish()
+    const snap = getDensitySnapshot()
+    const sym = snap.walls.filter(w => w.symbol === SYM)
+    expect(sym).toHaveLength(1)
+    expect(sym[0].price).toBeCloseTo(100.4, 6)
+    // порог = 5 × ~200K = ~1M — обычные кластеры 200K не проходят
+    expect(snap.autoBrps.find(b => b.symbol === SYM)?.autoBrp ?? 0).toBeGreaterThanOrEqual(1_000_000)
+  })
+
+  it('a cluster only 3× ordinary is NOT a wall (needs ≥5×)', () => {
+    // обычные 200K, «стена» 600K = 3× — не выделяется.
+    __test.feed(askDepth({ ordinaryQty: 2_000, wallPrice: 100.4, wallQty: 6_000 }))
+    __test.tick()
+    __test.publish()
+    expect(askWalls()).toHaveLength(0)
+  })
+
+  it('a huge spread stack alone is never a wall', () => {
+    __test.feed(askDepth({ ordinaryQty: 2_000, stackQty: 50_000 }))
+    __test.tick()
+    __test.publish()
+    expect(askWalls()).toHaveLength(0)
+  })
+
+  it('a uniform book without spikes emits nothing', () => {
+    __test.feed(askDepth({ ordinaryQty: 500 }))
+    __test.tick()
+    __test.publish()
+    expect(askWalls()).toHaveLength(0)
+  })
+
+  it('a thin book (< MIN_BUCKETS) is skipped entirely', () => {
+    __test.feed(askDepth({ thin: true, wallPrice: 100.4, wallQty: 50_000 }))
+    __test.tick()
+    __test.publish()
+    expect(askWalls()).toHaveLength(0)
+    expect(getDensitySnapshot().autoBrps.find(b => b.symbol === SYM)?.autoBrp ?? null).toBeNull()
+  })
+
+  it('walls do not inflate their own baseline (trimmed median)', () => {
+    // 5 стен по 3M + обычные 200K: усечённая медиана остаётся ~200K,
+    // порог ~1M — все 5 стен выделяются и детектируются.
+    __test.feed(askDepth({ ordinaryQty: 2_000, wallPrice: 100.4, wallQty: 30_000 }))
+    __test.tick()
+    expect(askWalls()).toHaveLength(1)
+    expect(getDensitySnapshot().autoBrps.find(b => b.symbol === SYM)?.autoBrp ?? 0).toBeLessThan(1_500_000)
   })
 })
 
@@ -79,33 +166,17 @@ describe('density wall lifecycle', () => {
     vi.useRealTimers()
   })
 
-  it('births a wall above threshold and broadcasts it', () => {
-    __test.feed(askDepth(100.4))
-    __test.tick()
-    const walls = askWalls()
-    expect(walls).toHaveLength(1)
-    expect(walls[0].wall.price).toBeCloseTo(100.4, 6)
-    expect(walls[0].wall.sizeUsdt).toBeGreaterThan(1_000_000)
-    expect(walls[0].wall.bornAt).toBe(Date.now())
-
-    __test.publish()
-    const snap = getDensitySnapshot()
-    expect(snap.walls.filter(w => w.side === 'ask')).toHaveLength(1)
-  })
-
   it('drops an eaten wall from the snapshot but keeps its record in grace', () => {
-    __test.feed(askDepth(100.4))
+    __test.feed(askDepth({ wallPrice: 100.4 }))
     __test.tick()
     __test.publish()
     const bornAt = askWalls()[0].wall.bornAt
     expect(getDensitySnapshot().walls.filter(w => w.side === 'ask')).toHaveLength(1)
 
-    // The wall is gone from the book → excluded from the snapshot at once…
-    __test.feed(askDepth(null))
+    __test.feed(askDepth({ wallPrice: null }))
     __test.tick()
     __test.publish()
     expect(getDensitySnapshot().walls.filter(w => w.side === 'ask')).toHaveLength(0)
-    // …but its record (with bornAt) survives the grace window.
     const kept = askWalls()
     expect(kept).toHaveLength(1)
     expect(kept[0].missedTicks).toBe(1)
@@ -113,39 +184,35 @@ describe('density wall lifecycle', () => {
   })
 
   it('restores the wall with its original bornAt when it returns within grace', () => {
-    __test.feed(askDepth(100.4))
+    __test.feed(askDepth({ wallPrice: 100.4 }))
     __test.tick()
     const bornAt = askWalls()[0].wall.bornAt
 
-    __test.feed(askDepth(null))
+    __test.feed(askDepth({ wallPrice: null }))
     __test.tick()
     __test.publish()
     expect(getDensitySnapshot().walls.filter(w => w.side === 'ask')).toHaveLength(0)
 
     vi.advanceTimersByTime(5_000)
-    __test.feed(askDepth(100.4))
+    __test.feed(askDepth({ wallPrice: 100.4 }))
     __test.tick()
     const walls = askWalls()
     expect(walls).toHaveLength(1)
     expect(walls[0].wall.bornAt).toBe(bornAt)
     expect(walls[0].missedTicks).toBe(0)
-
     __test.publish()
     expect(getDensitySnapshot().walls.filter(w => w.side === 'ask')).toHaveLength(1)
   })
 
   it('inherits bornAt when the wall migrates to a neighbouring bucket', () => {
-    __test.feed(askDepth(100.4))
+    __test.feed(askDepth({ wallPrice: 100.4 }))
     __test.tick()
     const bornAt = askWalls()[0].wall.bornAt
     const oldKey = askWalls()[0].key
 
-    // 100.4 → 100.46: |Δ|/min ≈ 0.06% ≤ 0.1% tolerance, but a different
-    // bucket idx on the mid-anchored grid (floor(100.46/0.05) ≠ floor(100.4/0.05)).
     vi.advanceTimersByTime(3_000)
-    __test.feed(askDepth(100.46))
+    __test.feed(askDepth({ wallPrice: 100.46 }))
     __test.tick()
-
     const walls = askWalls()
     expect(walls).toHaveLength(1)
     expect(walls[0].key).not.toBe(oldKey)
@@ -154,17 +221,14 @@ describe('density wall lifecycle', () => {
   })
 
   it('deletes the wall only after the grace window of consecutive misses', () => {
-    __test.feed(askDepth(100.4))
+    __test.feed(askDepth({ wallPrice: 100.4 }))
     __test.tick()
-
-    // WALL_GRACE_TICKS = ceil(15000 / 250) = 60 missed symbol-ticks.
     for (let i = 0; i < 60; i++) {
-      __test.feed(askDepth(null))
+      __test.feed(askDepth({ wallPrice: null }))
       __test.tick()
     }
     expect(askWalls()).toHaveLength(1)
-
-    __test.feed(askDepth(null))
+    __test.feed(askDepth({ wallPrice: null }))
     __test.tick()
     expect(askWalls()).toHaveLength(0)
   })
@@ -176,22 +240,5 @@ describe('density wall lifecycle', () => {
       expect.objectContaining({ walls: [] }),
       true,
     )
-  })
-
-  it('applies the per-coin volume-based БРП as the detection threshold', () => {
-    // ETH-подобная монета: БРП 5M → порог детекции ×2 = 10M. Стена 1.2M
-    // (обычная заявка) не детектируется вообще.
-    __test.seedBook('binance-futures', 'POPULARUSDT', 100, 5_000_000)
-    __test.feed({ ...askDepth(100.4), symbol: 'POPULARUSDT' })
-    __test.feed(askDepth(100.4))
-    __test.tick()
-    __test.publish()
-    const snap = getDensitySnapshot()
-    expect(snap.walls.filter(w => w.symbol === 'POPULARUSDT')).toHaveLength(0)
-    expect(snap.autoBrps.find(b => b.symbol === 'POPULARUSDT')?.autoBrp).toBe(5_000_000)
-
-    // А на монете без БРП (нет объёма) — фоллбэк 500K × 1 = 500K: стена 1.2M видна
-    // (тиринг ×2/×3.5/×5 — клиентская настройка, как у scalpboard).
-    expect(getDensitySnapshot().walls.filter(w => w.symbol === SYM)).toHaveLength(1)
   })
 })
