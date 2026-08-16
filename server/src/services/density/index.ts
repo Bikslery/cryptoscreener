@@ -39,6 +39,11 @@ interface BookState {
   dirty: boolean
   /** per-coin БРП from the coin's 24h traded volume (scalpboard auto mode) */
   brp: number | null
+  /** book-measured "ordinary order" level: EMA over per-minute max clusters */
+  emaMinute: number
+  emaMax: number
+  emaValue: number
+  emaSamples: number
 }
 
 interface WallState {
@@ -73,18 +78,31 @@ function isRoundPrice(price: number): boolean {
 // 24h traded volume, clamped. Popular coins (BTC/ETH/…) therefore get much
 // higher thresholds than small caps automatically — the "separate setting"
 // per coin — and no warmup is needed: the value is ready at boot.
+// Volume alone UNDERESTIMATES the ordinary-order level on thick-book coins
+// (DOGE/XRP trade less but rest far more), so the effective БРП is the max
+// of the volume value and the book-measured level once the latter warms up.
 const BRP_VOL_DIV = parseFloat(process.env.DENSITY_BRP_VOLUME_DIV || '3000')
 const BRP_MIN = parseFloat(process.env.DENSITY_BRP_MIN || '50000')
 const BRP_MAX = parseFloat(process.env.DENSITY_BRP_MAX || '25000000')
+/** per-minute EMA weight for the book level (τ ≈ 20 min) */
+const BRP_EMA_ALPHA = parseFloat(process.env.DENSITY_BRP_EMA_ALPHA || '0.05')
+/** minute samples before the book level is trusted as БРП */
+const BRP_EMA_WARMUP = parseInt(process.env.DENSITY_BRP_EMA_WARMUP || '5', 10)
 
 function volumeBrp(quoteVolume24h: number | undefined | null): number | null {
   if (!quoteVolume24h || !isFinite(quoteVolume24h) || quoteVolume24h <= 0) return null
   return Math.min(BRP_MAX, Math.max(BRP_MIN, quoteVolume24h / BRP_VOL_DIV))
 }
 
-/** Per-coin БРП from the book's volume-derived value; null = DEFAULT_BRP. */
+/** Per-coin БРП: warmed book level if available, else the volume-derived
+ *  value; null = DEFAULT_BRP. */
 function effectiveAutoBrp(exchange: Exchange, symbol: string): number | null {
-  return books.get(key(exchange, symbol))?.brp ?? null
+  const state = books.get(key(exchange, symbol))
+  if (!state) return null
+  const vol = state.brp ?? 0
+  const book = state.emaSamples >= BRP_EMA_WARMUP ? state.emaValue : 0
+  const v = Math.max(vol, book)
+  return v > 0 ? v : null
 }
 
 function onDepth(depth: UnifiedDepth): void {
@@ -158,6 +176,26 @@ function tickBook(state: BookState): void {
 
   const bidBuckets = clusterSide(state.bids, step)
   const askBuckets = clusterSide(state.asks, step)
+
+  // Book-measured "ordinary order" level: once per minute fold the tick's
+  // max cluster into a slow EMA. A persistent near-spread stack dominates
+  // it, transient walls only nudge it — this is what thick-book coins
+  // (DOGE & co) are gated by, where the volume formula undershoots badly.
+  const minute = Math.floor(Date.now() / 60000)
+  let maxCluster = 0
+  for (const b of bidBuckets.values()) if (b.size > maxCluster) maxCluster = b.size
+  for (const b of askBuckets.values()) if (b.size > maxCluster) maxCluster = b.size
+  if (maxCluster > 0) {
+    if (state.emaMinute !== minute) {
+      if (state.emaMinute !== 0 && state.emaMax > 0) {
+        state.emaValue = state.emaSamples === 0 ? state.emaMax : state.emaValue * (1 - BRP_EMA_ALPHA) + state.emaMax * BRP_EMA_ALPHA
+        state.emaSamples++
+      }
+      state.emaMinute = minute
+      state.emaMax = 0
+    }
+    if (maxCluster > state.emaMax) state.emaMax = maxCluster
+  }
 
   const bidWalls = detectWalls(bidBuckets, threshold, TOP_K_PER_SIDE)
   const askWalls = detectWalls(askBuckets, threshold, TOP_K_PER_SIDE)
@@ -241,7 +279,7 @@ function rescanSymbols(adapters: ExchangeAdapter[]): void {
         continue
       }
       subscribed.add(k)
-      books.set(k, { exchange: adapter.exchange, symbol: ticker.symbol, bids: new Map(), asks: new Map(), mid: ticker.price, dirty: true, brp })
+      books.set(k, { exchange: adapter.exchange, symbol: ticker.symbol, bids: new Map(), asks: new Map(), mid: ticker.price, dirty: true, brp, emaMinute: 0, emaMax: 0, emaValue: 0, emaSamples: 0 })
       adapter.subscribeDepth(ticker.symbol, cb)
     }
   }
@@ -373,7 +411,7 @@ export const __test = {
     lastSnapshot = { ts: 0, walls: [], autoBrps: [] }
   },
   seedBook(exchange: Exchange, symbol: string, mid: number, brp?: number): void {
-    books.set(key(exchange, symbol), { exchange, symbol, bids: new Map(), asks: new Map(), mid, dirty: true, brp: brp ?? null })
+    books.set(key(exchange, symbol), { exchange, symbol, bids: new Map(), asks: new Map(), mid, dirty: true, brp: brp ?? null, emaMinute: 0, emaMax: 0, emaValue: 0, emaSamples: 0 })
   },
   feed(depth: UnifiedDepth): void {
     onDepth(depth)

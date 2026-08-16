@@ -193,4 +193,41 @@ describe('density wall lifecycle', () => {
     // А на монете без БРП (нет объёма) — фоллбэк 500K × 2 = 1M: стена 1.2M видна.
     expect(getDensitySnapshot().walls.filter(w => w.symbol === SYM)).toHaveLength(1)
   })
+
+  it('thick-book coins (DOGE): book level overrides the volume floor', () => {
+    // DOGE-подобная монета: объём маленький → БРП-пол 50K (порог 100K), но
+    // обычные кластеры стакана ~2M. Пока EMA не прогрелась — «плотности»
+    // сыплются; после 5 поминутных сэмплов БРП = уровень стакана ~2M и
+    // стена 3.5M (1.75× обычного) отфильтровывается.
+    const THICK = 'THICKUSDT'
+    __test.seedBook('binance-futures', THICK, 100, 50_000)
+    const depth = (): UnifiedDepth => ({
+      symbol: THICK,
+      exchange: EX,
+      bids: [[99.98, 20_000], [99.9, 1]],
+      asks: [
+        [100.02, 20_000], // обычный спред-стакан ≈ 2M
+        [100.1, 1],
+        [100.32, 1],
+        [100.48, 1],
+        [100.4, 35_000], // «стена» ≈ 3.5M
+      ],
+      timestamp: Date.now(),
+    })
+
+    __test.feed(depth())
+    __test.tick()
+    __test.publish()
+    expect(getDensitySnapshot().walls.filter(w => w.symbol === THICK)).toHaveLength(3) // стакан± и стена — спам
+
+    for (let i = 0; i < 7; i++) {
+      vi.advanceTimersByTime(61_000)
+      __test.feed(depth())
+      __test.tick()
+    }
+    __test.publish()
+    const snap = getDensitySnapshot()
+    expect(snap.autoBrps.find(b => b.symbol === THICK)?.autoBrp ?? 0).toBeGreaterThan(1_800_000)
+    expect(snap.walls.filter(w => w.symbol === THICK)).toHaveLength(0)
+  })
 })
