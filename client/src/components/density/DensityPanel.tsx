@@ -5,11 +5,11 @@ import { DensityMap } from './DensityMap'
 type Mode = 'list' | 'map'
 
 /**
- * Панель плотностей: список плотностей текущей монеты (режим «Список»)
- * или двумерная карта всех плотностей по тирам и расстоянию («Карта»).
+ * Панель плотностей: двумерная карта всех плотностей по тирам и расстоянию
+ * (режим «Карта», как у scalpboard) или список плотностей текущей монеты.
  */
 export const DensityPanel = memo(function DensityPanel() {
-  const [mode, setMode] = useState<Mode>('list')
+  const [mode, setMode] = useState<Mode>('map')
 
   return (
     <div className="h-full flex flex-col">

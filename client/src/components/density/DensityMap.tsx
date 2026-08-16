@@ -29,6 +29,7 @@ interface MapBlock {
   sumUsdt: number
   distancePct: number
   tier: Tier
+  roundNumber: boolean
   hue: number
   lOffset: number
 }
@@ -68,6 +69,7 @@ function buildBlocks(
       sumUsdt,
       distancePct,
       tier: item.tier,
+      roundNumber: item.members.some(m => m.roundNumber),
       hue,
       lOffset,
     })
@@ -197,34 +199,37 @@ export const DensityMap = memo(function DensityMap() {
           return (
             <button
               key={key}
-              className={`absolute flex flex-col items-start justify-center px-[4px] rounded-[3px] cursor-pointer border transition-[filter] text-left z-[5] ${
+              className={`absolute flex items-center gap-[3px] justify-center px-[4px] rounded-[3px] cursor-pointer border transition-[filter] text-left z-[5] ${
                 focused ? 'brightness-150' : 'hover:brightness-150'
               }`}
               style={{
                 left: `${left}%`,
                 width: `${colW - 6}%`,
-                height: '22px',
-                transform: 'translateX(-50%) translateY(-50%)',
+                height: '20px',
+                // Как в стакане scalpboard: центр — спред, аски прижаты к линии
+                // СВЕРХУ, биды — СНИЗУ, ни одна плотность не лежит на середине.
+                transform: b.side === 'ask' ? 'translateX(-50%) translateY(calc(-100% - 2px))' : 'translateX(-50%) translateY(2px)',
                 bottom: b.side === 'ask' ? `${zonePos}%` : 'auto',
                 top: b.side === 'bid' ? `${zonePos}%` : 'auto',
                 background: color,
                 borderColor: color.replace(/0\.9\)$/, '1)'),
               }}
-              title={`${b.symbol} ${b.side === 'bid' ? 'BID' : 'ASK'} @ ${b.price} — ${formatUsdt(b.sumUsdt)} · ${TIER_LABEL[b.tier]} · ${formatAge(b.bornAt)}`}
+              title={`${b.symbol} ${b.side === 'bid' ? 'BID' : 'ASK'} @ ${b.price} — ${formatUsdt(b.sumUsdt)} · ${TIER_LABEL[b.tier]} · ${formatAge(b.bornAt)}${b.roundNumber ? ' · круглое число' : ''}`}
               onMouseEnter={() => setFocusedKey(key)}
               onMouseLeave={() => setFocusedKey(null)}
               onClick={() => expandChartAtPrice(b.symbol, b.price)}
             >
-              <span className="w-full flex items-baseline gap-[3px] leading-[11px]">
-                <span className="truncate text-[10px] font-bold text-white/95">
-                  {extractBaseAsset(b.symbol)}
-                </span>
-                {resolved.showMarket && (
-                  <span className="text-[7px] text-white/70">{EXCHANGE_BADGE[b.exchange]}</span>
-                )}
-                <span className="ml-auto shrink-0 text-[9px] text-white/90">
-                  {b.count > 1 ? `${b.count}·` : ''}{formatUsdt(b.sumUsdt)}
-                </span>
+              {resolved.showMarket && (
+                <span className="shrink-0 text-[7px] font-semibold text-white/70">{EXCHANGE_BADGE[b.exchange]}</span>
+              )}
+              <span className="truncate text-[10px] font-bold text-white/95">
+                {extractBaseAsset(b.symbol)}
+              </span>
+              {b.roundNumber && (
+                <span className="shrink-0 w-[4px] h-[4px] rounded-full bg-white/90" title="Круглое число" />
+              )}
+              <span className="shrink-0 text-[9px] text-white/90 tabular-nums">
+                {b.count > 1 ? `${b.count}·` : ''}{formatUsdt(b.sumUsdt)}
               </span>
             </button>
           )

@@ -26,11 +26,6 @@ const CAP_WALLS = parseInt(process.env.DENSITY_CAP || '1000', 10)
 // tier) — anything below 2×БРП is an ordinary order, not a density.
 const DEFAULT_BRP = parseFloat(process.env.DENSITY_DEFAULT_BRP || '500000')
 const MIN_MULT = parseFloat(process.env.DENSITY_MIN_MULT || '2')
-const WARMUP_MINUTES = parseInt(process.env.DENSITY_WARMUP_MINUTES || '60', 10)
-const AUTO_BRP_WINDOW_MINUTES = 24 * 60
-// How long an unseen wall keeps its identity (and bornAt) before it is truly
-// deleted, and how far a wall may move price-wise to still count as the same
-// wall after its bucket index migrates with the mid price.
 const WALL_GRACE_MS = parseInt(process.env.DENSITY_WALL_GRACE_MS || '15000', 10)
 const WALL_GRACE_TICKS = Math.max(2, Math.ceil(WALL_GRACE_MS / TICK_MS))
 const MATCH_TOL_PCT = parseFloat(process.env.DENSITY_MATCH_TOL || '0.1')
@@ -42,6 +37,8 @@ interface BookState {
   asks: Map<number, number>
   mid: number
   dirty: boolean
+  /** per-coin БРП from the coin's 24h traded volume (scalpboard auto mode) */
+  brp: number | null
 }
 
 interface WallState {
@@ -50,20 +47,9 @@ interface WallState {
   missedTicks: number
 }
 
-interface BrpRing {
-  slots: ({ minute: number; size: number } | null)[]
-}
-
 const books = new Map<string, BookState>()
 const walls = new Map<string, WallState>()
-const brpRings = new Map<string, BrpRing>()
 const subscribed = new Set<string>()
-/** auto-БРП values restored from Redis on boot: while the 24h ring warms up
- *  (up to WARMUP_MINUTES), thresholds would otherwise fall back to the flat
- *  DEFAULT_BRP and most walls would drop below detection after every restart. */
-const startupBrps = new Map<string, number>()
-/** per-symbol max БРП across exchanges — borrowed while own ring warms up */
-const borrowedBrps = new Map<string, number>()
 
 let tickCounter = 0
 let sliceTimer: ReturnType<typeof setInterval> | null = null
@@ -81,112 +67,24 @@ function isRoundPrice(price: number): boolean {
   return Math.abs(v - Math.round(v)) < 1e-9
 }
 
-function brpRingOf(exchange: Exchange, symbol: string): BrpRing {
-  const k = key(exchange, symbol)
-  let ring = brpRings.get(k)
-  if (!ring) {
-    ring = { slots: new Array(AUTO_BRP_WINDOW_MINUTES).fill(null) }
-    brpRings.set(k, ring)
-  }
-  return ring
+
+// scalpboard's auto-БРП is "рассчитывается на основе проторгованных объёмов"
+// (their docs): the per-coin base density size is a fraction of the coin's
+// 24h traded volume, clamped. Popular coins (BTC/ETH/…) therefore get much
+// higher thresholds than small caps automatically — the "separate setting"
+// per coin — and no warmup is needed: the value is ready at boot.
+const BRP_VOL_DIV = parseFloat(process.env.DENSITY_BRP_VOLUME_DIV || '3000')
+const BRP_MIN = parseFloat(process.env.DENSITY_BRP_MIN || '50000')
+const BRP_MAX = parseFloat(process.env.DENSITY_BRP_MAX || '25000000')
+
+function volumeBrp(quoteVolume24h: number | undefined | null): number | null {
+  if (!quoteVolume24h || !isFinite(quoteVolume24h) || quoteVolume24h <= 0) return null
+  return Math.min(BRP_MAX, Math.max(BRP_MIN, quoteVolume24h / BRP_VOL_DIV))
 }
 
-function recordClusterSize(exchange: Exchange, symbol: string, size: number): void {
-  const ring = brpRingOf(exchange, symbol)
-  const minute = Math.floor(Date.now() / 60000)
-  const idx = minute % AUTO_BRP_WINDOW_MINUTES
-  const prev = ring.slots[idx]
-  if (prev === null || prev.minute !== minute) {
-    ring.slots[idx] = { minute, size }
-  } else if (size > prev.size) {
-    ring.slots[idx] = { minute, size }
-  }
-}
-
-/** Median of the top quartile of per-minute max cluster sizes over the
- *  rolling window. Returns null until WARMUP_MINUTES minutes of data exist. */
-function computeAutoBrp(exchange: Exchange, symbol: string): number | null {
-  const ring = brpRings.get(key(exchange, symbol))
-  if (!ring) return null
-  const nowMinute = Math.floor(Date.now() / 60000)
-  const values: number[] = []
-  for (const s of ring.slots) {
-    if (s === null) continue
-    if (nowMinute - s.minute >= AUTO_BRP_WINDOW_MINUTES) continue
-    values.push(s.size)
-  }
-  if (values.length < WARMUP_MINUTES) return null
-  values.sort((a, b) => a - b)
-  const quartileStart = Math.floor(values.length * 0.75)
-  const quartile = values.slice(quartileStart)
-  if (quartile.length === 0) return null
-  const mid = Math.floor(quartile.length / 2)
-  return quartile.length % 2 === 1 ? quartile[mid] : (quartile[mid - 1] + quartile[mid]) / 2
-}
-
-/** Warm ring value, else the Redis-restored boot value, else the best value
- *  borrowed from another exchange's ring for the same symbol (the scale of
- *  an "ordinary order" is comparable across venues); null = use DEFAULT_BRP. */
+/** Per-coin БРП from the book's volume-derived value; null = DEFAULT_BRP. */
 function effectiveAutoBrp(exchange: Exchange, symbol: string): number | null {
-  return computeAutoBrp(exchange, symbol) ?? startupBrps.get(key(exchange, symbol)) ?? borrowedBrps.get(symbol) ?? null
-}
-
-const BRP_REDIS_KEY = 'density:autobrp'
-
-/** Persist computed auto-БРП values so the next boot skips the flat-default
- *  warmup window. Best-effort: Redis down must never break the engine. */
-function persistBrps(): void {
-  if (!REDIS_ENABLED) return
-  try {
-    const out: Record<string, number> = {}
-    for (const k of books.keys()) {
-      const v = computeAutoBrp(k.split(':')[0] as Exchange, k.split(':')[1])
-      if (v !== null && isFinite(v) && v > 0) out[k] = v
-    }
-    if (Object.keys(out).length === 0) return
-    getRedisPub().set(BRP_REDIS_KEY, JSON.stringify(out)).catch(() => {})
-  } catch { /* redis down */ }
-}
-
-function loadStartupBrps(): void {
-  if (!REDIS_ENABLED) return
-  try {
-    getRedisPub()
-      .get(BRP_REDIS_KEY)
-      .then((raw) => {
-        if (!raw) return
-        const parsed = JSON.parse(raw) as Record<string, number>
-        let n = 0
-        for (const [k, v] of Object.entries(parsed)) {
-          if (isFinite(v) && v > 0) {
-            startupBrps.set(k, v)
-            n++
-          }
-        }
-        if (n > 0) console.log(`[Density] restored ${n} auto-БРП values from redis`)
-        rebuildBorrowedBrps()
-      })
-      .catch(() => {})
-  } catch { /* redis down */ }
-}
-
-/** Rebuild the per-symbol cross-exchange БРП fallback: for each symbol keep
- *  the max of all computed/restored values — used when a venue's own ring is
- *  still warming (e.g. futures books resyncing), so its thresholds don't fall
- *  back to the flat default and let ordinary orders through as "densities". */
-function rebuildBorrowedBrps(): void {
-  borrowedBrps.clear()
-  const consider = (k: string, v: number | null) => {
-    if (v === null || !isFinite(v) || v <= 0) return
-    const sym = k.slice(k.indexOf(':') + 1)
-    const cur = borrowedBrps.get(sym)
-    if (cur === undefined || v > cur) borrowedBrps.set(sym, v)
-  }
-  for (const k of brpRings.keys()) {
-    const [ex, sym] = k.split(':')
-    consider(k, computeAutoBrp(ex as Exchange, sym))
-  }
-  for (const [k, v] of startupBrps) consider(k, v)
+  return books.get(key(exchange, symbol))?.brp ?? null
 }
 
 function onDepth(depth: UnifiedDepth): void {
@@ -261,13 +159,6 @@ function tickBook(state: BookState): void {
   const bidBuckets = clusterSide(state.bids, step)
   const askBuckets = clusterSide(state.asks, step)
 
-  // Track the per-minute max cluster size for the auto-БРП baseline (all
-  // clusters, not only walls — walls can be rare on quiet books).
-  let maxCluster = 0
-  for (const b of bidBuckets.values()) if (b.size > maxCluster) maxCluster = b.size
-  for (const b of askBuckets.values()) if (b.size > maxCluster) maxCluster = b.size
-  if (maxCluster > 0) recordClusterSize(state.exchange, state.symbol, maxCluster)
-
   const bidWalls = detectWalls(bidBuckets, threshold, TOP_K_PER_SIDE)
   const askWalls = detectWalls(askBuckets, threshold, TOP_K_PER_SIDE)
 
@@ -340,14 +231,17 @@ function rescanSymbols(adapters: ExchangeAdapter[]): void {
   const cb: DepthCallback = onDepth
 
   for (const ticker of top) {
+    // scalpboard auto mode: per-coin БРП from the coin's 24h traded volume.
+    const brp = volumeBrp(ticker.quoteVolume24h)
     for (const adapter of depthAdapters) {
       const k = key(adapter.exchange, ticker.symbol)
       wanted.add(k)
-      if (subscribed.has(k)) continue
-      subscribed.add(k)
-      if (!books.has(k)) {
-        books.set(k, { exchange: adapter.exchange, symbol: ticker.symbol, bids: new Map(), asks: new Map(), mid: ticker.price, dirty: true })
+      if (subscribed.has(k)) {
+        books.get(k)!.brp = brp
+        continue
       }
+      subscribed.add(k)
+      books.set(k, { exchange: adapter.exchange, symbol: ticker.symbol, bids: new Map(), asks: new Map(), mid: ticker.price, dirty: true, brp })
       adapter.subscribeDepth(ticker.symbol, cb)
     }
   }
@@ -356,7 +250,6 @@ function rescanSymbols(adapters: ExchangeAdapter[]): void {
     if (wanted.has(k)) continue
     subscribed.delete(k)
     books.delete(k)
-    brpRings.delete(k)
     for (const [wk] of walls) {
       if (wk.startsWith(k + ':')) walls.delete(wk)
     }
@@ -365,10 +258,6 @@ function rescanSymbols(adapters: ExchangeAdapter[]): void {
     adapter?.unsubscribeDepth(symbol, cb)
   }
 
-  // Keep the Redis copy fresh so restarts skip the warmup fallback, and
-  // refresh the cross-exchange borrow map.
-  persistBrps()
-  rebuildBorrowedBrps()
   console.log(`[Density] top=${top.length} subscribed=${subscribed.size} adapters=${depthAdapters.length}`)
 }
 
@@ -420,7 +309,6 @@ function scheduleRescan(adapters: ExchangeAdapter[]): void {
 }
 
 export function startDensityService(adapters: ExchangeAdapter[]): void {
-  loadStartupBrps()
   rescanSymbols(adapters)
   scheduleRescan(adapters)
 
@@ -480,13 +368,12 @@ export const __test = {
   reset(): void {
     books.clear()
     walls.clear()
-    brpRings.clear()
     subscribed.clear()
     tickCounter = 0
     lastSnapshot = { ts: 0, walls: [], autoBrps: [] }
   },
-  seedBook(exchange: Exchange, symbol: string, mid: number): void {
-    books.set(key(exchange, symbol), { exchange, symbol, bids: new Map(), asks: new Map(), mid, dirty: true })
+  seedBook(exchange: Exchange, symbol: string, mid: number, brp?: number): void {
+    books.set(key(exchange, symbol), { exchange, symbol, bids: new Map(), asks: new Map(), mid, dirty: true, brp: brp ?? null })
   },
   feed(depth: UnifiedDepth): void {
     onDepth(depth)
@@ -503,11 +390,5 @@ export const __test = {
   },
   publish(): void {
     publishSnapshot()
-  },
-  setStartupBrps(values: Record<string, number>): void {
-    for (const [k, v] of Object.entries(values)) {
-      if (isFinite(v) && v > 0) startupBrps.set(k, v)
-    }
-    rebuildBorrowedBrps()
   },
 }

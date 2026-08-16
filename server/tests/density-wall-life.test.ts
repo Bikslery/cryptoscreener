@@ -178,18 +178,19 @@ describe('density wall lifecycle', () => {
     )
   })
 
-  it('borrows БРП across exchanges while a venue\'s ring warms up', () => {
-    __test.seedBook('binance-futures', 'ETHUSDT', 2500)
+  it('applies the per-coin volume-based БРП as the detection threshold', () => {
+    // ETH-подобная монета: БРП 5M → порог детекции ×2 = 10M. Стена 1.2M
+    // (обычная заявка) не детектируется вообще.
+    __test.seedBook('binance-futures', 'POPULARUSDT', 100, 5_000_000)
+    __test.feed({ ...askDepth(100.4), symbol: 'POPULARUSDT' })
+    __test.feed(askDepth(100.4))
+    __test.tick()
     __test.publish()
-    // Своего кольца нет → null → клиент свалился бы на плоский фоллбэк.
-    let snap = getDensitySnapshot()
-    expect(snap.autoBrps.find(b => b.exchange === 'binance-futures' && b.symbol === 'ETHUSDT')?.autoBrp ?? null).toBeNull()
+    const snap = getDensitySnapshot()
+    expect(snap.walls.filter(w => w.symbol === 'POPULARUSDT')).toHaveLength(0)
+    expect(snap.autoBrps.find(b => b.symbol === 'POPULARUSDT')?.autoBrp).toBe(5_000_000)
 
-    // Появилось значение другой биржи для того же символа → фьючерсы
-    // заимствуют его, и «обычные заявки» не проходят как плотности.
-    __test.setStartupBrps({ 'binance-spot:ETHUSDT': 5_020_000 })
-    __test.publish()
-    snap = getDensitySnapshot()
-    expect(snap.autoBrps.find(b => b.exchange === 'binance-futures' && b.symbol === 'ETHUSDT')?.autoBrp).toBe(5_020_000)
+    // А на монете без БРП (нет объёма) — фоллбэк 500K × 2 = 1M: стена 1.2M видна.
+    expect(getDensitySnapshot().walls.filter(w => w.symbol === SYM)).toHaveLength(1)
   })
 })
