@@ -12,8 +12,19 @@ export const DEFAULT_DENSITY_SETTINGS: DensitySettings = {
   multSmall: 2,
   multMedium: 3.5,
   multLarge: 5,
+  lifeSmall: 0,
+  lifeMedium: 0,
+  lifeLarge: 0,
   perSymbol: {},
-  zoomPct: 5,
+  zoomPct: 3,
+  walls: false,
+  wallsMaxSpread: 0.5,
+  wallsMinSize: 3,
+  showMarket: true,
+  showSmall: true,
+  showMedium: true,
+  showLarge: true,
+  hiddenSymbols: [],
 }
 
 export function resolveDensitySettings(patch?: Partial<DensitySettings>): DensitySettings {

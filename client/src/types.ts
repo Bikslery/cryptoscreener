@@ -301,8 +301,25 @@ export interface DensitySettings {
   multSmall: number
   multMedium: number
   multLarge: number
+  /** мин. время жизни (минут), чтобы плотность попала в категорию */
+  lifeSmall: number
+  lifeMedium: number
+  lifeLarge: number
   perSymbol: Record<string, number>
+  /** глубина карты плотностей, % (0.5..10) */
   zoomPct: number
+  /** объединять близкие скопления в «стены» */
+  walls: boolean
+  /** макс. расстояние между плотностями в кластере, % (0.1..3) */
+  wallsMaxSpread: number
+  /** мин. количество плотностей в стене (2..5) */
+  wallsMinSize: number
+  /** показывать биржу-источник на карте */
+  showMarket: boolean
+  showSmall: boolean
+  showMedium: boolean
+  showLarge: boolean
+  hiddenSymbols: string[]
 }
 
 export interface DensityCell {

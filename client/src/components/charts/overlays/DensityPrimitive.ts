@@ -4,13 +4,16 @@ import type {
 } from 'lightweight-charts'
 
 /**
- * Density (orderbook walls) renderer — horizontal lines at wall prices with
- * a right-anchored label (exchange badge, size, age), styled after the
- * OverlaysPrimitive label painter. Lines span the full pane width: a wall is
- * a price level, not a time point.
+ * Density (orderbook walls) renderer — horizontal lines at wall prices,
+ * drawn from the wall's BIRTH TIME on the time axis to the right pane edge,
+ * with a right-anchored label (exchange badge, size, price). Colors come
+ * from the density scheme (bid green / ask red), styled after scalpboard's
+ * `labled_line` figure.
  */
 export interface DensityLineSpec {
   price: number
+  /** момент рождения стены, unix-секунды (wall.bornAt / 1000) */
+  birthTimeSec: number
   color: string
   text: string
   baseline: 'top' | 'bottom'
@@ -110,19 +113,26 @@ class DensityPaneView implements IPrimitivePaneView {
         const y0 = series.priceToCoordinate(s.price)
         if (y0 === null || !isFinite(y0)) continue
 
+        // Line starts when the wall was born; walls born outside the visible
+        // data range are not drawn (their "history" is gone with the wall).
+        const timeScale = chart.timeScale()
+        const x0 = timeScale.timeToCoordinate(s.birthTimeSec as Time)
+        if (x0 === null || !isFinite(x0)) continue
+
         const A = s.text.length * 6 + 8 + 8
         const p = width - A
+        if (x0 > p) continue
 
         ctx.lineWidth = 1
         ctx.strokeStyle = s.color
         ctx.beginPath()
-        ctx.moveTo(0, y0 + 0.5)
+        ctx.moveTo(Math.max(0, x0), y0 + 0.5)
         ctx.lineTo(p, y0 + 0.5)
         ctx.stroke()
 
-        // small round-number marker at the line start
+        // small marker at the birth point
         ctx.fillStyle = s.color
-        ctx.fillRect(0, y0 - 1, 3, 3)
+        ctx.fillRect(Math.max(0, x0) - 1, y0 - 1, 3, 3)
 
         // label box (figures lib Ah() + fh())
         const textY = s.baseline === 'bottom' ? y0 + 1 : y0
