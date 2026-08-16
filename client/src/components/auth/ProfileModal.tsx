@@ -1059,20 +1059,38 @@ export default function ProfileModal() {
           )}
 
           <div className="profile-field">
+            <label>Малая категория, ×БРП</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={1}
+                max={4}
+                step={0.25}
+                value={density.multSmall}
+                onChange={(e) => saveDensity({ ...density, multSmall: Number(e.target.value) })}
+                className="profile-scale-slider"
+                data-testid="density-mult-small"
+              />
+              <span className="profile-scale-value">×{density.multSmall}</span>
+            </div>
+            <div className="profile-scale-hint">Плотность ≥ БРП × это число — «малая» (в scalpboard ×2)</div>
+          </div>
+
+          <div className="profile-field">
             <label>Средняя категория, ×БРП</label>
             <div className="profile-scale-row">
               <input
                 type="range"
-                min={1.5}
-                max={3}
-                step={0.1}
+                min={2}
+                max={5}
+                step={0.25}
                 value={density.multMedium}
                 onChange={(e) => saveDensity({ ...density, multMedium: Number(e.target.value) })}
                 className="profile-scale-slider"
               />
               <span className="profile-scale-value">×{density.multMedium}</span>
             </div>
-            <div className="profile-scale-hint">Плотность ≥ БРП × это число — «средняя»</div>
+            <div className="profile-scale-hint">Плотность ≥ БРП × это число — «средняя» (в scalpboard ×3.5)</div>
           </div>
 
           <div className="profile-field">

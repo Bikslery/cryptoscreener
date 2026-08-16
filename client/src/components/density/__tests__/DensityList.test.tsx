@@ -53,8 +53,8 @@ function wall(overrides: Partial<DensityWall> = {}): DensityWall {
     exchange: 'binance-futures',
     side: 'ask',
     price: 101,
-    sizeUsdt: 500_000,
-    bornAt: Date.now() - 10 * 60_000, // 10 минут назад
+    sizeUsdt: 1_200_000,
+    bornAt: Date.now() - 35 * 60_000, // 35 минут назад — пережила 30-мин порог
     roundNumber: false,
     ...overrides,
   }
@@ -70,24 +70,25 @@ beforeEach(() => {
 describe('DensityList', () => {
   it('shows ask and bid sections with badge, size and age for tiered walls', () => {
     densityState.walls = [
-      wall({ side: 'ask', price: 101, sizeUsdt: 500_000 }),
-      wall({ side: 'bid', price: 99, sizeUsdt: 800_000 }),
+      wall({ side: 'ask', price: 101, sizeUsdt: 1_200_000 }),
+      wall({ side: 'bid', price: 99, sizeUsdt: 2_000_000 }),
     ]
     render(<DensityList />)
 
     expect(screen.getByText('ПРОДАЖА (аски)')).toBeTruthy()
     expect(screen.getByText('ПОКУПКА (биды)')).toBeTruthy()
     expect(screen.getAllByText('BI-F').length).toBe(2)
-    expect(screen.getByText('500.0K')).toBeTruthy()
-    expect(screen.getByText('800.0K')).toBeTruthy()
-    // возраст ~10 минут
-    expect(screen.getAllByText('10м').length).toBe(2)
+    expect(screen.getByText('1.20M')).toBeTruthy()
+    expect(screen.getByText('2.00M')).toBeTruthy()
+    // возраст ~35 минут
+    expect(screen.getAllByText('35м').length).toBe(2)
   })
 
-  it('hides transient walls that have not lived past the tier lifetime', () => {
+  it('hides walls that have not lived past the 30-minute tier lifetime', () => {
     densityState.walls = [
-      wall({ bornAt: Date.now() - 10_000 }), // 10 секунд — моложе lifeSmall=1мин
-      wall({ bornAt: Date.now() - 10 * 60_000 }),
+      wall({ bornAt: Date.now() - 10_000 }), // 10 секунд — спуф
+      wall({ bornAt: Date.now() - 10 * 60_000 }), // 10 минут — ещё молодая
+      wall({ bornAt: Date.now() - 35 * 60_000 }), // 35 минут — устоявшаяся
     ]
     render(<DensityList />)
 

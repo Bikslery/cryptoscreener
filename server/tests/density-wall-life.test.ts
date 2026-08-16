@@ -20,7 +20,7 @@ import type { UnifiedDepth } from '../src/types.js'
 const SYM = 'TESTUSDT'
 const EX = 'binance-futures' as const
 
-/** Asks with a big wall at `wallPrice` (qty 5000 → ~500K USDT > 300K БРП). */
+/** Asks with a big wall at `wallPrice` (qty 12000 → ~1.2M USDT > 1M = 2×БРП 500K). */
 function askDepth(wallPrice: number | null): UnifiedDepth {
   const asks: [number, number][] = [
     [100.02, 10],
@@ -28,7 +28,7 @@ function askDepth(wallPrice: number | null): UnifiedDepth {
     [100.32, 1],
     [100.48, 1],
   ]
-  if (wallPrice !== null) asks.push([wallPrice, 5000])
+  if (wallPrice !== null) asks.push([wallPrice, 12000])
   const bids: [number, number][] = [
     [99.98, 10],
     [99.9, 1],
@@ -85,7 +85,7 @@ describe('density wall lifecycle', () => {
     const walls = askWalls()
     expect(walls).toHaveLength(1)
     expect(walls[0].wall.price).toBeCloseTo(100.4, 6)
-    expect(walls[0].wall.sizeUsdt).toBeGreaterThan(300_000)
+    expect(walls[0].wall.sizeUsdt).toBeGreaterThan(1_000_000)
     expect(walls[0].wall.bornAt).toBe(Date.now())
 
     __test.publish()

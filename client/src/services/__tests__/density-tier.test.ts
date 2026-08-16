@@ -3,7 +3,7 @@ import { DEFAULT_DENSITY_SETTINGS, resolveDensitySettings, formatAge } from '../
 import { calcTier } from '../density-cluster'
 import type { DensityWall } from '../../types'
 
-const NOW = Date.parse('2026-01-01T00:10:00Z')
+const NOW = Date.parse('2026-01-01T01:00:00Z')
 
 function wall(bornAt: number, sizeUsdt: number): DensityWall {
   return {
@@ -17,43 +17,51 @@ function wall(bornAt: number, sizeUsdt: number): DensityWall {
   }
 }
 
-describe('density defaults', () => {
-  it('lifetime defaults are non-zero so transient walls are filtered', () => {
-    expect(DEFAULT_DENSITY_SETTINGS.lifeSmall).toBe(1)
-    expect(DEFAULT_DENSITY_SETTINGS.lifeMedium).toBe(3)
-    expect(DEFAULT_DENSITY_SETTINGS.lifeLarge).toBe(5)
+describe('density defaults (scalpboard parity)', () => {
+  it('tier multipliers and lifetimes match scalpboard bundle defaults', () => {
+    // tiers: [{large ×5}, {medium ×3.5}, {small ×2}], time:1800s = 30 min
+    expect(DEFAULT_DENSITY_SETTINGS.multSmall).toBe(2)
+    expect(DEFAULT_DENSITY_SETTINGS.multMedium).toBe(3.5)
+    expect(DEFAULT_DENSITY_SETTINGS.multLarge).toBe(5)
+    expect(DEFAULT_DENSITY_SETTINGS.lifeSmall).toBe(30)
+    expect(DEFAULT_DENSITY_SETTINGS.lifeMedium).toBe(30)
+    expect(DEFAULT_DENSITY_SETTINGS.lifeLarge).toBe(30)
+    expect(DEFAULT_DENSITY_SETTINGS.manualBrp).toBe(500_000)
   })
 
   it('resolveDensitySettings backfills missing fields with defaults', () => {
-    // Старые сохранённые настройки без life*-полей получают новые дефолты.
+    // Старые сохранённые настройки без новых полей получают дефолты scalpboard.
     const resolved = resolveDensitySettings({ mode: 'manual' })
-    expect(resolved.lifeSmall).toBe(1)
-    expect(resolved.lifeMedium).toBe(3)
-    expect(resolved.lifeLarge).toBe(5)
+    expect(resolved.multSmall).toBe(2)
+    expect(resolved.lifeSmall).toBe(30)
+    expect(resolved.lifeLarge).toBe(30)
   })
 })
 
-describe('calcTier lifetime gating', () => {
+describe('calcTier — spoof filtering (scalpboard math)', () => {
   const settings = resolveDensitySettings(undefined)
-  // autoBrp нет → БРП = manualBrp 300k; multSmall=1 →Small ≥ 300k.
+  // autoBrp нет → БРП = manualBrp 500K. Малая ≥ 1M, средняя ≥ 1.75M, большая ≥ 2.5M.
 
-  it('rejects a wall younger than lifeSmall regardless of size', () => {
-    // 30-секундная стена на 5М — «фейковая», не показывается.
-    expect(calcTier(wall(NOW - 30_000, 5_000_000), settings, null, NOW)).toBeUndefined()
+  it('rejects a fresh wall regardless of size — spoofers are filtered', () => {
+    // 30-секундная стена на 10М всё равно не показывается.
+    expect(calcTier(wall(NOW - 30_000, 10_000_000), settings, null, NOW)).toBeUndefined()
+    // и 29-минутная тоже
+    expect(calcTier(wall(NOW - 29 * 60_000, 10_000_000), settings, null, NOW)).toBeUndefined()
   })
 
-  it('accepts a small-tier wall once it has lived past lifeSmall', () => {
-    // 2 минуты, 400К: Small (≥300K, ≥1мин), но не Medium (≥600K).
-    expect(calcTier(wall(NOW - 2 * 60_000, 400_000), settings, null, NOW)).toBe(3)
+  it('accepts a wall once it has lived 30 minutes and cleared the size floor', () => {
+    // 31 минута, 1.2М: Малая (≥1M), но не Средняя (≥1.75M).
+    expect(calcTier(wall(NOW - 31 * 60_000, 1_200_000), settings, null, NOW)).toBe(3)
   })
 
-  it('promotes by age: medium requires 3 min, large requires 5 min', () => {
-    // 1.2М в 2 минуты: размер Medium, возраст — только Small.
-    expect(calcTier(wall(NOW - 2 * 60_000, 1_200_000), settings, null, NOW)).toBe(3)
-    // 1.2М в 4 минуты: Medium.
-    expect(calcTier(wall(NOW - 4 * 60_000, 1_200_000), settings, null, NOW)).toBe(2)
-    // 1.2М в 6 минут: Large (≥ 4×300К).
-    expect(calcTier(wall(NOW - 6 * 60_000, 1_200_000), settings, null, NOW)).toBe(1)
+  it('promotes purely by size once the lifetime gate is passed', () => {
+    expect(calcTier(wall(NOW - 31 * 60_000, 2_000_000), settings, null, NOW)).toBe(2)
+    expect(calcTier(wall(NOW - 31 * 60_000, 3_000_000), settings, null, NOW)).toBe(1)
+  })
+
+  it('walls below the small floor never show', () => {
+    // 800K < 1M (2 × 500K): «не больше обычных заявок» — не плотность.
+    expect(calcTier(wall(NOW - 31 * 60_000, 800_000), settings, null, NOW)).toBeUndefined()
   })
 })
 

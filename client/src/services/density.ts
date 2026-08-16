@@ -8,15 +8,17 @@ import type {
 
 export const DEFAULT_DENSITY_SETTINGS: DensitySettings = {
   mode: 'auto',
-  manualBrp: 300_000,
-  multSmall: 1,
-  multMedium: 2,
-  multLarge: 4,
-  // Мин. время жизни (мин) до попадания в тир: отсекает транзиентные
-  // «фейковые» стены, прожившие в стакане секунды.
-  lifeSmall: 1,
-  lifeMedium: 3,
-  lifeLarge: 5,
+  manualBrp: 500_000,
+  // scalpboard defaults (из бандла): tiers [{large ×5}, {medium ×3.5},
+  // {small ×2}], время жизни 1800 с = 30 минут на каждый тир. Плотность
+  // моложе 30 минут или меньше 2×БРП не показывается вообще — отсекает
+  // спуферов, ставящих и снимающих стены.
+  multSmall: 2,
+  multMedium: 3.5,
+  multLarge: 5,
+  lifeSmall: 30,
+  lifeMedium: 30,
+  lifeLarge: 30,
   perSymbol: {},
   zoomPct: 3,
   walls: false,

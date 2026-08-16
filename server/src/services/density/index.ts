@@ -22,8 +22,10 @@ const RESCAN_MS = parseInt(process.env.DENSITY_RESCAN_MS || '60000', 10)
 const STEP_PCT = parseFloat(process.env.DENSITY_STEP_PCT || '0.0005')
 const TOP_K_PER_SIDE = parseInt(process.env.DENSITY_TOP_K || '5', 10)
 const CAP_WALLS = parseInt(process.env.DENSITY_CAP || '1000', 10)
-const DEFAULT_BRP = parseFloat(process.env.DENSITY_DEFAULT_BRP || '300000')
-const MIN_MULT = parseFloat(process.env.DENSITY_MIN_MULT || '1')
+// scalpboard parity: БРП fallback 500K, minimum multiplier ×2 (their small
+// tier) — anything below 2×БРП is an ordinary order, not a density.
+const DEFAULT_BRP = parseFloat(process.env.DENSITY_DEFAULT_BRP || '500000')
+const MIN_MULT = parseFloat(process.env.DENSITY_MIN_MULT || '2')
 const WARMUP_MINUTES = parseInt(process.env.DENSITY_WARMUP_MINUTES || '60', 10)
 const AUTO_BRP_WINDOW_MINUTES = 24 * 60
 // How long an unseen wall keeps its identity (and bornAt) before it is truly
