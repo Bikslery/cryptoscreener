@@ -318,7 +318,13 @@ export function startDensityService(adapters: ExchangeAdapter[]): void {
   // Ops visibility: books/walls/snapshot size once a minute.
   setInterval(() => {
     const st = getDensityStats()
+    const topWalls = Array.from(walls.values())
+      .map((w) => w.wall)
+      .sort((a, b) => b.sizeUsdt - a.sizeUsdt)
+      .slice(0, 10)
+      .map((w) => `${w.symbol}:${w.exchange}:${w.side}@${w.price}(${Math.round(w.sizeUsdt / 1000)}k)`)
     console.log(`[Density] stats books=${st.books} subscribed=${st.subscribed} walls=${st.walls} snapshotWalls=${st.snapshotWalls}`)
+    console.log(`[Density] topWalls ${topWalls.join(' ')}`)
   }, 60_000)
 
   console.log(`[Density] started: topN=${TOP_N} tick=${TICK_MS}ms broadcast=${BROADCAST_MS}ms stepPct=${STEP_PCT}`)
