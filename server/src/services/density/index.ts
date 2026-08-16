@@ -325,6 +325,10 @@ export function startDensityService(adapters: ExchangeAdapter[]): void {
       .map((w) => `${w.symbol}:${w.exchange}:${w.side}@${w.price}(${Math.round(w.sizeUsdt / 1000)}k)`)
     console.log(`[Density] stats books=${st.books} subscribed=${st.subscribed} walls=${st.walls} snapshotWalls=${st.snapshotWalls}`)
     console.log(`[Density] topWalls ${topWalls.join(' ')}`)
+    try {
+      const fs = require('fs') as typeof import('fs')
+      fs.writeFileSync('/app/density-snapshot.json', JSON.stringify(lastSnapshot))
+    } catch { /* diagnostics only */ }
   }, 60_000)
 
   console.log(`[Density] started: topN=${TOP_N} tick=${TICK_MS}ms broadcast=${BROADCAST_MS}ms stepPct=${STEP_PCT}`)
