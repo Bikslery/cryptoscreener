@@ -2207,7 +2207,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
 
   useChartOverlays(candleRef, candlesDataRef, dataVersion, chartVersion, pricePrecision)
-  useDensityOverlay(candleRef, chartVersion, symbol, pricePrecision)
+  useDensityOverlay(candleRef, chartVersion, symbol, pricePrecision, exchange)
 
   const focusPrice = useCoinListStore(s => s.expandedFocusPrice)
   const clearFocusPrice = useCoinListStore(s => s.clearExpandedFocusPrice)

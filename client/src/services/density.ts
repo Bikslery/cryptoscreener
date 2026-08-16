@@ -12,9 +12,11 @@ export const DEFAULT_DENSITY_SETTINGS: DensitySettings = {
   multSmall: 1,
   multMedium: 2,
   multLarge: 4,
-  lifeSmall: 0,
-  lifeMedium: 0,
-  lifeLarge: 0,
+  // Мин. время жизни (мин) до попадания в тир: отсекает транзиентные
+  // «фейковые» стены, прожившие в стакане секунды.
+  lifeSmall: 1,
+  lifeMedium: 3,
+  lifeLarge: 5,
   perSymbol: {},
   zoomPct: 3,
   walls: false,

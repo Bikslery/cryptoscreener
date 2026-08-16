@@ -38,8 +38,6 @@ function withAlpha(color: string, alpha: number): string {
   return `rgba(${r},${g},${b},${alpha})`
 }
 
-let diagLogCount = 0
-
 export class DensityPrimitive implements ISeriesPrimitive<Time> {
   private _chart: IChartApi | null = null
   private _series: ISeriesApi<SeriesType> | null = null
@@ -135,12 +133,9 @@ class DensityPaneView implements IPrimitivePaneView {
         }
       }
 
-      let drawn = 0
-      let skippedY = 0
-      let skippedX = 0
       for (const s of data) {
         const y0 = series.priceToCoordinate(s.price)
-        if (y0 === null || !isFinite(y0)) { skippedY++; continue }
+        if (y0 === null || !isFinite(y0)) { continue }
 
         // The candle series paints SHIFTED times (toChartTime — local-tz
         // offset), so the wall's birth time must be asked in the same space.
@@ -156,13 +151,13 @@ class DensityPaneView implements IPrimitivePaneView {
           x0 = rawX
         } else {
           const range = timeScale.getVisibleRange()
-          if (!range || birthChartSec >= (range.from as number)) { skippedX++; continue }
+          if (!range || birthChartSec >= (range.from as number)) { continue }
           x0 = 0
         }
 
         const A = s.text.length * 6 + 8 + 8
         const p = width - A
-        if (x0 > p) { skippedX++; continue }
+        if (x0 > p) { continue }
 
         ctx.lineWidth = 1
         ctx.strokeStyle = s.color
@@ -188,19 +183,8 @@ class DensityPaneView implements IPrimitivePaneView {
 
         ctx.fillStyle = '#cccccc'
         ctx.fillText(s.text, p + BOX_PAD_X, boxY + BOX_PAD_TOP, boxW - BOX_PAD_X * 2)
-        drawn++
       }
       ctx.textBaseline = 'alphabetic'
-
-      const logged = diagLogCount
-      if (logged < 5) {
-        diagLogCount = logged + 1
-        const first = data[0]
-        const y0 = first ? series.priceToCoordinate(first.price) : null
-        const b0 = first ? toChartTime(first.birthTimeSec) : 0
-        const x0 = first ? chart.timeScale().timeToCoordinate((Math.floor(b0 / this._primitive.barStep()) * this._primitive.barStep()) as Time) : null
-        console.log(`[density-primitive] draw data=${data.length} drawn=${drawn} skippedY=${skippedY} skippedX=${skippedX} first=${first?.text ?? '-'} y0=${y0} x0=${x0} step=${this._primitive.barStep()} width=${width}`)
-      }
       })
     } catch (e) {
       console.error('[density-primitive] draw error:', e)

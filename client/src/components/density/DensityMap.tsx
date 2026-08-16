@@ -6,6 +6,7 @@ import {
   autoBrpMap,
   resolveDensitySettings,
   formatUsdt,
+  formatAge,
   EXCHANGE_BADGE,
 } from '../../services/density'
 import { clusterDensities, type DensityItem, type Tier } from '../../services/density-cluster'
@@ -13,6 +14,8 @@ import { hueIndexFor, claimHue, wallColor } from '../../utils/claimHue'
 import { extractBaseAsset } from '../../utils/format'
 
 const TIER_COUNT = 3
+/** Вертикальный шаг слота (в % высоты зоны) — блоки одной колонки не накладываются. */
+const SLOT_PCT = 6
 
 /** Строка карты: одна стена/плотность с позицией по тиру и расстоянию. */
 interface MapBlock {
@@ -21,6 +24,7 @@ interface MapBlock {
   exchange: DensityWall['exchange']
   side: 'bid' | 'ask'
   price: number
+  bornAt: number
   count: number
   sumUsdt: number
   distancePct: number
@@ -59,6 +63,7 @@ function buildBlocks(
       exchange,
       side,
       price,
+      bornAt: Math.min(...item.members.map(m => m.bornAt)),
       count: item.members.length,
       sumUsdt,
       distancePct,
@@ -115,21 +120,42 @@ export const DensityMap = memo(function DensityMap() {
     onWheelZoom(e.deltaY)
   }, [onWheelZoom])
 
-  const onClickBlock = useCallback((symbol: string, price: number) => {
-    expandChartAtPrice(symbol, price)
-  }, [expandChartAtPrice])
-
   const blocks = useMemo(
     () => buildBlocks(walls, autoBrps, settingsPatch, coinMap),
     [walls, autoBrps, settingsPatch, coinMap],
   )
 
+  /** Жадная раскладка по слотам внутри каждой (side, tier)-колонки. */
+  const slots = useMemo(() => {
+    const slotOf = new Map<MapBlock, number>()
+    const cols = new Map<string, MapBlock[]>()
+    for (const b of blocks) {
+      if (Math.abs(b.distancePct) > zoomPct) continue
+      const ck = `${b.side}:${b.tier}`
+      const arr = cols.get(ck)
+      if (arr) arr.push(b)
+      else cols.set(ck, [b])
+    }
+    for (const group of cols.values()) {
+      group.sort((a, b) => Math.abs(a.distancePct) - Math.abs(b.distancePct))
+      const used = new Set<number>()
+      for (const b of group) {
+        const yPct = Math.min(100, Math.max(0, (Math.abs(b.distancePct) / zoomPct) * 100))
+        let slot = Math.round(yPct / SLOT_PCT) * SLOT_PCT
+        while (used.has(slot) && slot < 100) slot += SLOT_PCT
+        used.add(slot)
+        slotOf.set(b, Math.min(slot, 100 - SLOT_PCT / 2))
+      }
+    }
+    return slotOf
+  }, [blocks, zoomPct])
+
   return (
     <div className="w-full h-full flex flex-col bg-[#0a0a0a]">
-      <div className="flex items-center justify-between px-3 h-[30px] border-b border-[#1f1f1f] bg-[#0e0e0e] flex-shrink-0 select-none">
-        <span className="text-[10px] font-medium text-[#888]">Плотности</span>
+      <div className="flex items-center justify-between px-3 h-[28px] border-b border-[#1f1f1f] bg-[#0e0e0e] flex-shrink-0 select-none">
+        <span className="text-[10px] font-medium text-[#888]">Карта плотностей</span>
         <span className="text-[9px] text-[#666]">
-          стен: {walls.length} · блоков: {blocks.length} · глубина {zoomPct.toFixed(1)}%
+          стен: {walls.length} · блоков: {slots.size} · глубина {zoomPct.toFixed(1)}%
         </span>
       </div>
 
@@ -153,51 +179,50 @@ export const DensityMap = memo(function DensityMap() {
           />
         ))}
 
-        {blocks.length === 0 && (
+        {slots.size === 0 && (
           <div className="absolute inset-0 flex items-center justify-center text-[10px] text-[#555]">
             Плотностей нет — сервер собирает стаканы…
           </div>
         )}
 
         {blocks.map((b) => {
+          const slot = slots.get(b)
+          if (slot === undefined) return null
           const key = `${b.exchange}:${b.symbol}:${b.side}:${b.price}:${b.tier}`
-          if (Math.abs(b.distancePct) > zoomPct) return null
           const colW = 100 / TIER_COUNT
           const left = colW * b.tier - colW / 2
-          const yPct = Math.min(100, Math.max(0, Math.abs(b.distancePct) / zoomPct * 100))
-          // ask zone: block bottom = 50% + yPct/2 of container; bid zone: same for top
-          const zonePos = 50 + yPct / 2
+          const zonePos = 50 + slot / 2
           const color = wallColor(b.hue, b.lOffset)
           const focused = focusedKey === key
           return (
             <button
               key={key}
-              className={`absolute flex flex-col items-start justify-center px-[3px] rounded-[2px] cursor-pointer border transition-[filter] text-left z-[5] ${
+              className={`absolute flex flex-col items-start justify-center px-[4px] rounded-[3px] cursor-pointer border transition-[filter] text-left z-[5] ${
                 focused ? 'brightness-150' : 'hover:brightness-150'
               }`}
               style={{
                 left: `${left}%`,
-                width: `${colW - 4}%`,
-                height: '20px',
+                width: `${colW - 6}%`,
+                height: '22px',
                 transform: 'translateX(-50%) translateY(-50%)',
                 bottom: b.side === 'ask' ? `${zonePos}%` : 'auto',
                 top: b.side === 'bid' ? `${zonePos}%` : 'auto',
                 background: color,
                 borderColor: color.replace(/0\.9\)$/, '1)'),
               }}
-              title={`${b.symbol} ${b.side === 'bid' ? 'BID' : 'ASK'} @ ${b.price} — ${formatUsdt(b.sumUsdt)} (${TIER_LABEL[b.tier]})`}
+              title={`${b.symbol} ${b.side === 'bid' ? 'BID' : 'ASK'} @ ${b.price} — ${formatUsdt(b.sumUsdt)} · ${TIER_LABEL[b.tier]} · ${formatAge(b.bornAt)}`}
               onMouseEnter={() => setFocusedKey(key)}
               onMouseLeave={() => setFocusedKey(null)}
-              onClick={() => onClickBlock(b.symbol, b.price)}
+              onClick={() => expandChartAtPrice(b.symbol, b.price)}
             >
-              <span className="w-full flex items-baseline gap-[3px] leading-[9px]">
-                <span className="truncate text-[9px] font-bold text-white/95">
+              <span className="w-full flex items-baseline gap-[3px] leading-[11px]">
+                <span className="truncate text-[10px] font-bold text-white/95">
                   {extractBaseAsset(b.symbol)}
                 </span>
                 {resolved.showMarket && (
                   <span className="text-[7px] text-white/70">{EXCHANGE_BADGE[b.exchange]}</span>
                 )}
-                <span className="ml-auto shrink-0 text-[8px] text-white/90">
+                <span className="ml-auto shrink-0 text-[9px] text-white/90">
                   {b.count > 1 ? `${b.count}·` : ''}{formatUsdt(b.sumUsdt)}
                 </span>
               </span>

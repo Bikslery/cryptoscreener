@@ -3,7 +3,7 @@ import type { Exchange, UnifiedDepth, DensityWall, DensitySnapshot } from '../..
 import { getTickers } from '../aggregator/index.js'
 import { broadcastToChannel, getChannelSubscriberCount } from '../../ws/hub.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
-import fs from 'fs'
+import { pickInheritCandidate, type InheritCandidate } from './wall-life.js'
 
 // --- Density engine -------------------------------------------------------
 // Every DENSITY_TICK_MS per symbol the current book state is clustered into
@@ -26,6 +26,12 @@ const DEFAULT_BRP = parseFloat(process.env.DENSITY_DEFAULT_BRP || '300000')
 const MIN_MULT = parseFloat(process.env.DENSITY_MIN_MULT || '1')
 const WARMUP_MINUTES = parseInt(process.env.DENSITY_WARMUP_MINUTES || '60', 10)
 const AUTO_BRP_WINDOW_MINUTES = 24 * 60
+// How long an unseen wall keeps its identity (and bornAt) before it is truly
+// deleted, and how far a wall may move price-wise to still count as the same
+// wall after its bucket index migrates with the mid price.
+const WALL_GRACE_MS = parseInt(process.env.DENSITY_WALL_GRACE_MS || '15000', 10)
+const WALL_GRACE_TICKS = Math.max(2, Math.ceil(WALL_GRACE_MS / TICK_MS))
+const MATCH_TOL_PCT = parseFloat(process.env.DENSITY_MATCH_TOL || '0.1')
 
 interface BookState {
   exchange: Exchange
@@ -38,7 +44,8 @@ interface BookState {
 
 interface WallState {
   wall: DensityWall
-  lastSeenTick: number
+  /** consecutive symbol-ticks without seeing the wall; 0 = seen at its last tick */
+  missedTicks: number
 }
 
 interface BrpRing {
@@ -194,12 +201,34 @@ function tickBook(state: BookState): void {
   for (const side of ['bid', 'ask'] as const) {
     for (const w of side === 'bid' ? bidWalls : askWalls) {
       const wk = `${k}:${side}:${w.idx}`
+      if (seen.has(wk)) continue
       seen.add(wk)
       const existing = walls.get(wk)
       if (existing) {
-        existing.lastSeenTick = tickCounter
+        existing.missedTicks = 0
         existing.wall.sizeUsdt = w.size
         existing.wall.price = w.price
+        continue
+      }
+      // The bucket grid is absolute (step = mid * STEP_PCT), so a moving mid
+      // re-buckets the SAME wall into a neighbouring idx. Inherit the nearby
+      // wall's identity (bornAt) instead of rebirthing it.
+      const prefix = `${k}:${side}:`
+      const candidates: InheritCandidate[] = []
+      for (const [ok, os] of walls) {
+        if (!ok.startsWith(prefix)) continue
+        if (seen.has(ok)) continue
+        candidates.push({ key: ok, price: os.wall.price, missedTicks: os.missedTicks })
+      }
+      const inheritKey = pickInheritCandidate(candidates, w.price, MATCH_TOL_PCT, WALL_GRACE_TICKS)
+      if (inheritKey !== null) {
+        const inherited = walls.get(inheritKey)!
+        walls.delete(inheritKey)
+        inherited.missedTicks = 0
+        inherited.wall.sizeUsdt = w.size
+        inherited.wall.price = w.price
+        inherited.wall.roundNumber = isRoundPrice(w.price)
+        walls.set(wk, inherited)
         continue
       }
       walls.set(wk, {
@@ -212,14 +241,18 @@ function tickBook(state: BookState): void {
           bornAt: Date.now(),
           roundNumber: isRoundPrice(w.price),
         },
-        lastSeenTick: tickCounter,
+        missedTicks: 0,
       })
     }
   }
-  // Expire walls not seen this tick.
+  // Age out unseen walls: the record (and its bornAt) survives the grace
+  // window so a briefly-flickering wall keeps its duration, and is deleted
+  // only after WALL_GRACE_TICKS consecutive misses.
   for (const [wk, ws] of walls) {
     if (!wk.startsWith(k + ':')) continue
-    if (ws.lastSeenTick !== tickCounter) walls.delete(wk)
+    if (seen.has(wk)) continue
+    ws.missedTicks++
+    if (ws.missedTicks > WALL_GRACE_TICKS) walls.delete(wk)
   }
 }
 
@@ -262,7 +295,14 @@ function rescanSymbols(adapters: ExchangeAdapter[]): void {
 }
 
 function buildSnapshot(): DensitySnapshot {
-  const all = Array.from(walls.values()).map(w => w.wall)
+  // Only walls seen at their symbol's latest tick are broadcast: an eaten
+  // wall must vanish from the chart immediately, while it lingers in the
+  // walls map through its grace window to keep bornAt.
+  const all = []
+  for (const ws of walls.values()) {
+    if (ws.missedTicks > 0) continue
+    all.push(ws.wall)
+  }
   all.sort((a, b) => b.sizeUsdt - a.sizeUsdt)
   const capped = all.slice(0, CAP_WALLS)
   const autoBrps = Array.from(brpRings.entries()).map(([k, ring]) => {
@@ -276,9 +316,12 @@ function buildSnapshot(): DensitySnapshot {
 
 function publishSnapshot(): void {
   lastSnapshot = buildSnapshot()
-  if (lastSnapshot.walls.length === 0) return
+  // Broadcast even when empty: clients must clear walls that disappeared,
+  // otherwise they would keep rendering stale densities forever.
   broadcastToChannel('density', lastSnapshot, true)
-  console.log(`[Density] publish walls=${lastSnapshot.walls.length} wsClients=${getChannelSubscriberCount('density')}`)
+  if (lastSnapshot.walls.length > 0) {
+    console.log(`[Density] publish walls=${lastSnapshot.walls.length} wsClients=${getChannelSubscriberCount('density')}`)
+  }
   if (REDIS_ENABLED) {
     try {
       getRedisPub().publish('density', JSON.stringify(lastSnapshot)).catch(() => {})
@@ -317,27 +360,14 @@ export function startDensityService(adapters: ExchangeAdapter[]): void {
 
   broadcastTimer = setInterval(publishSnapshot, BROADCAST_MS)
 
-  // Ops visibility: books/walls/snapshot size once a minute.
+  // Ops visibility: one compact line per minute.
   setInterval(() => {
     const st = getDensityStats()
-    const nonEmptyByEx = new Map<string, number>()
-    for (const [k, state] of books) {
-      if (state.bids.size > 0 || state.asks.size > 0) {
-        const ex = k.split(':')[0]
-        nonEmptyByEx.set(ex, (nonEmptyByEx.get(ex) ?? 0) + 1)
-      }
+    let nonEmpty = 0
+    for (const state of books.values()) {
+      if (state.bids.size > 0 || state.asks.size > 0) nonEmpty++
     }
-    const topWalls = Array.from(walls.values())
-      .map((w) => w.wall)
-      .sort((a, b) => b.sizeUsdt - a.sizeUsdt)
-      .slice(0, 10)
-      .map((w) => `${w.symbol}:${w.exchange}:${w.side}@${w.price}(${Math.round(w.sizeUsdt / 1000)}k)`)
-    console.log(`[Density] stats books=${st.books} subscribed=${st.subscribed} walls=${st.walls} snapshotWalls=${st.snapshotWalls}`)
-    console.log(`[Density] booksNonEmpty=${JSON.stringify(Array.from(nonEmptyByEx.entries()))}`)
-    console.log(`[Density] topWalls ${topWalls.join(' ')}`)
-    try {
-      fs.writeFileSync('/app/density-snapshot.json', JSON.stringify(lastSnapshot))
-    } catch { /* diagnostics only */ }
+    console.log(`[Density] stats books=${st.books} (nonEmpty=${nonEmpty}) subscribed=${st.subscribed} walls=${st.walls} snapshotWalls=${st.snapshotWalls}`)
   }, 60_000)
 
   console.log(`[Density] started: topN=${TOP_N} tick=${TICK_MS}ms broadcast=${BROADCAST_MS}ms stepPct=${STEP_PCT}`)
@@ -362,4 +392,35 @@ export function getDensityStats() {
     snapshotWalls: lastSnapshot.walls.length,
     snapshotTs: lastSnapshot.ts,
   }
+}
+
+/** Direct access to the engine's internals for tests (no timers, no IO). */
+export const __test = {
+  reset(): void {
+    books.clear()
+    walls.clear()
+    brpRings.clear()
+    subscribed.clear()
+    tickCounter = 0
+    lastSnapshot = { ts: 0, walls: [], autoBrps: [] }
+  },
+  seedBook(exchange: Exchange, symbol: string, mid: number): void {
+    books.set(key(exchange, symbol), { exchange, symbol, bids: new Map(), asks: new Map(), mid, dirty: true })
+  },
+  feed(depth: UnifiedDepth): void {
+    onDepth(depth)
+  },
+  /** One full pass: tick every dirty book once (like one engine cycle). */
+  tick(): void {
+    for (const state of books.values()) {
+      if (state.dirty) tickBook(state)
+    }
+  },
+  /** All wall records incl. grace ones: [key, wall, missedTicks]. */
+  wallStates(): { key: string; wall: DensityWall; missedTicks: number }[] {
+    return Array.from(walls.entries()).map(([key, ws]) => ({ key, wall: ws.wall, missedTicks: ws.missedTicks }))
+  },
+  publish(): void {
+    publishSnapshot()
+  },
 }

@@ -7,10 +7,12 @@ import {
   autoBrpMap,
   resolveDensitySettings,
   formatUsdt,
+  formatAge,
   EXCHANGE_BADGE,
 } from '../../../services/density'
 import { calcTier } from '../../../services/density-cluster'
 import { DensityPrimitive, type DensityLineSpec } from './DensityPrimitive'
+import type { Exchange } from '../../../types'
 
 /** density color scheme (scalpboard): bid green, ask red */
 const DENSITY_DOWN = '#43c743'
@@ -18,14 +20,17 @@ const DENSITY_UP = '#c74343'
 
 /**
  * Attaches the density (orderbook walls) primitive to the expanded chart.
- * Walls come from the global density snapshot, filtered by symbol; a wall is
- * drawn only when it reaches at least the Small tier (user's settings).
+ * Walls come from the global density snapshot, filtered by symbol AND the
+ * chart's exchange (a wall's price belongs to that venue's book); a wall is
+ * drawn only when it reaches at least the Small tier, which requires it to
+ * have lived past the tier's minimum lifetime.
  */
 export function useDensityOverlay(
   candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
   chartVersion: number,
   symbol: string,
   pricePrecision: number,
+  exchange: Exchange | undefined,
 ): void {
   const primitiveRef = useRef<DensityPrimitive | null>(null)
   const walls = useDensityStore(s => s.walls)
@@ -62,10 +67,9 @@ export function useDensityOverlay(
     const brps = autoBrpMap({ ts: 0, walls, autoBrps })
     const now = Date.now()
     const specs: DensityLineSpec[] = []
-    let forSymbol = 0
     for (const wall of walls) {
       if (wall.symbol !== symbol) continue
-      forSymbol++
+      if (exchange && wall.exchange !== exchange) continue
       if (wall.bornAt - now > 60_000) continue
       const tier = calcTier(wall, settings, brps.get(`${wall.exchange}:${wall.symbol}`) ?? null, now)
       if (tier === undefined) continue
@@ -73,11 +77,10 @@ export function useDensityOverlay(
         price: wall.price,
         birthTimeSec: Math.floor(wall.bornAt / 1000),
         color: wall.side === 'bid' ? DENSITY_DOWN : DENSITY_UP,
-        text: `${EXCHANGE_BADGE[wall.exchange]} ${formatUsdt(wall.sizeUsdt)} ${wall.price.toFixed(pricePrecision)}`,
+        text: `${EXCHANGE_BADGE[wall.exchange]} ${formatUsdt(wall.sizeUsdt)} ${wall.price.toFixed(pricePrecision)} ${formatAge(wall.bornAt, now)}`,
         baseline: wall.side === 'ask' ? 'bottom' : 'top',
       })
     }
-    console.log(`[density-overlay] symbol=${symbol} wallsTotal=${walls.length} forSymbol=${forSymbol} specs=${specs.length} show=${showDensities}`)
     prim.update(specs, pricePrecision)
-  }, [walls, autoBrps, settingsPatch, showDensities, symbol, pricePrecision, chartVersion])
+  }, [walls, autoBrps, settingsPatch, showDensities, symbol, pricePrecision, exchange, chartVersion])
 }

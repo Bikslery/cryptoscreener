@@ -1093,6 +1093,60 @@ export default function ProfileModal() {
           </div>
 
           <div className="profile-field">
+            <label>Время жизни малой категории, мин</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0}
+                max={30}
+                step={1}
+                value={density.lifeSmall}
+                onChange={(e) => saveDensity({ ...density, lifeSmall: Number(e.target.value) })}
+                className="profile-scale-slider"
+                data-testid="density-life-small"
+              />
+              <span className="profile-scale-value">{density.lifeSmall} мин</span>
+            </div>
+            <div className="profile-scale-hint">Плотность должна прожить столько, чтобы попасть в категорию (0 — без ограничения)</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Время жизни средней категории, мин</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0}
+                max={30}
+                step={1}
+                value={density.lifeMedium}
+                onChange={(e) => saveDensity({ ...density, lifeMedium: Number(e.target.value) })}
+                className="profile-scale-slider"
+                data-testid="density-life-medium"
+              />
+              <span className="profile-scale-value">{density.lifeMedium} мин</span>
+            </div>
+            <div className="profile-scale-hint">Отсекает транзиентные «фейковые» стены</div>
+          </div>
+
+          <div className="profile-field">
+            <label>Время жизни большой категории, мин</label>
+            <div className="profile-scale-row">
+              <input
+                type="range"
+                min={0}
+                max={30}
+                step={1}
+                value={density.lifeLarge}
+                onChange={(e) => saveDensity({ ...density, lifeLarge: Number(e.target.value) })}
+                className="profile-scale-slider"
+                data-testid="density-life-large"
+              />
+              <span className="profile-scale-value">{density.lifeLarge} мин</span>
+            </div>
+            <div className="profile-scale-hint">Большой считается только устоявшаяся стена</div>
+          </div>
+
+          <div className="profile-field">
             <label>Индивидуальный БРП на символ</label>
             {Object.keys(density.perSymbol).length > 0 && (
               <div className="indicator-order-row" style={{ flexWrap: 'wrap', gap: '4px' }}>

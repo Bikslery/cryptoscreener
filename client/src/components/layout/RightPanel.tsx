@@ -1,7 +1,7 @@
 import { useState, memo } from 'react'
 import { CoinList } from '../coinlist/CoinList'
 import { AlertStack } from '../alerts/AlertStack'
-import { DensityMap } from '../density/DensityMap'
+import { DensityPanel } from '../density/DensityPanel'
 
 type Tab = 'charts' | 'map' | 'alerts'
 
@@ -30,7 +30,7 @@ export const RightPanel = memo(function RightPanel({ width }: { width: number })
           }`}
           onClick={() => setTab('map')}
         >
-          Карта
+          Плотности
         </button>
         <button
           className={`flex-1 h-full text-[11px] font-medium cursor-pointer border-b-2 transition-all ${
@@ -47,7 +47,7 @@ export const RightPanel = memo(function RightPanel({ width }: { width: number })
       {/* Content */}
       <div className="flex-1 overflow-hidden">
         {tab === 'charts' && <CoinList />}
-        {tab === 'map' && <DensityMap />}
+        {tab === 'map' && <DensityPanel />}
         {tab === 'alerts' && <AlertStack />}
       </div>
     </div>
