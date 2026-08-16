@@ -128,7 +128,9 @@ export const DensityMap = memo(function DensityMap() {
     <div className="w-full h-full flex flex-col bg-[#0a0a0a]">
       <div className="flex items-center justify-between px-3 h-[30px] border-b border-[#1f1f1f] bg-[#0e0e0e] flex-shrink-0 select-none">
         <span className="text-[10px] font-medium text-[#888]">Плотности</span>
-        <span className="text-[9px] text-[#555]">Shift+колесо — глубина {zoomPct.toFixed(1)}%</span>
+        <span className="text-[9px] text-[#666]">
+          стен: {walls.length} · блоков: {blocks.length} · глубина {zoomPct.toFixed(1)}%
+        </span>
       </div>
 
       <div

@@ -40,6 +40,12 @@ export function useDensityOverlay(
     series.attachPrimitive(prim)
     primitiveRef.current = prim
     return () => {
+      // MUST detach: a primitive left attached to a disposed chart throws
+      // "Object is disposed" from the chart's resize/render loop and breaks
+      // the whole pane's painting.
+      try {
+        series.detachPrimitive(prim)
+      } catch { /* already disposed */ }
       primitiveRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -56,9 +62,10 @@ export function useDensityOverlay(
     const brps = autoBrpMap({ ts: 0, walls, autoBrps })
     const now = Date.now()
     const specs: DensityLineSpec[] = []
+    let forSymbol = 0
     for (const wall of walls) {
       if (wall.symbol !== symbol) continue
-      // tolerate up to 1 min of server/client clock skew
+      forSymbol++
       if (wall.bornAt - now > 60_000) continue
       const tier = calcTier(wall, settings, brps.get(`${wall.exchange}:${wall.symbol}`) ?? null, now)
       if (tier === undefined) continue
@@ -70,6 +77,7 @@ export function useDensityOverlay(
         baseline: wall.side === 'ask' ? 'bottom' : 'top',
       })
     }
+    console.log(`[density-overlay] symbol=${symbol} wallsTotal=${walls.length} forSymbol=${forSymbol} specs=${specs.length} show=${showDensities}`)
     prim.update(specs, pricePrecision)
   }, [walls, autoBrps, settingsPatch, showDensities, symbol, pricePrecision, chartVersion])
 }

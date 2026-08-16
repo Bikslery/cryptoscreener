@@ -2,6 +2,7 @@ import type {
   IChartApi, ISeriesApi, ISeriesPrimitive, IPrimitivePaneView, IPrimitivePaneRenderer,
   SeriesAttachedParameter, SeriesType, Time,
 } from 'lightweight-charts'
+import { toChartTime } from '../../../services/candle-events'
 
 /**
  * Density (orderbook walls) renderer — horizontal lines at wall prices,
@@ -36,6 +37,8 @@ function withAlpha(color: string, alpha: number): string {
   const b = n & 255
   return `rgba(${r},${g},${b},${alpha})`
 }
+
+let diagLogCount = 0
 
 export class DensityPrimitive implements ISeriesPrimitive<Time> {
   private _chart: IChartApi | null = null
@@ -103,34 +106,42 @@ class DensityPaneView implements IPrimitivePaneView {
     const data = this._primitive.data()
     if (!chart || !series || !data) return
 
-    target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+    // A primitive renderer runs inside the chart's paint loop — an exception
+    // here aborts the frame and can break the whole pane. Guard defensively.
+    try {
+      target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
       const width = mediaSize.width
       ctx.font = `300 ${FONT_SIZE}px ${FONT}`
       ctx.textAlign = 'left'
       ctx.textBaseline = 'top'
 
+      let drawn = 0
+      let skippedY = 0
+      let skippedX = 0
       for (const s of data) {
         const y0 = series.priceToCoordinate(s.price)
-        if (y0 === null || !isFinite(y0)) continue
+        if (y0 === null || !isFinite(y0)) { skippedY++; continue }
 
-        // Line starts when the wall was born. timeToCoordinate returns null
-        // when the time maps outside the loaded data: if the birth is BEFORE
-        // the visible range the line continues from the left edge, otherwise
-        // (born in the future — impossible) it is skipped.
+        // The candle series paints SHIFTED times (toChartTime — local-tz
+        // offset), so the wall's birth time must be asked in the same space,
+        // or the lookup misses/collides (lightweight-charts returns null for
+        // out-of-range times). Without the shift, walls born in the last
+        // hours fall outside the shifted range and get skipped entirely.
         const timeScale = chart.timeScale()
-        const rawX = timeScale.timeToCoordinate(s.birthTimeSec as Time)
+        const birthChartSec = toChartTime(s.birthTimeSec)
+        const rawX = timeScale.timeToCoordinate(birthChartSec as Time)
         let x0: number
         if (rawX !== null && isFinite(rawX)) {
           x0 = rawX
         } else {
           const range = timeScale.getVisibleRange()
-          if (!range || s.birthTimeSec >= (range.from as number)) continue
+          if (!range || birthChartSec >= (range.from as number)) { skippedX++; continue }
           x0 = 0
         }
 
         const A = s.text.length * 6 + 8 + 8
         const p = width - A
-        if (x0 > p) continue
+        if (x0 > p) { skippedX++; continue }
 
         ctx.lineWidth = 1
         ctx.strokeStyle = s.color
@@ -156,8 +167,21 @@ class DensityPaneView implements IPrimitivePaneView {
 
         ctx.fillStyle = '#cccccc'
         ctx.fillText(s.text, p + BOX_PAD_X, boxY + BOX_PAD_TOP, boxW - BOX_PAD_X * 2)
+        drawn++
       }
       ctx.textBaseline = 'alphabetic'
-    })
+
+      const logged = diagLogCount
+      if (logged < 5) {
+        diagLogCount = logged + 1
+        const first = data[0]
+        const y0 = first ? series.priceToCoordinate(first.price) : null
+        const x0 = first ? chart.timeScale().timeToCoordinate(toChartTime(first.birthTimeSec) as Time) : null
+        console.log(`[density-primitive] draw data=${data.length} drawn=${drawn} skippedY=${skippedY} skippedX=${skippedX} first=${first?.text ?? '-'} y0=${y0} x0=${x0} width=${width}`)
+      }
+      })
+    } catch (e) {
+      console.error('[density-primitive] draw error:', e)
+    }
   }
 }
