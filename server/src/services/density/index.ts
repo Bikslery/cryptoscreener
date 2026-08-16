@@ -1,8 +1,9 @@
 import type { ExchangeAdapter, DepthCallback } from '../exchanges/types.js'
 import type { Exchange, UnifiedDepth, DensityWall, DensitySnapshot } from '../../types.js'
 import { getTickers } from '../aggregator/index.js'
-import { broadcastToChannel } from '../../ws/hub.js'
+import { broadcastToChannel, getChannelSubscriberCount } from '../../ws/hub.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
+import fs from 'fs'
 
 // --- Density engine -------------------------------------------------------
 // Every DENSITY_TICK_MS per symbol the current book state is clustered into
@@ -22,7 +23,7 @@ const STEP_PCT = parseFloat(process.env.DENSITY_STEP_PCT || '0.0005')
 const TOP_K_PER_SIDE = parseInt(process.env.DENSITY_TOP_K || '5', 10)
 const CAP_WALLS = parseInt(process.env.DENSITY_CAP || '1000', 10)
 const DEFAULT_BRP = parseFloat(process.env.DENSITY_DEFAULT_BRP || '300000')
-const MIN_MULT = parseFloat(process.env.DENSITY_MIN_MULT || '2')
+const MIN_MULT = parseFloat(process.env.DENSITY_MIN_MULT || '1')
 const WARMUP_MINUTES = parseInt(process.env.DENSITY_WARMUP_MINUTES || '60', 10)
 const AUTO_BRP_WINDOW_MINUTES = 24 * 60
 
@@ -277,6 +278,7 @@ function publishSnapshot(): void {
   lastSnapshot = buildSnapshot()
   if (lastSnapshot.walls.length === 0) return
   broadcastToChannel('density', lastSnapshot, true)
+  console.log(`[Density] publish walls=${lastSnapshot.walls.length} wsClients=${getChannelSubscriberCount('density')}`)
   if (REDIS_ENABLED) {
     try {
       getRedisPub().publish('density', JSON.stringify(lastSnapshot)).catch(() => {})
@@ -318,15 +320,22 @@ export function startDensityService(adapters: ExchangeAdapter[]): void {
   // Ops visibility: books/walls/snapshot size once a minute.
   setInterval(() => {
     const st = getDensityStats()
+    const nonEmptyByEx = new Map<string, number>()
+    for (const [k, state] of books) {
+      if (state.bids.size > 0 || state.asks.size > 0) {
+        const ex = k.split(':')[0]
+        nonEmptyByEx.set(ex, (nonEmptyByEx.get(ex) ?? 0) + 1)
+      }
+    }
     const topWalls = Array.from(walls.values())
       .map((w) => w.wall)
       .sort((a, b) => b.sizeUsdt - a.sizeUsdt)
       .slice(0, 10)
       .map((w) => `${w.symbol}:${w.exchange}:${w.side}@${w.price}(${Math.round(w.sizeUsdt / 1000)}k)`)
     console.log(`[Density] stats books=${st.books} subscribed=${st.subscribed} walls=${st.walls} snapshotWalls=${st.snapshotWalls}`)
+    console.log(`[Density] booksNonEmpty=${JSON.stringify(Array.from(nonEmptyByEx.entries()))}`)
     console.log(`[Density] topWalls ${topWalls.join(' ')}`)
     try {
-      const fs = require('fs') as typeof import('fs')
       fs.writeFileSync('/app/density-snapshot.json', JSON.stringify(lastSnapshot))
     } catch { /* diagnostics only */ }
   }, 60_000)

@@ -9,9 +9,9 @@ import type {
 export const DEFAULT_DENSITY_SETTINGS: DensitySettings = {
   mode: 'auto',
   manualBrp: 300_000,
-  multSmall: 2,
-  multMedium: 3.5,
-  multLarge: 5,
+  multSmall: 1,
+  multMedium: 2,
+  multLarge: 4,
   lifeSmall: 0,
   lifeMedium: 0,
   lifeLarge: 0,

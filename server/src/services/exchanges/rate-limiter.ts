@@ -107,6 +107,14 @@ export class BinanceRateLimiter {
   }
 
   isOverThreshold(): boolean {
+    return this.isOverRatio(WEIGHT_THRESHOLD_RATIO)
+  }
+
+  /** Same as isOverThreshold but with a custom ratio of the weight limit.
+   *  Depth snapshots use 0.95: they must yield to candle history (which
+   *  stops at 0.8), so snapshots only pause when the exchange is truly
+   *  about to 429 the IP. */
+  isOverRatio(ratio: number): boolean {
     // Weight windows expire after 60s. When every poller skips because we're
     // over the threshold, no request refreshes the weight and the limiter is
     // stuck over-threshold forever (a self-sustaining deadlock after any burst
@@ -117,7 +125,7 @@ export class BinanceRateLimiter {
     if (Date.now() - this.lastWeightUpdatedAt > 60_000) {
       this.currentWeight = 0
     }
-    return this.currentWeight >= this.limit * WEIGHT_THRESHOLD_RATIO
+    return this.currentWeight >= this.limit * ratio
   }
 
   isThrottled(): boolean {

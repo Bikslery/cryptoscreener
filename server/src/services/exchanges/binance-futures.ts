@@ -574,22 +574,36 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   }
 
   /** Diff-depth assembly: seed the local book with a REST snapshot, then
-   *  replay buffered diff events (Binance's standard snapshot+delta dance). */
+   *  replay buffered diff events (Binance's standard snapshot+delta dance).
+   *  A 100-level seed is enough — WS diffs grow the book from there. */
   private async initDepthBook(symbol: string) {
     if (this.depthBookLoading.has(symbol)) return
     this.depthBookLoading.add(symbol)
     try {
-      const snap = await this.fetchDepth(symbol, 1000)
+      const snap = await this.fetchDepth(symbol, 100)
       const book = this.depthBooks.get(symbol) ?? new BinanceDepthBook()
       this.depthBooks.set(symbol, book)
       if (snap.bids.length > 0 && typeof snap.lastUpdateId === 'number') {
         book.setSnapshot(snap.bids, snap.asks, snap.lastUpdateId)
       }
     } catch {
-      // snapshot failed — retry on the next diff event gap or subscription
+      // snapshot failed — the retry loop re-seeds
     } finally {
       this.depthBookLoading.delete(symbol)
+      this.scheduleDepthBookRetry(symbol)
     }
+  }
+
+  /** Budget-gated snapshots can be skipped for a long time under heavy
+   *  history churn; keep re-seeding until the book syncs (stops on its own
+   *  once synced or unsubscribed). */
+  private scheduleDepthBookRetry(symbol: string) {
+    const book = this.depthBooks.get(symbol)
+    if (!book || book.synced) return
+    setTimeout(() => {
+      const cur = this.depthBooks.get(symbol)
+      if (this.depthSubs.has(symbol) && cur && !cur.synced) this.initDepthBook(symbol)
+    }, 15_000)
   }
 
   private handleDepthMsg(msg: any): UnifiedDepth | null {
@@ -767,15 +781,16 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   }
 
   async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
-    // Never queue while the exchange is throttled or already over threshold —
-    // snapshots must yield to candle history (charts) instead of starving it.
-    if (this.rateLimiter.isThrottled() || this.rateLimiter.isOverThreshold()) {
+    // Snapshots yield to candle history (charts): skip when throttled or
+    // when the exchange is nearly at its limit (95%) — but otherwise proceed,
+    // so depth seeding can't be starved by history churn.
+    if (this.rateLimiter.isThrottled() || this.rateLimiter.isOverRatio(0.95)) {
       return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() }
     }
     const empty = { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() } as UnifiedDepth
     return withDepthSnapshotSlot(async () => {
       await this.rateLimiter.waitIfThrottled()
-      if (this.rateLimiter.isOverThreshold()) return empty
+      if (this.rateLimiter.isOverRatio(0.95)) return empty
       const url = `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol}&limit=${limit}`
       try {
         const res = await fetchWithTimeout(url, 10000, this.fetchDispatcher)

@@ -71,6 +71,14 @@ export function getHubDropDiag() {
   return { ...dropDiag }
 }
 
+export function getChannelSubscriberCount(channel: string): number {
+  let n = 0
+  for (const client of clients.values()) {
+    if (client.subscriptions.has(channel)) n++
+  }
+  return n
+}
+
 const CLIENT_PING_INTERVAL = 30_000
 let clientPingTimer: ReturnType<typeof setInterval> | null = null
 
