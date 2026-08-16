@@ -54,7 +54,7 @@ function wall(overrides: Partial<DensityWall> = {}): DensityWall {
     side: 'ask',
     price: 101,
     sizeUsdt: 1_200_000,
-    bornAt: Date.now() - 35 * 60_000, // 35 минут назад — пережила 30-мин порог
+    bornAt: Date.now() - 6 * 60_000, // 6 минут назад — пережила 5-мин порог
     roundNumber: false,
     ...overrides,
   }
@@ -80,15 +80,15 @@ describe('DensityList', () => {
     expect(screen.getAllByText('BI-F').length).toBe(2)
     expect(screen.getByText('1.20M')).toBeTruthy()
     expect(screen.getByText('2.00M')).toBeTruthy()
-    // возраст ~35 минут
-    expect(screen.getAllByText('35м').length).toBe(2)
+    // возраст ~6 минут
+    expect(screen.getAllByText('6м').length).toBe(2)
   })
 
-  it('hides walls that have not lived past the 30-minute tier lifetime', () => {
+  it('hides walls that have not lived past the 5-minute tier lifetime', () => {
     densityState.walls = [
       wall({ bornAt: Date.now() - 10_000 }), // 10 секунд — спуф
-      wall({ bornAt: Date.now() - 10 * 60_000 }), // 10 минут — ещё молодая
-      wall({ bornAt: Date.now() - 35 * 60_000 }), // 35 минут — устоявшаяся
+      wall({ bornAt: Date.now() - 3 * 60_000 }), // 3 минуты — ещё молодая
+      wall({ bornAt: Date.now() - 6 * 60_000 }), // 6 минут — устоявшаяся
     ]
     render(<DensityList />)
 

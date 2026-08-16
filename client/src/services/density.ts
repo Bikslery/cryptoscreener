@@ -9,16 +9,15 @@ import type {
 export const DEFAULT_DENSITY_SETTINGS: DensitySettings = {
   mode: 'auto',
   manualBrp: 500_000,
-  // scalpboard defaults (из бандла): tiers [{large ×5}, {medium ×3.5},
-  // {small ×2}], время жизни 1800 с = 30 минут на каждый тир. Плотность
-  // моложе 30 минут или меньше 2×БРП не показывается вообще — отсекает
-  // спуферов, ставящих и снимающих стены.
+  // scalpboard-математика тиров (×2/×3.5/×5 из их бандла), но время жизни
+  // по просьбе пользователя 5 минут вместо их 30: плотность должна 5 минут
+  // простоять на месте, чтобы появиться — спуф-фильтр + терпимое ожидание.
   multSmall: 2,
   multMedium: 3.5,
   multLarge: 5,
-  lifeSmall: 30,
-  lifeMedium: 30,
-  lifeLarge: 30,
+  lifeSmall: 5,
+  lifeMedium: 5,
+  lifeLarge: 5,
   perSymbol: {},
   zoomPct: 3,
   walls: false,
