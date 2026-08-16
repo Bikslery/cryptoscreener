@@ -47,6 +47,8 @@ export class DensityPrimitive implements ISeriesPrimitive<Time> {
   private _data: DensityLineSpec[] | null = null
   private _pricePrecision = 2
   private _view: DensityPaneView
+  private _barStep = 300
+  private _barStepKey = ''
 
   constructor() {
     this._view = new DensityPaneView(this)
@@ -79,6 +81,10 @@ export class DensityPrimitive implements ISeriesPrimitive<Time> {
   series(): ISeriesApi<SeriesType> | null { return this._series }
   data(): DensityLineSpec[] | null { return this._data }
   pricePrecision(): number { return this._pricePrecision }
+  barStep(): number { return this._barStep }
+  barStepSet(step: number): void { this._barStep = step }
+  barStepKey(): string { return this._barStepKey }
+  barStepKeySet(k: string): void { this._barStepKey = k }
 }
 
 interface CanvasTarget {
@@ -115,6 +121,20 @@ class DensityPaneView implements IPrimitivePaneView {
       ctx.textAlign = 'left'
       ctx.textBaseline = 'top'
 
+      // Bar step (seconds) from the series' last two bars — cached until the
+      // bars change. Needed to snap wall births to bar-aligned times.
+      const sd = series.data()
+      if (sd.length >= 2) {
+        const t1 = sd[sd.length - 1].time as number
+        const t2 = sd[sd.length - 2].time as number
+        const key = `${t1}:${t2}`
+        if (key !== this._primitive.barStepKey()) {
+          this._primitive.barStepKeySet(key)
+          const step = Math.abs(t1 - t2)
+          if (isFinite(step) && step > 0) this._primitive.barStepSet(step)
+        }
+      }
+
       let drawn = 0
       let skippedY = 0
       let skippedX = 0
@@ -123,13 +143,14 @@ class DensityPaneView implements IPrimitivePaneView {
         if (y0 === null || !isFinite(y0)) { skippedY++; continue }
 
         // The candle series paints SHIFTED times (toChartTime — local-tz
-        // offset), so the wall's birth time must be asked in the same space,
-        // or the lookup misses/collides (lightweight-charts returns null for
-        // out-of-range times). Without the shift, walls born in the last
-        // hours fall outside the shifted range and get skipped entirely.
+        // offset), so the wall's birth time must be asked in the same space.
+        // v5.2.0's timeToCoordinate has no findNearest: it returns null for
+        // any non-bar-aligned time, so snap the birth to the containing bar
+        // (scalpboard semantics: the line starts at the birth bar).
         const timeScale = chart.timeScale()
         const birthChartSec = toChartTime(s.birthTimeSec)
-        const rawX = timeScale.timeToCoordinate(birthChartSec as Time)
+        const birthBarSec = Math.floor(birthChartSec / this._primitive.barStep()) * this._primitive.barStep()
+        const rawX = timeScale.timeToCoordinate(birthBarSec as Time)
         let x0: number
         if (rawX !== null && isFinite(rawX)) {
           x0 = rawX
@@ -176,8 +197,9 @@ class DensityPaneView implements IPrimitivePaneView {
         diagLogCount = logged + 1
         const first = data[0]
         const y0 = first ? series.priceToCoordinate(first.price) : null
-        const x0 = first ? chart.timeScale().timeToCoordinate(toChartTime(first.birthTimeSec) as Time) : null
-        console.log(`[density-primitive] draw data=${data.length} drawn=${drawn} skippedY=${skippedY} skippedX=${skippedX} first=${first?.text ?? '-'} y0=${y0} x0=${x0} width=${width}`)
+        const b0 = first ? toChartTime(first.birthTimeSec) : 0
+        const x0 = first ? chart.timeScale().timeToCoordinate((Math.floor(b0 / this._primitive.barStep()) * this._primitive.barStep()) as Time) : null
+        console.log(`[density-primitive] draw data=${data.length} drawn=${drawn} skippedY=${skippedY} skippedX=${skippedX} first=${first?.text ?? '-'} y0=${y0} x0=${x0} step=${this._primitive.barStep()} width=${width}`)
       }
       })
     } catch (e) {
