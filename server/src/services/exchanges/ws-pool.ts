@@ -3,6 +3,9 @@ import type { Agent } from 'http'
 
 const MAX_STREAMS_PER_CONN = 200
 
+/** Verbose per-message progress logs — opt-in via env (same flag as candle manager). */
+const DIAG_LOG = process.env.DIAG_LOG === '1'
+
 interface PoolConn {
   ws: WebSocket | null
   streams: Set<string>
@@ -198,7 +201,10 @@ export class WsStreamPool {
       try {
         const msg = JSON.parse(raw.toString())
         this.msgCount++
-        if (this.msgCount <= 3 || this.msgCount % 1000 === 0) {
+        // Per-1000-messages progress logs spam hard on high-frequency pools
+        // (bookTicker/aggTrade push thousands of msgs/s) and cost real CPU
+        // on small boxes — keep them behind DIAG_LOG=1.
+        if (DIAG_LOG && (this.msgCount <= 3 || this.msgCount % 1000 === 0)) {
           console.log(`[${this.name}] msg #${this.msgCount} stream=${msg.stream ?? 'ctrl'}`)
         }
         this.onMessage(msg)

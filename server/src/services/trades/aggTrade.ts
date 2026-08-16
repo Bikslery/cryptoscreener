@@ -5,6 +5,9 @@ import { updateTickerPrice, recordTradeBucket } from '../aggregator/index.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 import type { Exchange } from '../../types.js'
 
+/** Verbose per-message progress logs — opt-in via env (same flag as candle manager). */
+const DIAG_LOG = process.env.DIAG_LOG === '1'
+
 interface AggTradeStream {
   ws: WebSocket | null
   reconnectTimer: ReturnType<typeof setTimeout> | null
@@ -159,7 +162,9 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
     try {
       const msg = JSON.parse(raw.toString())
       stream.msgCount++
-      if (stream.msgCount <= 3 || stream.msgCount % 500 === 0) {
+      // Per-500-messages progress logs spam hard on busy trade streams —
+      // keep them behind DIAG_LOG=1.
+      if (DIAG_LOG && (stream.msgCount <= 3 || stream.msgCount % 500 === 0)) {
         console.log(`[AggTrade${label}] msg #${stream.msgCount} stream=${msg.stream ?? 'ctrl'}`)
       }
       const data = msg.data || msg
