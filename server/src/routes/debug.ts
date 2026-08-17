@@ -7,6 +7,7 @@ import { getCandleFallbackDiagStats } from '../services/exchanges/binance-future
 import { getHistory } from '../services/candles/history.js'
 import { fetchCandlesSeamless } from '../services/aggregator/index.js'
 import { getCacheRepairStats } from '../services/candles/repair.js'
+import { FUTURES_WS_BASE, FUTURES_AGGTRADE_WS_BASE, SPOT_WS_BASE } from '../services/exchanges/endpoints.js'
 import type { Exchange } from '../types.js'
 
 const router = Router()
@@ -161,6 +162,24 @@ router.get('/candle-stats', (_req, res) => {
 
 router.get('/ws-stats', (_req, res) => {
   res.json(getHubStats())
+})
+
+// Active Binance WS hosts (post env-override resolution). A regionally
+// blocked host otherwise only surfaces as a silent REST fallback seconds
+// later — this endpoint answers "which domain are we actually on" without
+// grepping logs. Combine with /candle-stats (fallback starts/polls) to see
+// whether a lane degraded to REST.
+router.get('/ws-endpoints', (_req, res) => {
+  res.json({
+    futuresMarketData: FUTURES_WS_BASE,
+    futuresAggTrade: FUTURES_AGGTRADE_WS_BASE,
+    spot: SPOT_WS_BASE,
+    envOverrides: {
+      futuresMarketData: process.env.BINANCE_FUTURES_WS_BASE ?? null,
+      futuresAggTrade: process.env.BINANCE_FUTURES_AGGTRADE_WS_BASE ?? null,
+      spot: process.env.BINANCE_SPOT_WS_BASE ?? null,
+    },
+  })
 })
 
 export default router

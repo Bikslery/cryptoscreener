@@ -44,7 +44,14 @@ function init() {
     }
 
     if (!isSocks(url)) {
-      fetchDispatcher = new ProxyAgent(url)
+      fetchDispatcher = new ProxyAgent({
+        uri: url,
+        // Same keep-alive tuning as the direct pool (see utils/fetch.ts):
+        // default ~4s keep-alive re-handshakes TLS on every periodic poll.
+        keepAliveTimeout: 60_000,
+        keepAliveMaxTimeout: 600_000,
+        connections: 64,
+      })
     }
 
     pool.push({ url, wsAgent, fetchDispatcher, currentWeight: 0 })

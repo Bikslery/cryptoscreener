@@ -131,8 +131,13 @@ export function pickBestTickers(
 /**
  * Pure core of delta computation: compares the incoming tickers against the
  * previously broadcast state and returns (a) only the tickers whose observable
- * fields changed, plus removals, and (b) the new state to feed the next call.
+ * fields changed, plus removals, and (b) the state to feed the next call.
  * Extracted so the merge/delta logic is deterministic and unit-testable.
+ *
+ * MUTATES `prev` IN PLACE: this runs on every broadcast flush (25-50Hz over
+ * ~1200 tickers); rebuilding a fresh Map with a new partial object per ticker
+ * allocated ~60k objects/sec and showed up as GC micro-hitches in the price
+ * lane. The returned `next` IS the same Map instance that was passed in.
  */
 export function computeTickerDelta(
   tickers: UnifiedTicker[],
@@ -148,23 +153,34 @@ export function computeTickerDelta(
       || p.corrBtc !== t.corrBtc || p.tradesSpike !== t.tradesSpike || p.volumeSpike !== t.volumeSpike) {
       delta.push(t)
     }
+    if (p) {
+      p.price = t.price
+      p.change24h = t.change24h
+      p.quoteVolume24h = t.quoteVolume24h
+      p.corrBtc = t.corrBtc
+      p.tradesSpike = t.tradesSpike
+      p.volumeSpike = t.volumeSpike
+    } else {
+      prev.set(key, {
+        symbol: t.symbol,
+        exchange: t.exchange,
+        price: t.price,
+        change24h: t.change24h,
+        quoteVolume24h: t.quoteVolume24h,
+        corrBtc: t.corrBtc,
+        tradesSpike: t.tradesSpike,
+        volumeSpike: t.volumeSpike,
+      })
+    }
   }
-  for (const [key, p] of prev) {
-    if (!seen.has(key)) delta.push(p as UnifiedTicker)
+  for (const key of prev.keys()) {
+    if (!seen.has(key)) {
+      const p = prev.get(key)
+      if (p) delta.push(p as UnifiedTicker)
+      prev.delete(key)
+    }
   }
-  const next = new Map(
-    tickers.map(t => [`${t.symbol}:${t.exchange}`, {
-      symbol: t.symbol,
-      exchange: t.exchange,
-      price: t.price,
-      change24h: t.change24h,
-      quoteVolume24h: t.quoteVolume24h,
-      corrBtc: t.corrBtc,
-      tradesSpike: t.tradesSpike,
-      volumeSpike: t.volumeSpike,
-    }] as [string, Partial<UnifiedTicker>])
-  )
-  return { delta, next }
+  return { delta, next: prev }
 }
 
 const EXCHANGE_PRIORITY: Record<string, number> = {
@@ -385,15 +401,19 @@ export function startAggregator() {
       // identical values.
     })
 
+    // Depth is NOT broadcast to a local WS channel: nothing subscribes to
+    // `depth:*`. The density engine consumes depth directly through its own
+    // adapter.subscribeDepth callback, and clients only ever subscribe to
+    // ticker / candle:* / trade:* / price:* / density. A local broadcast here
+    // ran encodePayload + a full client scan for every book update of every
+    // tracked symbol, and every resulting frame was discarded. Redis publish
+    // stays: split ingestion/broadcast deployments relay it (hub.ts).
     adapter.onDepth((depth) => {
       if (isIngestion && REDIS_ENABLED) {
         try {
           const redis = getRedisPub()
           redis.publish('depth', JSON.stringify(depth)).catch(() => {})
         } catch {}
-      }
-      if (isBroadcast) {
-        broadcastToChannel(`depth:${depth.symbol}`, depth)
       }
     })
 
@@ -477,12 +497,14 @@ function syncAggTradeSubscriptions() {
 // volume (rankings shift as the market moves; pools refresh every re-sync).
 // Every adapter that exposes bookTicker (Binance Futures, Bybit) participates.
 function syncBookTickerSubscriptions() {
+  // Hoisted out of the adapter loop: getAllTickers() used to be called once
+  // per adapter (3 full rebuilds per re-sync for no reason).
+  const all = getAllTickers()
   for (const adapter of adapters) {
     if (!adapter.subscribeBookTicker || !adapter.unsubscribeBookTicker) continue
     const subscribe = adapter.subscribeBookTicker.bind(adapter)
     const unsubscribe = adapter.unsubscribeBookTicker.bind(adapter)
 
-    const all = getAllTickers()
     const top = all
       .filter(t => t.exchange === adapter.exchange)
       .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
@@ -713,8 +735,19 @@ export function getTickers(): UnifiedTicker[] {
   return cachedBest
 }
 
+const allTickersBuffer: UnifiedTicker[] = []
+
 export function getAllTickers(): UnifiedTicker[] {
-  return Array.from(tickerMap.values()).filter(t => !isBlacklisted(t.exchange, t.symbol))
+  // Reused buffer: this fires on every broadcast flush (25-50Hz); a fresh
+  // ~1200-element array with a filter pass per call was constant GC
+  // pressure. Every caller consumes the result synchronously (sort, map,
+  // JSON.stringify) before any later call can rebuild it — single-threaded
+  // JS guarantees that. Callers must NOT stash the array across an await.
+  allTickersBuffer.length = 0
+  for (const t of tickerMap.values()) {
+    if (!isBlacklisted(t.exchange, t.symbol)) allTickersBuffer.push(t)
+  }
+  return allTickersBuffer
 }
 
 export function getTicker(symbol: string): UnifiedTicker | undefined {

@@ -10,6 +10,7 @@ import { WsStreamPool } from './ws-pool.js'
 import { BinanceDepthBook, type DiffDepthEvent } from './binance-depth-book.js'
 import { withDepthSnapshotSlot } from './depth-snapshot-limiter.js'
 import { getFetchDispatcher } from './proxy.js'
+import { SPOT_WS_BASE } from './endpoints.js'
 import type { ProxyAgent } from 'undici'
 
 const WS_SILENCE_TIMEOUT = 30_000
@@ -73,8 +74,12 @@ interface BinanceDepthDiffRaw {
   a?: BinanceLevel[]
 }
 
-const TICKER_WS_URL = 'wss://stream.binance.com:9443/ws/!miniTicker@arr'
+const TICKER_WS_URL = `${SPOT_WS_BASE}/ws/!miniTicker@arr`
 const TICKER_REST_URL = 'https://api.binance.com/api/v3/ticker/24hr'
+// Depth snapshots are emitted to subscribers at most this often per symbol
+// (the book is cumulative, latest-wins loses nothing). Env-tunable so the
+// density map freshness can be raised without a rebuild.
+const DEPTH_EMIT_INTERVAL_MS = parseInt(process.env.DEPTH_EMIT_INTERVAL_MS || '200', 10)
 const TICKER_WS_PING_INTERVAL = 20_000
 const TICKER_WS_RECONNECT_BASE = 1000
 const TICKER_WS_RECONNECT_MAX = 60_000
@@ -118,7 +123,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     this.fetchDispatcher = getFetchDispatcher()
 
     this.candlePool = new WsStreamPool(
-      'wss://stream.binance.com:9443/stream',
+      `${SPOT_WS_BASE}/stream`,
       'Binance Candle',
       (msg) => {
         try {
@@ -138,7 +143,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     )
 
     this.depthPool = new WsStreamPool(
-      'wss://stream.binance.com:9443/stream',
+      `${SPOT_WS_BASE}/stream`,
       'Binance Depth',
       (msg) => {
         try {
@@ -461,11 +466,11 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     }
     if (result !== 'applied') return null
 
-    // Emit full snapshots at most every 200ms per symbol — the book is
-    // cumulative, so latest-wins loses nothing and bounds per-symbol cost.
+    // Emit full snapshots at most every DEPTH_EMIT_INTERVAL_MS per symbol — the
+    // book is cumulative, so latest-wins loses nothing and bounds per-symbol cost.
     const now = Date.now()
     const last = this.lastDepthEmitAt.get(symbol) ?? 0
-    if (now - last < 200) return null
+    if (now - last < DEPTH_EMIT_INTERVAL_MS) return null
     this.lastDepthEmitAt.set(symbol, now)
     return book.toDepth(symbol, this.exchange)
   }

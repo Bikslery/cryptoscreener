@@ -1,4 +1,4 @@
-import { deflateRawSync } from 'zlib'
+import { deflateRaw, deflateRawSync } from 'zlib'
 import { WebSocket, WebSocketServer } from 'ws'
 import { verifyTokenWithTelegram, type JwtPayload } from '../middleware/auth.js'
 import type { WsMessage } from '../types.js'
@@ -25,6 +25,9 @@ interface Client {
   user: JwtPayload | null
   subscriptions: Set<string>
   tickerSymbols: Set<string>
+  /** Sorted join of tickerSymbols, rebuilt ONLY on (un)subscribe. Recomputing
+   *  it per broadcast cost an array copy + sort per client per frame (25-50Hz). */
+  tickerSig: string
   alive: boolean
   buffered: number
   lastBackpressureNotify: number
@@ -112,6 +115,61 @@ export function encodePayload(data: unknown): Buffer | string {
   const json = JSON.stringify(data)
   if (json.length <= PLAIN_FRAME_MAX_BYTES) return json
   return deflateRawSync(json)
+}
+
+// --- Ticker snapshot frame cache ------------------------------------------
+// The full ~1200-ticker snapshot is the largest regular outbound frame
+// (hundreds of KB as JSON). Two hot paths kept compressing it synchronously:
+// every SNAPSHOT_INTERVAL broadcast and every new client connection (initial
+// tickers) — deflateRawSync at that size froze the event loop for tens of
+// milliseconds, stalling every exchange parser and coalescing-lane timer
+// behind it (the periodic "chart hiccup every few seconds"). The frame is
+// now built ONCE per snapshot with async zlib on the threadpool, cached, and
+// reused for new connections within SNAPSHOT_FRAME_TTL_MS. Deltas (small,
+// plain JSON) stay on the sync path.
+interface TickerSnapshotCache {
+  frame: Buffer | string
+  ts: number
+}
+let tickerSnapshotCache: TickerSnapshotCache | null = null
+const SNAPSHOT_FRAME_TTL_MS = 5000
+
+function encodeTickerSnapshot(data: UnifiedTicker[], ts?: number): Promise<Buffer | string> {
+  const payload: Record<string, unknown> = { type: 'ticker', data, snapshot: true }
+  if (ts !== undefined) payload.ts = ts
+  const json = JSON.stringify(payload)
+  if (json.length <= PLAIN_FRAME_MAX_BYTES) return Promise.resolve(json)
+  return new Promise((resolve, reject) => {
+    deflateRaw(Buffer.from(json), (err, buf) => (err ? reject(err) : resolve(buf)))
+  })
+}
+
+/** Fan out one already-encoded ticker snapshot: the raw frame to global
+ *  subscribers, per-signature filtered re-encodes for filtered ones. */
+function deliverTickerSnapshot(frame: Buffer | string, source: UnifiedTicker[], ts: number | undefined): void {
+  const sigCache = new Map<string, Buffer | string>()
+  for (const client of clients.values()) {
+    if (client.ws.readyState !== WebSocket.OPEN) continue
+    if (client.buffered >= MAX_BUFFERED) {
+      recordDroppedMsg('ticker')
+      handleBackpressure(client)
+      continue
+    }
+    if (client.tickerSymbols.size === 0) {
+      client.ws.send(frame, (err) => { if (err) client.buffered++ })
+      continue
+    }
+    const sig = client.tickerSig
+    let cached = sigCache.get(sig)
+    if (cached === undefined) {
+      const filtered = source.filter(t => client.tickerSymbols.has(t.symbol))
+      if (filtered.length > 0) {
+        cached = encodePayload({ type: 'ticker', data: filtered, snapshot: true, ts })
+        sigCache.set(sig, cached)
+      }
+    }
+    if (cached) client.ws.send(cached, (err) => { if (err) client.buffered++ })
+  }
 }
 
 function handleBackpressure(client: Client): boolean {
@@ -246,6 +304,7 @@ export function setupWsHub(wss: WebSocketServer) {
       ws, user,
       subscriptions: new Set(),
       tickerSymbols: new Set(),
+      tickerSig: '',
       alive: true,
       buffered: 0,
       lastBackpressureNotify: 0,
@@ -282,8 +341,31 @@ export function setupWsHub(wss: WebSocketServer) {
     try {
       const tickers = getAllTickers()
       if (tickers.length > 0) {
-        ws.send(encodePayload({ type: 'ticker', data: tickers }))
-        console.log(`[Hub] Sent initial tickers to new client: ${tickers.length} tickers`)
+        // Reuse the cached snapshot frame when fresh — previously every
+        // connection re-serialized + re-compressed the full ticker array on
+        // the event loop.
+        const cached = tickerSnapshotCache && Date.now() - tickerSnapshotCache.ts < SNAPSHOT_FRAME_TTL_MS
+          ? tickerSnapshotCache.frame
+          : null
+        if (cached && ws.readyState === WebSocket.OPEN) {
+          ws.send(cached)
+        } else {
+          encodeTickerSnapshot(tickers)
+            .then(frame => {
+              tickerSnapshotCache = { frame, ts: Date.now() }
+              if (ws.readyState === WebSocket.OPEN) ws.send(frame)
+            })
+            .catch(() => {
+              // Deflate failure: re-fetch (the array may be a reused buffer)
+              // and fall back to the synchronous encode so the client still
+              // gets its initial tickers.
+              try {
+                const fresh = getAllTickers()
+                if (ws.readyState === WebSocket.OPEN) ws.send(encodePayload({ type: 'ticker', data: fresh }))
+              } catch { /* socket gone */ }
+            })
+        }
+        console.log(`[Hub] Sent initial tickers to new client: ${tickers.length} tickers${cached ? ' (cached frame)' : ''}`)
       }
     } catch (err) {
       console.warn('[Hub] Failed to send initial-tickers', err)
@@ -321,6 +403,7 @@ export function setupWsHub(wss: WebSocketServer) {
           if (msg.channel.startsWith('ticker:')) {
             const symbol = msg.channel.slice(7)
             client.tickerSymbols.add(symbol)
+            client.tickerSig = [...client.tickerSymbols].sort().join(',')
           }
 
           if (isNew) {
@@ -339,6 +422,7 @@ export function setupWsHub(wss: WebSocketServer) {
 
           if (msg.channel.startsWith('ticker:')) {
             client.tickerSymbols.delete(msg.channel.slice(7))
+            client.tickerSig = [...client.tickerSymbols].sort().join(',')
           }
 
           const candleInfo = parseCandleChannel(msg.channel)
@@ -390,19 +474,42 @@ export function broadcast(msg: WsMessage) {
       const isSnapshot = !!(msg as { snapshot?: boolean }).snapshot
 
       // Global subscribers get compact DELTA frames every broadcast and a
-      // full SNAPSHOT every ~2s (the aggregator stamps msg.snapshot). The full
-      // array of all exchanges is ~1200 tickers; shipping it at 25Hz would
-      // drown clients in bytes even deflated. The client merges deltas in
-      // place (identity-preserving) and replaces state on snapshots.
+      // full SNAPSHOT every SNAPSHOT_INTERVAL (the aggregator stamps
+      // msg.snapshot). The full array of all exchanges is ~1200 tickers;
+      // shipping it at 25Hz would drown clients in bytes even deflated.
+      // Clients merge deltas in place and replace state on snapshots.
       // Per-client filtered subscribers get the same delta/snapshot semantics.
       const globalPayload = isSnapshot ? (fullTickers || tickers) : tickers
-      const filterSource = isSnapshot ? (fullTickers || tickers) : tickers
 
-      // Serialization cache: group by ticker signature
+      if (isSnapshot) {
+        if (globalPayload.length === 0) return
+        // The full snapshot is the one frame big enough that SYNCHRONOUS
+        // deflate visibly stalled the event loop (every 5s + once per new
+        // client). Compress it asynchronously on the libuv threadpool, cache
+        // the frame, and fan out when ready. Deltas keep flowing while the
+        // frame compresses; a snapshot landing a few ms late at worst
+        // reverts milliseconds of deltas until the next delta frame (≤40ms)
+        // — self-healing by design.
+        encodeTickerSnapshot(globalPayload, msg.ts)
+          .then(frame => {
+            tickerSnapshotCache = { frame, ts: Date.now() }
+            deliverTickerSnapshot(frame, globalPayload, msg.ts)
+          })
+          .catch(() => {
+            // Threadpool/deflate failure — fall back to the sync encode so a
+            // snapshot is never silently lost.
+            deliverTickerSnapshot(
+              encodePayload({ type: 'ticker', data: globalPayload, snapshot: true, ts: msg.ts }),
+              globalPayload,
+              msg.ts,
+            )
+          })
+        return
+      }
+
+      const filterSource = tickers
       const sigCache = new Map<string, Buffer | string>()
-      let snapshotRaw: Buffer | string | null = null
       let deltaRaw: Buffer | string | null = null
-      let sentCount = 0
 
       for (const client of clients.values()) {
         if (client.ws.readyState !== WebSocket.OPEN) continue
@@ -415,32 +522,24 @@ export function broadcast(msg: WsMessage) {
         if (client.tickerSymbols.size === 0) {
           // Subscribed to all tickers
           if (!globalPayload || globalPayload.length === 0) continue
-          let raw: Buffer | string | null = isSnapshot ? snapshotRaw : deltaRaw
-          if (raw === null) {
-            raw = encodePayload(isSnapshot
-              ? { type: 'ticker', data: globalPayload, snapshot: true, ts: msg.ts }
-              : { type: 'ticker', data: globalPayload, delta: true, ts: msg.ts })
-            if (isSnapshot) snapshotRaw = raw
-            else deltaRaw = raw
+          if (deltaRaw === null) {
+            deltaRaw = encodePayload({ type: 'ticker', data: globalPayload, delta: true, ts: msg.ts })
           }
-          client.ws.send(raw, (err) => { if (err) client.buffered++ })
-          sentCount++
+          client.ws.send(deltaRaw, (err) => { if (err) client.buffered++ })
         } else {
-          // Per-client filtered tickers — filter from the frame, cache by signature
-          const sig = [...client.tickerSymbols].sort().join(',')
+          // Per-client filtered tickers — filter from the frame, cache by
+          // the client's precomputed signature string.
+          const sig = client.tickerSig
           let cached = sigCache.get(sig)
           if (cached === undefined) {
             const filtered = filterSource.filter(t => client.tickerSymbols.has(t.symbol))
             if (filtered.length > 0) {
-              cached = encodePayload(isSnapshot
-                ? { type: 'ticker', data: filtered, snapshot: true, ts: msg.ts }
-                : { type: 'ticker', data: filtered, delta: true, ts: msg.ts })
+              cached = encodePayload({ type: 'ticker', data: filtered, delta: true, ts: msg.ts })
               sigCache.set(sig, cached)
             }
           }
           if (cached) {
             client.ws.send(cached, (err) => { if (err) client.buffered++ })
-            sentCount++
           }
         }
       }
@@ -507,8 +606,9 @@ export function startRedisListener() {
           updateCachedCandle(candle)
           broadcastToChannel(`candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`, candle, true)
         } else if (channel === 'depth') {
-          const depth = JSON.parse(message)
-          broadcastToChannel(`depth:${depth.symbol}`, depth)
+          // Intentionally not relayed to a WS channel: no client subscribes to
+          // `depth:*` (density is what they consume). Kept as an explicit
+          // no-op branch so the Redis payload isn't mistaken for unhandled.
         } else if (channel === 'density') {
           // Global density (orderbook walls) snapshot — broadcast nodes relay
           // it to every client subscribed to the 'density' channel.

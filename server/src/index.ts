@@ -7,6 +7,7 @@ import { createServer } from 'http'
 import type { Request, Response, NextFunction } from 'express'
 import { setupWsHub, setCandleManager, startRedisListener, startIngestionRedisListener, stopWsHub, refreshMetrics } from './ws/hub.js'
 import { startAggregator, adapters } from './services/aggregator/index.js'
+import { logWsEndpoints } from './services/exchanges/endpoints.js'
 import { flushTradeLane } from './services/trades/aggTrade.js'
 import { flushCandleLane } from './services/candles/manager.js'
 import { startAlertEngine, stopAlertEngine } from './services/alerts/index.js'
@@ -131,6 +132,10 @@ async function main() {
   if (isBroadcast) setupWsHub(wss)
 
   if (isIngestion) {
+    // Log the ACTIVE Binance WS hosts before any adapter connects — a
+    // regionally-blocked host is otherwise only visible as a silent REST
+    // fallback several seconds later.
+    logWsEndpoints()
     startAggregator()
     const candleManager = createCandleManager(adapters)
     setCandleManager(candleManager)

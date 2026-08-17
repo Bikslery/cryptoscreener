@@ -10,6 +10,7 @@ import { WsStreamPool } from './ws-pool.js'
 import { BinanceDepthBook, type DiffDepthEvent } from './binance-depth-book.js'
 import { withDepthSnapshotSlot } from './depth-snapshot-limiter.js'
 import { getWsAgent, getFetchDispatcher } from './proxy.js'
+import { FUTURES_WS_BASE } from './endpoints.js'
 import type { ProxyAgent } from 'undici'
 
 const WS_SILENCE_TIMEOUT = 30_000
@@ -110,12 +111,10 @@ interface BinanceDepthDiffRaw {
   a?: BinanceLevel[]
 }
 
-// NOTE: fstream.binance.com is geo-blocked from some regions (e.g. EU/Germany
-// datacenter IPs) — the connection opens then closes without data. The official
-// new futures stream domain fstream.binancefuture.com is NOT blocked and
-// delivers tickers/klines/aggTrades in realtime from those regions (verified
-// live from the German VPS). Overridable via env if Binance ever re-routes it.
-const WS_BASE = process.env.BINANCE_FUTURES_WS_BASE || 'wss://fstream.binance.com'
+// Resolved centrally (see endpoints.ts): this lane and the aggTrade lane MUST
+// agree on the host, otherwise a regional block silently downgrades only one
+// of them to REST polling.
+const WS_BASE = FUTURES_WS_BASE
 const TICKER_WS_URL = `${WS_BASE}/ws/!miniTicker@arr`
 const TICKER_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/24hr'
 const TICKER_PRICE_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/price'
@@ -124,6 +123,11 @@ const TICKER_STATS_POLL_INTERVAL = 60_000
 const TICKER_WS_PING_INTERVAL = 20_000
 const TICKER_WS_RECONNECT_BASE = 1000
 const TICKER_WS_RECONNECT_MAX = 60_000
+const STATS_FIRST_RETRY_MS = 2_000
+// Depth snapshots are emitted to subscribers at most this often per symbol
+// (the book is cumulative, latest-wins loses nothing). Env-tunable so the
+// density map freshness can be raised without a rebuild.
+const DEPTH_EMIT_INTERVAL_MS = parseInt(process.env.DEPTH_EMIT_INTERVAL_MS || '200', 10)
 
 export class BinanceFuturesAdapter implements ExchangeAdapter {
   name = 'Binance Futures'
@@ -138,6 +142,8 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   private tickerWsSilenceTimer: ReturnType<typeof setTimeout> | null = null
   private tickerWsReceivedData = false
   private statsTimer: ReturnType<typeof setInterval> | null = null
+  private statsFirstRetryTimer: ReturnType<typeof setTimeout> | null = null
+  private statsPollStarting = false
   private priceTimer: ReturnType<typeof setInterval> | null = null
   private usingRestFallback = false
   /** True after the first successful REST 24hr stats poll — the authoritative
@@ -271,11 +277,14 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
   }
 
   connect() {
-    this.rateLimiter.probeWeight(this.fetchDispatcher).then(() => {
-      this.fetchExchangeInfo().then(() => {
-        this.connectTickerWs()
-      })
-    })
+    // The ticker WS is safe to open BEFORE exchangeInfo lands (WS messages
+    // are filtered by cryptoSymbols only once exchangeInfoLoaded). The old
+    // strictly-sequential probe → exchangeInfo → WS chain cost two extra
+    // round-trips (~1-2s) before the first ticker byte arrived.
+    this.connectTickerWs()
+    this.rateLimiter.probeWeight(this.fetchDispatcher)
+      .then(() => this.fetchExchangeInfo())
+      .catch(() => {})
     console.log(`[${this.name}] Connected (WebSocket !miniTicker@arr)`)
   }
 
@@ -398,13 +407,28 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     })
   }
 
-  /** Run the REST 24hr stats poll immediately and on an interval (once).
-   *  The volumes it produces are the authoritative 24h numbers — used both
-   *  in fallback mode and to guard the WS miniTicker's volume fields. */
+  /** Run the REST 24hr stats poll immediately and on an interval (once the
+   *  first poll SUCCEEDS). The volumes it produces are the authoritative 24h
+   *  numbers — used both in fallback mode and to guard the WS miniTicker's
+   *  volume fields. Until the first success every volume is forced to zero,
+   *  so a failed first poll must retry within seconds (not after the full
+   *  60s interval) — otherwise preload's top-symbol selection and the
+   *  bookTicker pool rank by volume=0 and pick garbage symbols. */
   private ensureStatsPoll() {
-    if (this.statsTimer) return
-    this.pollTickerStats()
-    this.statsTimer = setInterval(() => this.pollTickerStats(), TICKER_STATS_POLL_INTERVAL)
+    if (this.statsTimer || this.statsPollStarting) return
+    this.statsPollStarting = true
+    this.pollTickerStats().then(() => {
+      this.statsPollStarting = false
+      if (this.hasRestStats) {
+        this.statsTimer = setInterval(() => this.pollTickerStats(), TICKER_STATS_POLL_INTERVAL)
+        return
+      }
+      if (this.statsFirstRetryTimer) return
+      this.statsFirstRetryTimer = setTimeout(() => {
+        this.statsFirstRetryTimer = null
+        this.ensureStatsPoll()
+      }, STATS_FIRST_RETRY_MS)
+    })
   }
 
   private startRestFallback() {
@@ -561,6 +585,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     this.depthPool.close()
     this.bookTickerPool.close()
     if (this.statsTimer) clearInterval(this.statsTimer)
+    if (this.statsFirstRetryTimer) clearTimeout(this.statsFirstRetryTimer)
     if (this.priceTimer) clearInterval(this.priceTimer)
     this.stopCandleSilenceChecker()
     this.stopCandleFallback()
@@ -735,10 +760,10 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     }
     this.depthMsgDiag.applied++
 
-    // Emit full snapshots at most every 200ms per symbol — the book is
-    // cumulative, so latest-wins loses nothing and bounds per-symbol cost.
+    // Emit full snapshots at most every DEPTH_EMIT_INTERVAL_MS per symbol — the
+    // book is cumulative, so latest-wins loses nothing and bounds per-symbol cost.
     const last = this.lastDepthEmitAt.get(symbol) ?? 0
-    if (now - last < 200) return null
+    if (now - last < DEPTH_EMIT_INTERVAL_MS) return null
     this.lastDepthEmitAt.set(symbol, now)
     this.depthMsgDiag.emitted++
     return book.toDepth(symbol, this.exchange)

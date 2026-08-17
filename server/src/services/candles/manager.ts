@@ -239,10 +239,13 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
     }
   }
 
-  const depthCallback = (depth: { exchange?: string; symbol?: string }) => {
-    const channel = `depth:${depth.exchange}:${depth.symbol}`
-    broadcastToChannel(channel, depth, true)
-  }
+  // Depth reaches consumers WITHOUT passing through a WS channel: the density
+  // engine registers its own callback via adapter.subscribeDepth, and no client
+  // ever subscribes to a `depth:*` channel. This callback exists only to give
+  // the adapter a subscription handle (and to key the manager's refcounting) —
+  // broadcasting here published to a channel with zero subscribers, so every
+  // frame was serialized, compressed and then dropped.
+  const depthCallback = () => {}
 
   return {
     subscribeCandle(exchange: string, symbol: string, tf: string) {

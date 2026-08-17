@@ -1,6 +1,7 @@
 import WebSocket from 'ws'
 import { broadcastToChannel } from '../../ws/hub.js'
 import { getWsAgent } from '../exchanges/proxy.js'
+import { FUTURES_AGGTRADE_WS_BASE, SPOT_WS_BASE } from '../exchanges/endpoints.js'
 import { updateTickerPrice, recordTradeBucket } from '../aggregator/index.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
 import type { Exchange } from '../../types.js'
@@ -121,13 +122,11 @@ function getChunkForSymbol(exchange: Exchange, symbol: string): AggTradeStream {
 }
 
 function getWsBase(exchange: Exchange): string {
-  // Futures: use the new official stream domain — fstream.binance.com is
-  // geo-blocked from some regions (connects then closes without data).
-  // Verified live from a German VPS: fstream.binancefuture.com delivers
-  // aggTrades in realtime. Overridable via env.
-  return exchange === 'binance-futures'
-    ? (process.env.BINANCE_FUTURES_WS_BASE || 'wss://fstream.binancefuture.com')
-    : 'wss://stream.binance.com:9443'
+  // Resolved centrally (see exchanges/endpoints.ts) so this lane and the
+  // futures ticker/kline/depth lane can never disagree on the host — they used
+  // to read the same env var with different hardcoded defaults, which meant a
+  // regionally-blocked domain downgraded only the market-data lane to REST.
+  return exchange === 'binance-futures' ? FUTURES_AGGTRADE_WS_BASE : SPOT_WS_BASE
 }
 
 function connect(stream: AggTradeStream, exchange: Exchange) {

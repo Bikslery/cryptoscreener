@@ -191,6 +191,9 @@ export class WsStreamPool {
 
     conn.ws.on('open', () => {
       console.log(`[${this.name}] WS connected (${conn.streams.size} streams)`)
+      // A successful connect proves the limiter window opened — reset the
+      // backoff so a later drop recovers fast.
+      conn.reconnectDelay = 3000
       if (this.supportsIncrementalSub && conn.pendingSubs.size > 0) {
         this.sendSubscribe(conn, Array.from(conn.pendingSubs))
         conn.pendingSubs.clear()
@@ -219,7 +222,8 @@ export class WsStreamPool {
       if (this.intentionalClose || generation !== conn.generation) return
       // Exponential backoff: Binance enforces per-IP connection creation
       // limits — a fixed 3s loop keeps slamming the limiter and can keep
-      // the pool permanently closed. Back off to 60s and reset on success.
+      // the pool permanently closed. Back off to 60s and reset on success
+      // (in the open handler above).
       conn.reconnectDelay = Math.min((conn.reconnectDelay || 3000) * 2, 60_000)
       console.log(`[${this.name}] WS closed unexpectedly, reconnecting in ${conn.reconnectDelay / 1000}s...`)
       setTimeout(() => {
@@ -227,12 +231,6 @@ export class WsStreamPool {
           this.connectSingle(conn)
         }
       }, conn.reconnectDelay)
-    })
-
-    conn.ws.on('open', () => {
-      // A successful connect proves the limiter window opened — reset the
-      // backoff so a later drop recovers fast.
-      conn.reconnectDelay = 3000
     })
   }
 }
