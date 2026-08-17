@@ -132,7 +132,7 @@ export interface UserSettings {
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
 
 export interface WsMessage {
-  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'density' | 'alert' | 'listing' | 'initial-candles' | 'auth'
+  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'density' | 'alert' | 'listing' | 'initial-candles' | 'auth' | (string & {})
   channel?: string
   data?: unknown
   full?: unknown // full array for ticker delta broadcasts

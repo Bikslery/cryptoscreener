@@ -1,8 +1,9 @@
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
 import type { BinanceRateLimiter } from './rate-limiter.js'
+import type { Dispatcher } from 'undici'
 
 export interface FetchCandlesOptions {
-  dispatcher?: any
+  dispatcher?: Dispatcher
 }
 
 export interface ExchangeAdapter {

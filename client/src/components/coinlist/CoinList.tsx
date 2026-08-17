@@ -5,6 +5,7 @@ import type { UnifiedTicker, CoinListColKey } from '../../types'
 import { extractBaseAsset } from '../../utils/format'
 import { getOrFetchHistory } from '../../services/candle-prefetch'
 import { VOLUME_HIGH_THRESHOLD } from '../../constants/volume'
+import { NATR_HIGH_THRESHOLD } from '../../constants/natr'
 import { resolveIndicators, formatIndicator, COLUMN_META } from '../../services/indicators'
 
 interface ColumnDef {
@@ -23,7 +24,7 @@ function WatchFlag({ watched, onClick }: { watched: boolean; onClick: (e: React.
     <button
       data-testid="watch-toggle"
       className={`shrink-0 mr-[5px] flex items-center justify-center cursor-pointer transition-colors ${watched ? 'text-[#f5c518]' : 'text-[#3a3a3a] hover:text-[#777]'}`}
-      title={watched ? 'Убрать из избранного' : 'В избранное'}
+      title={watched ? 'Remove from favorites' : 'Add to favorites'}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={onClick}
     >
@@ -44,14 +45,13 @@ interface RowProps {
   cols: ColumnDef[]
   isSelected: boolean
   isOnPage: boolean
-  isNextOnPage: boolean
   isWatched: boolean
   onClick: (symbol: string) => void
   onPrefetch: (symbol: string) => void
   onToggleWatch: (symbol: string) => void
 }
 
-export const Row = memo(function Row({ coin, cols, isSelected, isOnPage, isNextOnPage, isWatched, onClick, onPrefetch, onToggleWatch }: RowProps) {
+export const Row = memo(function Row({ coin, cols, isSelected, isOnPage, isWatched, onClick, onPrefetch, onToggleWatch }: RowProps) {
   const isUp = coin.change24h >= 0
   const bg = isSelected
     ? 'bg-white/[0.10]'
@@ -61,22 +61,18 @@ export const Row = memo(function Row({ coin, cols, isSelected, isOnPage, isNextO
   const borderL = isSelected
     ? 'border-l-2 border-l-white'
     : 'border-l-2 border-l-transparent'
-  const borderB = isOnPage && isNextOnPage
-    ? 'border-b border-white/[0.06]'
-    : 'border-b border-[#111]'
   const rowCols = cols.map(c => c.width).join(' ')
   return (
     <div
-      className={`grid cursor-pointer transition-colors duration-100 ${bg} ${borderL} ${borderB}`}
+      className={`grid cursor-pointer transition-colors duration-100 ${bg} ${borderL}`}
       style={{ gridTemplateColumns: rowCols, height: '32px' }}
       onMouseDown={() => onPrefetch(coin.symbol)}
       onClick={() => onClick(coin.symbol)}
     >
-      {cols.map((col, i) => {
-        const isLast = i === cols.length - 1
+      {cols.map((col) => {
         if (col.key === 'symbol') {
           return (
-            <div key={col.key} className={`flex items-center justify-center px-2 text-[12px] font-medium border-r border-[#111] ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
+            <div key={col.key} className={`flex items-center justify-center px-2 text-[12px] font-medium ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
               <WatchFlag watched={isWatched} onClick={(e) => { e.stopPropagation(); onToggleWatch(coin.symbol) }} />
               {formatVal('symbol', coin)}
             </div>
@@ -84,20 +80,27 @@ export const Row = memo(function Row({ coin, cols, isSelected, isOnPage, isNextO
         }
         if (col.key === 'change24h') {
           return (
-            <div key={col.key} className={`flex items-center justify-center px-2 text-[12px] font-bold border-r border-[#111] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+            <div key={col.key} className={`flex items-center justify-center px-2 text-[12px] font-bold ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
               {formatVal('change24h', coin)}%
             </div>
           )
         }
         if (col.key === 'quoteVolume24h') {
           return (
-            <div key={col.key} data-testid="vol-cell" className={`flex items-center justify-center px-2 text-[11px] ${isLast ? '' : 'border-r border-[#111]'} ${coin.quoteVolume24h >= VOLUME_HIGH_THRESHOLD ? 'text-[#fff] font-medium' : 'text-[#a0a0a0]'}`}>
+            <div key={col.key} data-testid="vol-cell" className={`flex items-center justify-center px-2 text-[11px] ${coin.quoteVolume24h >= VOLUME_HIGH_THRESHOLD ? 'text-[#fff] font-medium' : 'text-[#a0a0a0]'}`}>
               {formatVal('quoteVolume24h', coin)}
             </div>
           )
         }
+        if (col.key === 'natr5m') {
+          return (
+            <div key={col.key} data-testid="natr-cell" className={`flex items-center justify-center px-2 text-[11px] ${coin.natr5m >= NATR_HIGH_THRESHOLD ? 'text-[#fff] font-medium' : 'text-[#a0a0a0]'}`}>
+              {formatVal('natr5m', coin)}
+            </div>
+          )
+        }
         return (
-          <div key={col.key} className={`flex items-center justify-center px-2 text-[11px] text-[#a0a0a0] ${isLast ? '' : 'border-r border-[#111]'}`}>
+          <div key={col.key} className="flex items-center justify-center px-2 text-[11px] text-[#a0a0a0]">
             {formatVal(col.key, coin)}
           </div>
         )
@@ -147,8 +150,6 @@ export function CoinList() {
   const rowRenderer = useCallback((index: number) => {
     const coin = sortedCoins[index]
     const onPage = highlightActive && pageSet.has(coin.symbol)
-    const nextCoin = sortedCoins[index + 1]
-    const nextOnPage = highlightActive && !!nextCoin && pageSet.has(nextCoin.symbol)
     return (
       <Row
         key={coin.symbol}
@@ -156,7 +157,6 @@ export function CoinList() {
         cols={cols}
         isSelected={selectedSymbol === coin.symbol}
         isOnPage={onPage}
-        isNextOnPage={nextOnPage}
         isWatched={watchSet.has(coin.symbol)}
         onClick={expandChart}
         onPrefetch={onPrefetch}

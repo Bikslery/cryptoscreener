@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { prisma } from '../db/index.js'
 import { writeRateLimit } from '../utils/rate-limit.js'
+import type { Prisma } from '@prisma/client'
 
 const router = Router()
 
@@ -8,16 +9,16 @@ const router = Router()
 const writeLimiter = writeRateLimit(120)
 
 router.get('/', async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const { symbol } = req.query
-  const where: any = { userId }
-  if (symbol) where.symbol = symbol
+  const where: Prisma.DrawingWhereInput = { userId }
+  if (typeof symbol === 'string') where.symbol = symbol
   const drawings = await prisma.drawing.findMany({ where })
   res.json(drawings.map(d => ({ ...d, data: JSON.parse(d.data) })))
 })
 
 router.post('/', writeLimiter, async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const { symbol, type, data, timeframe } = req.body
   const drawing = await prisma.drawing.create({
     data: { userId, symbol, timeframe: timeframe || '', type, data: JSON.stringify(data) },
@@ -26,7 +27,7 @@ router.post('/', writeLimiter, async (req, res) => {
 })
 
 router.put('/:id', writeLimiter, async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const id = String(req.params.id)
   const { data, timeframe } = req.body
   const drawing = await prisma.drawing.update({
@@ -37,7 +38,7 @@ router.put('/:id', writeLimiter, async (req, res) => {
 })
 
 router.delete('/:id', writeLimiter, async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const id = String(req.params.id)
   await prisma.drawing.delete({ where: { id, userId } })
   res.json({ ok: true })

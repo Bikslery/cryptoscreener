@@ -12,11 +12,11 @@ interface DrawingToolsPanelProps {
 }
 
 const TOOLS: { id: HotkeyTool; icon: typeof Minus; label: string }[] = [
-  { id: 'h-ray', icon: Minus, label: 'Гориз. луч' },
-  { id: 't-ray', icon: TrendingUp, label: 'Тренд. луч' },
-  { id: 'segment', icon: Slash, label: 'Отрезок' },
-  { id: 'rect', icon: Square, label: 'Прямоугольник' },
-  { id: 'alert', icon: Bell, label: 'Ценовой алерт' },
+  { id: 'h-ray', icon: Minus, label: 'Horiz. ray' },
+  { id: 't-ray', icon: TrendingUp, label: 'Trend ray' },
+  { id: 'segment', icon: Slash, label: 'Segment' },
+  { id: 'rect', icon: Square, label: 'Rectangle' },
+  { id: 'alert', icon: Bell, label: 'Price alert' },
 ]
 
 const DrawingToolsPanel = memo(function DrawingToolsPanel({
@@ -53,7 +53,7 @@ const DrawingToolsPanel = memo(function DrawingToolsPanel({
             <button
               className="clinic-btn clinic-btn-danger flex items-center justify-center w-[30px] h-[30px] p-0"
               onClick={clearAllDrawings}
-              title="Удалить все"
+              title="Delete all"
             >
               <Trash2 size={13} strokeWidth={1.5} />
             </button>
@@ -63,7 +63,7 @@ const DrawingToolsPanel = memo(function DrawingToolsPanel({
 
       {pendingPoint && (
         <div className="bg-[#222] border border-[#444] rounded-[4px] px-[8px] py-[4px] text-[10px] text-[#999] font-mono">
-          1-я точка: {pendingPoint.price.toFixed(2)}
+          1st point: {pendingPoint.price.toFixed(2)}
         </div>
       )}
     </div>

@@ -2,7 +2,7 @@ import type { Exchange, ImpulseAlertCondition, ImpulseExchangeCondition, PriceAl
 
 // Manual condition validation (zod-style, zero dependencies).
 
-export const VALID_EXCHANGES: readonly Exchange[] = ['binance-spot', 'binance-futures', 'bybit-futures', 'okx-spot', 'okx-futures']
+export const VALID_EXCHANGES: readonly Exchange[] = ['binance-spot', 'binance-futures', 'bybit-futures']
 const IMPULSE_TIMEFRAMES = ['1m', '5m'] as const
 const IMPULSE_DIRECTIONS = ['up', 'down', 'both'] as const
 
@@ -17,8 +17,8 @@ export function isFiniteNumberIn(v: unknown, min: number, max: number): v is num
 export function validateImpulseCondition(raw: unknown): { condition: ImpulseAlertCondition } | { error: string } {
   if (!isRecord(raw)) return { error: 'condition должен быть объектом' }
   if (!isFiniteNumberIn(raw.percent, 0.01, 1000)) return { error: 'percent: число 0.01–1000' }
-  if (typeof raw.timeframe !== 'string' || !IMPULSE_TIMEFRAMES.includes(raw.timeframe as any)) return { error: 'timeframe: 1m или 5m' }
-  if (typeof raw.direction !== 'string' || !IMPULSE_DIRECTIONS.includes(raw.direction as any)) return { error: 'direction: up/down/both' }
+  if (typeof raw.timeframe !== 'string' || !(IMPULSE_TIMEFRAMES as readonly string[]).includes(raw.timeframe)) return { error: 'timeframe: 1m или 5m' }
+  if (typeof raw.direction !== 'string' || !(IMPULSE_DIRECTIONS as readonly string[]).includes(raw.direction)) return { error: 'direction: up/down/both' }
   if (!isFiniteNumberIn(raw.volumeSpike, 0, 1000)) return { error: 'volumeSpike: число 0–1000 (0 = выкл)' }
   if (!Array.isArray(raw.exchanges) || raw.exchanges.length === 0 || raw.exchanges.length > 10) return { error: 'exchanges: массив 1–10 бирж' }
   const exchanges: ImpulseExchangeCondition[] = []

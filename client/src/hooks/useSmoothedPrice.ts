@@ -44,23 +44,24 @@ export function useSmoothedPriceRef(
   const prefixRef = useRef(prefix)
   const initialRef = useRef(initialPrice)
   // Glide state that survives element re-attaches and header re-renders.
-  const st = useRef({
+  const stRef = useRef({
     symbol: null as string | null,
     exchange: null as string | null,
     displayed: undefined as number | undefined,
     glide: null as ReturnType<typeof beginScalarGlide> | null,
     lastTargetAt: 0,
-  }).current
+  })
 
   const paint = useCallback(() => {
     const el = ref.current
+    const st = stRef.current
     if (el && st.displayed !== undefined) {
       // Snap to the exchange tick grid so the shown value always exists as a
       // стакан level (a glide mid-flight would otherwise pass through
       // off-grid prices the book cannot display).
       el.textContent = prefixRef.current + formatPrice(snapToTick(st.displayed, precisionRef.current), precisionRef.current)
     }
-  }, [st])
+  }, [])
 
   // Exchange-scoped read with a fall back to the global per-symbol lane —
   // before the chart's own lane has its first print the global seed shows.
@@ -80,14 +81,16 @@ export function useSmoothedPriceRef(
   // live frame for this symbol arrives). Guarded by the symbol check so a
   // symbol switch can never leak the previous symbol's price in.
   useEffect(() => {
+    const st = stRef.current
     if (st.symbol === symbol && st.displayed === undefined && initialPrice !== undefined) {
       st.displayed = initialPrice
       st.lastTargetAt = performance.now()
       paint()
     }
-  }, [initialPrice, symbol, paint, st])
+  }, [initialPrice, symbol, paint])
 
   useEffect(() => {
+    const st = stRef.current
     // Symbol/exchange switched (ExpandedChart is reused across symbols): reset state.
     if (st.symbol !== symbol || st.exchange !== exchange) {
       st.symbol = symbol
@@ -170,7 +173,7 @@ export function useSmoothedPriceRef(
       unsub()
       unregisterGlider(glider)
     }
-  }, [symbol, exchange, st, paint, readLive])
+  }, [symbol, exchange, paint, readLive])
 
   return ref
 }

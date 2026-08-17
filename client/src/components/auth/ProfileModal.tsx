@@ -9,6 +9,7 @@ import { resolveCascadesConfig } from '../../services/chart-overlays'
 import { resolveDensitySettings } from '../../services/density'
 import { resolveIndicators, INDICATOR_LABELS, VALID_INDICATOR_KEYS } from '../../services/indicators'
 import { useAlertStore } from '../../store'
+import { apiErrorText } from '../../utils/apiError'
 import type { CascadesConfig, DensitySettings, IndicatorKey, CoinListColKey, Exchange, Alert as AlertType } from '../../types'
 import './ProfileModal.css'
 
@@ -70,9 +71,53 @@ export default function ProfileModal() {
   const [visibleBars, setVisibleBars] = useState(settings?.chartVisibleBars ?? 450)
   const scaleSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  useEffect(() => {
+  // Alert notification settings — sound on/off + volume (0–1).
+  const [notifySound, setNotifySound] = useState(settings?.notifySound !== false)
+  const [notifyVolume, setNotifyVolume] = useState(settings?.notifyVolume ?? 1)
+  const notifySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Fired-alert toast: corner position + auto-close duration (seconds).
+  const [toastPosition, setToastPosition] = useState<'bottom-right' | 'bottom-left'>(settings?.notifyToastPosition ?? 'bottom-right')
+  const [toastDuration, setToastDuration] = useState(settings?.notifyToastDurationSec ?? 20)
+  const toastSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Cascade + density engine config — every parameter of the chart overlays.
+  const [cascades, setCascades] = useState<CascadesConfig>(() =>
+    resolveCascadesConfig(settings?.cascades),
+  )
+  const cascadesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Density (orderbook walls) config — БРП mode/manual value, category
+  // multipliers and per-symbol overrides.
+  const [density, setDensity] = useState<DensitySettings>(() =>
+    resolveDensitySettings(settings?.density),
+  )
+  const [densitySymbolInput, setDensitySymbolInput] = useState('')
+  const densitySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Indicator column configuration — coin list columns + mini-chart header
+  // fields. Ordered lists with up/down arrows, add/remove chips below.
+  const [indicators, setIndicators] = useState<{ coinList: CoinListColKey[]; chartHeader: IndicatorKey[] }>(() =>
+    resolveIndicators(settings?.indicators),
+  )
+  const indicatorsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Server settings may arrive AFTER the modal mounts (they load at login) —
+  // mirror them into the editable local state. This is React's recommended
+  // "storing information from previous renders" pattern: adjust state during
+  // render, guarded by a previous-value check, no effect needed.
+  const [prevSettings, setPrevSettings] = useState(settings)
+  if (settings !== prevSettings) {
+    setPrevSettings(settings)
     setVisibleBars(settings?.chartVisibleBars ?? 450)
-  }, [settings?.chartVisibleBars])
+    setNotifySound(settings?.notifySound !== false)
+    setNotifyVolume(settings?.notifyVolume ?? 1)
+    setToastPosition(settings?.notifyToastPosition ?? 'bottom-right')
+    setToastDuration(settings?.notifyToastDurationSec ?? 20)
+    setCascades(resolveCascadesConfig(settings?.cascades))
+    setDensity(resolveDensitySettings(settings?.density))
+    setIndicators(resolveIndicators(settings?.indicators))
+  }
 
   const handleScaleChange = (v: number) => {
     setVisibleBars(v)
@@ -81,19 +126,6 @@ export default function ProfileModal() {
       updateSettings({ chartVisibleBars: v }).catch(() => {})
     }, 400)
   }
-
-  // Alert notification settings — sound on/off + volume (0–1).
-  const [notifySound, setNotifySound] = useState(settings?.notifySound !== false)
-  const [notifyVolume, setNotifyVolume] = useState(settings?.notifyVolume ?? 1)
-  const notifySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    setNotifySound(settings?.notifySound !== false)
-  }, [settings?.notifySound])
-
-  useEffect(() => {
-    setNotifyVolume(settings?.notifyVolume ?? 1)
-  }, [settings?.notifyVolume])
 
   const handleNotifySoundChange = (on: boolean) => {
     setNotifySound(on)
@@ -108,19 +140,6 @@ export default function ProfileModal() {
       updateSettings({ notifyVolume: v }).catch(() => {})
     }, 400)
   }
-
-  // Fired-alert toast: corner position + auto-close duration (seconds).
-  const [toastPosition, setToastPosition] = useState<'bottom-right' | 'bottom-left'>(settings?.notifyToastPosition ?? 'bottom-right')
-  const [toastDuration, setToastDuration] = useState(settings?.notifyToastDurationSec ?? 20)
-  const toastSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    setToastPosition(settings?.notifyToastPosition ?? 'bottom-right')
-  }, [settings?.notifyToastPosition])
-
-  useEffect(() => {
-    setToastDuration(settings?.notifyToastDurationSec ?? 20)
-  }, [settings?.notifyToastDurationSec])
 
   const handleToastPositionChange = (p: 'bottom-right' | 'bottom-left') => {
     setToastPosition(p)
@@ -138,34 +157,6 @@ export default function ProfileModal() {
     }, 400)
   }
 
-  useEffect(() => {
-    return () => {
-      if (toastSaveTimer.current) clearTimeout(toastSaveTimer.current)
-    }
-  }, [])
-
-  useEffect(() => {
-    return () => {
-      if (notifySaveTimer.current) clearTimeout(notifySaveTimer.current)
-    }
-  }, [])
-
-  useEffect(() => {
-    return () => {
-      if (scaleSaveTimer.current) clearTimeout(scaleSaveTimer.current)
-    }
-  }, [])
-
-  // Cascade + density engine config — every parameter of the chart overlays.
-  const [cascades, setCascades] = useState<CascadesConfig>(() =>
-    resolveCascadesConfig(settings?.cascades),
-  )
-  const cascadesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    setCascades(resolveCascadesConfig(settings?.cascades))
-  }, [settings?.cascades])
-
   const saveCascades = (next: CascadesConfig) => {
     setCascades(next)
     if (cascadesSaveTimer.current) clearTimeout(cascadesSaveTimer.current)
@@ -174,24 +165,6 @@ export default function ProfileModal() {
     }, 400)
   }
 
-  useEffect(() => {
-    return () => {
-      if (cascadesSaveTimer.current) clearTimeout(cascadesSaveTimer.current)
-    }
-  }, [])
-
-  // Density (orderbook walls) config — БРП mode/manual value, category
-  // multipliers and per-symbol overrides.
-  const [density, setDensity] = useState<DensitySettings>(() =>
-    resolveDensitySettings(settings?.density),
-  )
-  const [densitySymbolInput, setDensitySymbolInput] = useState('')
-  const densitySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    setDensity(resolveDensitySettings(settings?.density))
-  }, [settings?.density])
-
   const saveDensity = (next: DensitySettings) => {
     setDensity(next)
     if (densitySaveTimer.current) clearTimeout(densitySaveTimer.current)
@@ -199,12 +172,6 @@ export default function ProfileModal() {
       updateSettings({ density: next }).catch(() => {})
     }, 400)
   }
-
-  useEffect(() => {
-    return () => {
-      if (densitySaveTimer.current) clearTimeout(densitySaveTimer.current)
-    }
-  }, [])
 
   const handleDensityReset = () => {
     setDensity(resolveDensitySettings(undefined))
@@ -219,28 +186,11 @@ export default function ProfileModal() {
     setDensitySymbolInput('')
   }
 
-  useEffect(() => {
-    return () => {
-      if (indicatorsSaveTimer.current) clearTimeout(indicatorsSaveTimer.current)
-    }
-  }, [])
-
   const handleCascadesReset = () => {
     setCascades(resolveCascadesConfig(undefined))
     if (cascadesSaveTimer.current) clearTimeout(cascadesSaveTimer.current)
     updateSettings({ cascades: undefined }).catch(() => {})
   }
-
-  // Indicator column configuration — coin list columns + mini-chart header
-  // fields. Ordered lists with up/down arrows, add/remove chips below.
-  const [indicators, setIndicators] = useState<{ coinList: CoinListColKey[]; chartHeader: IndicatorKey[] }>(() =>
-    resolveIndicators(settings?.indicators),
-  )
-  const indicatorsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    setIndicators(resolveIndicators(settings?.indicators))
-  }, [settings?.indicators])
 
   const saveIndicators = (next: { coinList: CoinListColKey[]; chartHeader: IndicatorKey[] }) => {
     setIndicators(next)
@@ -249,6 +199,18 @@ export default function ProfileModal() {
       updateSettings({ indicators: next }).catch(() => {})
     }, 400)
   }
+
+  // Debounce-timer cleanup on unmount (all save timers above).
+  useEffect(() => {
+    return () => {
+      if (scaleSaveTimer.current) clearTimeout(scaleSaveTimer.current)
+      if (notifySaveTimer.current) clearTimeout(notifySaveTimer.current)
+      if (toastSaveTimer.current) clearTimeout(toastSaveTimer.current)
+      if (cascadesSaveTimer.current) clearTimeout(cascadesSaveTimer.current)
+      if (densitySaveTimer.current) clearTimeout(densitySaveTimer.current)
+      if (indicatorsSaveTimer.current) clearTimeout(indicatorsSaveTimer.current)
+    }
+  }, [])
 
   const saveIndicatorField = (field: 'coinList' | 'chartHeader', list: CoinListColKey[] | IndicatorKey[]) => {
     if (field === 'coinList') saveIndicators({ ...indicators, coinList: list as CoinListColKey[] })
@@ -391,8 +353,8 @@ export default function ProfileModal() {
         }
         setAlertsEnabled(false)
       }
-    } catch (err: any) {
-      setAlertError(err.response?.data?.error || 'Не удалось изменить состояние алертов')
+    } catch (err) {
+      setAlertError(apiErrorText(err, 'Не удалось изменить состояние алертов'))
     } finally {
       setAlertSaving(false)
     }
@@ -485,8 +447,8 @@ export default function ProfileModal() {
       await api.post('/auth/reset-request', { userId })
       setCodeTimer(300)
       setResetStep('code')
-    } catch (err: any) {
-      setResetError(err.response?.data?.error || 'Ошибка отправки кода')
+    } catch (err) {
+      setResetError(apiErrorText(err, 'Ошибка отправки кода'))
     } finally {
       setResetLoading(false)
     }
@@ -497,8 +459,8 @@ export default function ProfileModal() {
     try {
       await api.post('/auth/reset-request', { userId })
       setCodeTimer(300)
-    } catch (err: any) {
-      setResetError(err.response?.data?.error || 'Ошибка отправки кода')
+    } catch (err) {
+      setResetError(apiErrorText(err, 'Ошибка отправки кода'))
     }
   }
 
@@ -514,8 +476,8 @@ export default function ProfileModal() {
       const res = await api.post('/auth/reset-verify', { userId, code: resetCode })
       setResetToken(res.data.resetToken)
       setResetStep('password')
-    } catch (err: any) {
-      setResetError(err.response?.data?.error || 'Неверный код')
+    } catch (err) {
+      setResetError(apiErrorText(err, 'Неверный код'))
     } finally {
       setResetLoading(false)
     }
@@ -536,8 +498,8 @@ export default function ProfileModal() {
     try {
       await api.post('/auth/reset-password', { resetToken, password: newPassword })
       setResetStep('done')
-    } catch (err: any) {
-      setResetError(err.response?.data?.error || 'Ошибка смены пароля')
+    } catch (err) {
+      setResetError(apiErrorText(err, 'Ошибка смены пароля'))
     } finally {
       setResetLoading(false)
     }

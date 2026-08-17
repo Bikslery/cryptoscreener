@@ -67,7 +67,7 @@
   border-radius: var(--radius-md);
   color: var(--text-primary);
   font-size: 0.95rem;
-  font-family: 'Noto Sans Variable', ui-sans-serif, system-ui, sans-serif;
+  font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   outline: none;
 }
 
@@ -119,7 +119,7 @@
   font-size: 0.95rem;
   font-weight: 600;
   color: var(--text-primary);
-  font-family: 'Noto Sans Variable', ui-sans-serif, system-ui, sans-serif;
+  font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .ticker-search-result-meta {

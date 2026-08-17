@@ -19,7 +19,7 @@ vi.mock('./store', () => {
   }
 
   const buildHook = (store: ReturnType<typeof makeStore>) => {
-    const hook = (selector: (s: ReturnType<typeof store.getState>) => unknown) => selector(store.getState() as any)
+    const hook = (selector: (s: ReturnType<typeof store.getState>) => unknown) => selector(store.getState())
     hook.getState = store.getState
     hook.setState = store.setState
     return hook
@@ -78,7 +78,7 @@ vi.mock('./store/density', () => {
     subscribe: vi.fn(),
     destroy: vi.fn(),
   }
-  const hook = (selector: (s: { init: () => () => void }) => unknown) => selector(store.getState() as any)
+  const hook = (selector: (s: { init: () => () => void }) => unknown) => selector(store.getState())
   hook.getState = store.getState
   hook.setState = store.setState
   return { useDensityStore: hook }
@@ -93,7 +93,7 @@ vi.mock('./store/drawingHotkeys', () => {
     subscribe: vi.fn(),
     destroy: vi.fn(),
   }
-  const hook = (selector: (s: { initFromSettings: ReturnType<typeof vi.fn> }) => unknown) => selector(store.getState() as any)
+  const hook = (selector: (s: { initFromSettings: ReturnType<typeof vi.fn> }) => unknown) => selector(store.getState())
   hook.getState = store.getState
   hook.setState = store.setState
   return { useDrawingHotkeysStore: hook }

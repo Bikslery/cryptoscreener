@@ -1,9 +1,29 @@
+import { z } from 'zod'
 import { prisma } from '../../db/index.js'
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`
 
 export const TELEGRAM_BOT_USERNAME = 'clinic_screenerbot'
+
+interface TelegramApiResult {
+  ok: boolean
+  description?: string
+  result?: unknown
+}
+
+const telegramMessageSchema = z.object({
+  chat: z.object({ id: z.union([z.number(), z.string()]) }),
+  text: z.string().optional(),
+})
+
+const telegramUpdateSchema = z.object({
+  update_id: z.number().optional(),
+  message: telegramMessageSchema.optional(),
+  callback_query: z.object({ message: telegramMessageSchema.optional() }).optional(),
+})
+
+export type TelegramUpdate = z.infer<typeof telegramUpdateSchema>
 
 export async function sendTelegramMessage(chatId: string, text: string) {
   try {
@@ -17,7 +37,7 @@ export async function sendTelegramMessage(chatId: string, text: string) {
         disable_web_page_preview: true,
       }),
     })
-    const data = await res.json() as any
+    const data = await res.json() as TelegramApiResult
     if (!data.ok) {
       console.error('[Telegram] sendMessage failed:', data.description)
     }
@@ -31,14 +51,14 @@ export async function sendTelegramMessage(chatId: string, text: string) {
 export async function getBotInfo() {
   try {
     const res = await fetch(`${API_BASE}/getMe`)
-    const data = await res.json() as any
+    const data = await res.json() as TelegramApiResult
     return data.ok ? data.result : null
   } catch {
     return null
   }
 }
 
-export async function handleUpdate(update: any) {
+export async function handleUpdate(update: TelegramUpdate) {
   const message = update.message || update.callback_query?.message
   if (!message) return
 
@@ -122,11 +142,13 @@ export function startTelegramPolling() {
       const timer = setTimeout(() => ctrl.abort(), 30000)
       const res = await fetch(`${API_BASE}/getUpdates?offset=${offset}&limit=10`, { signal: ctrl.signal })
       clearTimeout(timer)
-      const data = await res.json() as any
+      const data = await res.json() as TelegramApiResult
       if (data.ok && Array.isArray(data.result)) {
-        for (const update of data.result) {
-          offset = update.update_id + 1
-          await handleUpdate(update)
+        for (const raw of data.result) {
+          const parsed = telegramUpdateSchema.safeParse(raw)
+          if (!parsed.success) continue
+          offset = (parsed.data.update_id ?? 0) + 1
+          await handleUpdate(parsed.data)
         }
       }
     } catch {

@@ -10,14 +10,14 @@ export const DEFAULT_DENSITY_SETTINGS: DensitySettings = {
   mode: 'auto',
   manualBrp: 500_000,
   // scalpboard-математика тиров (×2/×3.5/×5 из их бандла), но время жизни
-  // по просьбе пользователя 5 минут вместо их 30: плотность должна 5 минут
+  // по просьбе пользователя 10 минут вместо их 30: плотность должна 10 минут
   // простоять на месте, чтобы появиться — спуф-фильтр + терпимое ожидание.
   multSmall: 2,
   multMedium: 3.5,
   multLarge: 5,
-  lifeSmall: 5,
-  lifeMedium: 5,
-  lifeLarge: 5,
+  lifeSmall: 10,
+  lifeMedium: 10,
+  lifeLarge: 10,
   perSymbol: {},
   zoomPct: 3,
   walls: false,
@@ -118,10 +118,10 @@ export function formatUsdt(sizeUsdt: number): string {
 
 export function formatAge(bornAt: number, now = Date.now()): string {
   const sec = Math.max(0, Math.floor((now - bornAt) / 1000))
-  if (sec < 60) return `${sec}с`
+  if (sec < 60) return `${sec}s`
   const min = Math.floor(sec / 60)
-  if (min < 60) return `${min}м`
+  if (min < 60) return `${min}m`
   const h = Math.floor(min / 60)
-  if (h < 24) return `${h}ч${min % 60}м`
-  return `${Math.floor(h / 24)}д${h % 24}ч`
+  if (h < 24) return `${h}h${min % 60}m`
+  return `${Math.floor(h / 24)}d${h % 24}h`
 }

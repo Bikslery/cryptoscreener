@@ -90,7 +90,7 @@ export function flushCandleLane(): void {
   flushPendingCandles()
 }
 
-function recordInboundCandle(candle: UnifiedCandle): GapEvent | null {
+export function recordInboundCandle(candle: UnifiedCandle): GapEvent | null {
   candleDiagState.candlesReceived++
   const key = `${candle.exchange}:${candle.symbol}:${candle.timeframe}`
   const prev = candleDiagState.lastSeen.get(key)
@@ -149,6 +149,21 @@ export function getCandleDiagStats(): CandleDiagStats {
     lastSeenCount: candleDiagState.lastSeen.size,
     recentGaps: candleDiagState.recentGaps.slice(-MAX_RECENT_GAPS),
   }
+}
+
+// Test seam: reset the inbound-candle diagnostics state between test cases so
+// a fresh module state is not required for deterministic gap detection tests.
+export const __test = {
+  resetCandleDiag() {
+    candleDiagState.candlesReceived = 0
+    candleDiagState.gapsDetected = 0
+    candleDiagState.gapsSkippedLarge = 0
+    candleDiagState.lateCandles = 0
+    candleDiagState.oddCandles = 0
+    candleDiagState.lastSeen = new Map<string, number>()
+    candleDiagState.lastCandleRange = new Map<string, number>()
+    candleDiagState.recentGaps = []
+  },
 }
 
 export function getCandleManagerStats() {
@@ -224,7 +239,7 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
     }
   }
 
-  const depthCallback = (depth: any) => {
+  const depthCallback = (depth: { exchange?: string; symbol?: string }) => {
     const channel = `depth:${depth.exchange}:${depth.symbol}`
     broadcastToChannel(channel, depth, true)
   }

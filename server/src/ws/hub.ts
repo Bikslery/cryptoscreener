@@ -3,6 +3,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { verifyTokenWithTelegram, type JwtPayload } from '../middleware/auth.js'
 import type { WsMessage } from '../types.js'
 import type { UnifiedTicker, UnifiedCandle } from '../types.js'
+import { inboundWsSchema } from './schemas.js'
 import { getTopCachedSymbols, getCachedCandles, updateCachedCandle } from '../services/candles/candle-cache.js'
 import { getAllTickers, getTickers, getTicker, setTickersFromRedis } from '../services/aggregator/index.js'
 import { INITIAL_CANDLES_TF } from '../services/candles/preload.js'
@@ -49,7 +50,7 @@ const dropDiag = {
 }
 const dropDiagPrintedAt: Record<string, number> = {}
 
-function classifyChannel(channel: string): keyof typeof dropDiag {
+export function classifyChannel(channel: string): keyof typeof dropDiag {
   if (channel.startsWith('candle:')) return 'candle'
   if (channel.startsWith('trade:')) return 'trade'
   if (channel.startsWith('price:')) return 'price'
@@ -107,7 +108,7 @@ const wsBatchBuffer = new Map<string, unknown>()
 // frames). Only frames above PLAIN_FRAME_MAX_BYTES get deflated.
 const PLAIN_FRAME_MAX_BYTES = 4096
 
-function encodePayload(data: unknown): Buffer | string {
+export function encodePayload(data: unknown): Buffer | string {
   const json = JSON.stringify(data)
   if (json.length <= PLAIN_FRAME_MAX_BYTES) return json
   return deflateRawSync(json)
@@ -138,7 +139,7 @@ function flushBatchBuffer() {
   const endTimer = wsBatchFlushLatency.startTimer()
   try {
     for (const [channel, data] of wsBatchBuffer) {
-      const msg: WsMessage = { type: channel as any, channel, data }
+const msg: WsMessage = { type: channel, channel, data }
       let raw: Buffer | string | null = null
       for (const client of clients.values()) {
         if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
@@ -290,11 +291,17 @@ export function setupWsHub(wss: WebSocketServer) {
 
     ws.on('message', (raw) => {
       try {
-        const msg = JSON.parse(raw.toString()) as WsMessage
+        const parsed = JSON.parse(raw.toString())
+        const result = inboundWsSchema.safeParse(parsed)
+        if (!result.success) {
+          console.warn('[Hub] Rejected malformed WS message:', result.error.message)
+          return
+        }
+        const msg = result.data
 
         // Support auth via first WS message (avoids token in URL which gets logged)
         if (msg.type === 'auth' && msg.token && !client.user) {
-          verifyTokenWithTelegram(msg.token as string).then(verified => {
+          verifyTokenWithTelegram(msg.token).then(verified => {
             if (verified) {
               client.user = verified
             } else {
@@ -459,7 +466,7 @@ export function broadcast(msg: WsMessage) {
 
 export function broadcastToChannel(channel: string, data: unknown, immediate = false) {
   if (immediate) {
-    const msg: WsMessage = { type: channel as any, channel, data }
+    const msg: WsMessage = { type: channel, channel, data }
     const raw = encodePayload(msg)
     for (const client of clients.values()) {
       if (!client.subscriptions.has(channel) || client.ws.readyState !== WebSocket.OPEN) continue

@@ -68,7 +68,7 @@ const DEFAULT_PRIORITY: Record<string, number> = {
   'binance-spot': 2,
 }
 
-function parseExchangePriority(envStr: string): Record<string, number> {
+export function parseExchangePriority(envStr: string): Record<string, number> {
   const result: Record<string, number> = {}
   for (const pair of envStr.split(',')) {
     const [ex, pri] = pair.split(':')
@@ -77,7 +77,7 @@ function parseExchangePriority(envStr: string): Record<string, number> {
   return result
 }
 
-function parseBlacklist(envStr: string): Map<string, Set<string>> {
+export function parseBlacklist(envStr: string): Map<string, Set<string>> {
   const result = new Map<string, Set<string>>()
   for (const segment of envStr.split(';')) {
     const [ex, symbols] = segment.split(':')
@@ -87,7 +87,7 @@ function parseBlacklist(envStr: string): Map<string, Set<string>> {
   return result
 }
 
-function parseOverrides(envStr: string): Map<string, Map<string, number>> {
+export function parseOverrides(envStr: string): Map<string, Map<string, number>> {
   const result = new Map<string, Map<string, number>>()
   try {
     const obj = JSON.parse(envStr) as Record<string, Record<string, number>>
@@ -100,6 +100,71 @@ function parseOverrides(envStr: string): Map<string, Map<string, number>> {
     console.warn('[Aggregator] Failed to parse EXCHANGE_SYMBOL_OVERRIDES — ignoring')
   }
   return result
+}
+
+/**
+ * Pure core of best-coin selection: given a stream of unified tickers and the
+ * priority/blacklist config, returns the highest-priority ticker per symbol.
+ * Extracted so the selection logic is unit-testable without touching the
+ * module-global ticker map.
+ */
+export function pickBestTickers(
+  tickers: Iterable<UnifiedTicker>,
+  opts: {
+    isBlacklisted: (exchange: string, symbol: string) => boolean
+    getPriority: (exchange: string, symbol?: string) => number
+  },
+): Map<string, UnifiedTicker> {
+  const best = new Map<string, UnifiedTicker>()
+  for (const t of tickers) {
+    if (opts.isBlacklisted(t.exchange, t.symbol)) continue
+    const existing = best.get(t.symbol)
+    const prioT = opts.getPriority(t.exchange, t.symbol)
+    const prioE = existing ? opts.getPriority(existing.exchange, existing.symbol) : -1
+    if (!existing || prioT > prioE) {
+      best.set(t.symbol, t)
+    }
+  }
+  return best
+}
+
+/**
+ * Pure core of delta computation: compares the incoming tickers against the
+ * previously broadcast state and returns (a) only the tickers whose observable
+ * fields changed, plus removals, and (b) the new state to feed the next call.
+ * Extracted so the merge/delta logic is deterministic and unit-testable.
+ */
+export function computeTickerDelta(
+  tickers: UnifiedTicker[],
+  prev: Map<string, Partial<UnifiedTicker>>,
+): { delta: UnifiedTicker[]; next: Map<string, Partial<UnifiedTicker>> } {
+  const delta: UnifiedTicker[] = []
+  const seen = new Set<string>()
+  for (const t of tickers) {
+    const key = `${t.symbol}:${t.exchange}`
+    seen.add(key)
+    const p = prev.get(key)
+    if (!p || p.price !== t.price || p.change24h !== t.change24h || p.quoteVolume24h !== t.quoteVolume24h
+      || p.corrBtc !== t.corrBtc || p.tradesSpike !== t.tradesSpike || p.volumeSpike !== t.volumeSpike) {
+      delta.push(t)
+    }
+  }
+  for (const [key, p] of prev) {
+    if (!seen.has(key)) delta.push(p as UnifiedTicker)
+  }
+  const next = new Map(
+    tickers.map(t => [`${t.symbol}:${t.exchange}`, {
+      symbol: t.symbol,
+      exchange: t.exchange,
+      price: t.price,
+      change24h: t.change24h,
+      quoteVolume24h: t.quoteVolume24h,
+      corrBtc: t.corrBtc,
+      tradesSpike: t.tradesSpike,
+      volumeSpike: t.volumeSpike,
+    }] as [string, Partial<UnifiedTicker>])
+  )
+  return { delta, next }
 }
 
 const EXCHANGE_PRIORITY: Record<string, number> = {
@@ -128,17 +193,7 @@ function getPriority(exchange: string, symbol?: string): number {
 }
 
 function pickBestFromMap(): Map<string, UnifiedTicker> {
-  const best = new Map<string, UnifiedTicker>()
-  for (const t of tickerMap.values()) {
-    if (isBlacklisted(t.exchange, t.symbol)) continue
-    const existing = best.get(t.symbol)
-    const prioT = getPriority(t.exchange, t.symbol)
-    const prioE = existing ? getPriority(existing.exchange, existing.symbol) : -1
-    if (!existing || prioT > prioE) {
-      best.set(t.symbol, t)
-    }
-  }
-  return best
+  return pickBestTickers(tickerMap.values(), { isBlacklisted, getPriority })
 }
 
 // Broadcast cadence: price deltas every TICKER_BROADCAST_INTERVAL_MS (default
@@ -217,32 +272,8 @@ function getBestMap(): Map<string, UnifiedTicker> {
 }
 
 function computeDelta(tickers: UnifiedTicker[]): UnifiedTicker[] {
-  const delta: UnifiedTicker[] = []
-  const seen = new Set<string>()
-  for (const t of tickers) {
-    const key = `${t.symbol}:${t.exchange}`
-    seen.add(key)
-    const prev = lastBroadcastedTickers.get(key)
-    if (!prev || prev.price !== t.price || prev.change24h !== t.change24h || prev.quoteVolume24h !== t.quoteVolume24h
-      || prev.corrBtc !== t.corrBtc || prev.tradesSpike !== t.tradesSpike || prev.volumeSpike !== t.volumeSpike) {
-      delta.push(t)
-    }
-  }
-  for (const [key, prev] of lastBroadcastedTickers) {
-    if (!seen.has(key)) delta.push(prev as UnifiedTicker)
-  }
-  lastBroadcastedTickers = new Map(
-    tickers.map(t => [`${t.symbol}:${t.exchange}`, {
-      symbol: t.symbol,
-      exchange: t.exchange,
-      price: t.price,
-      change24h: t.change24h,
-      quoteVolume24h: t.quoteVolume24h,
-      corrBtc: t.corrBtc,
-      tradesSpike: t.tradesSpike,
-      volumeSpike: t.volumeSpike,
-    }])
-  )
+  const { delta, next } = computeTickerDelta(tickers, lastBroadcastedTickers)
+  lastBroadcastedTickers = next
   return delta
 }
 

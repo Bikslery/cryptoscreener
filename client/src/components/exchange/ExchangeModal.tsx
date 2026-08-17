@@ -12,9 +12,9 @@ interface ExchangeOption {
 }
 
 const EXCHANGE_OPTIONS: ExchangeOption[] = [
-  { value: 'binance-futures', label: 'Binance Futures', hint: 'фьючерсы USDT-M (REST 1с, если WS заблокирован)' },
-  { value: 'bybit-futures', label: 'Bybit Futures', hint: 'фьючерсы USDT-M · realtime WS' },
-  { value: 'binance-spot', label: 'Binance Spot', hint: 'спотовый рынок' },
+  { value: 'binance-futures', label: 'Binance Futures', hint: 'USDT-M futures (REST 1s if WS is blocked)' },
+  { value: 'bybit-futures', label: 'Bybit Futures', hint: 'USDT-M futures · realtime WS' },
+  { value: 'binance-spot', label: 'Binance Spot', hint: 'spot market' },
 ]
 
 export default function ExchangeModal() {
@@ -53,13 +53,13 @@ export default function ExchangeModal() {
             <ArrowLeftRight size={14} />
           </div>
           <div className="exchange-header-info">
-            <div className="exchange-title">Сменить биржу</div>
-            <div className="exchange-subtitle">источник данных для графиков</div>
+            <div className="exchange-title">Change exchange</div>
+            <div className="exchange-subtitle">chart data source</div>
           </div>
           <button
             className="exchange-close"
             onClick={() => setShowExchangeModal(false)}
-            aria-label="Закрыть"
+            aria-label="Close"
           >
             <X size={14} />
           </button>

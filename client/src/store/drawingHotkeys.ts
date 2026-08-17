@@ -17,11 +17,11 @@ export const DEFAULT_DRAWING_HOTKEYS: Record<HotkeyTool, string> = {
 }
 
 export const DRAWING_TOOL_LABELS: Record<HotkeyTool, string> = {
-  'h-ray': 'Горизонтальный луч',
-  't-ray': 'Трендовый луч',
-  segment: 'Отрезок',
-  rect: 'Прямоугольник',
-  alert: 'Ценовой алерт',
+  'h-ray': 'Horizontal ray',
+  't-ray': 'Trend ray',
+  segment: 'Segment',
+  rect: 'Rectangle',
+  alert: 'Price alert',
 }
 
 interface DrawingHotkeysState {

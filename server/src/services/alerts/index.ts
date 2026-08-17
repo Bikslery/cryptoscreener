@@ -6,6 +6,7 @@ import { prisma } from '../../db/index.js'
 import { sendTelegramMessage } from '../telegram/bot.js'
 import { pickExchangeTicker, lastCandleIndex, matchesImpulseCandle, normalizeImpulseCondition, isImpulseMuted, isCandleStale, IMPULSE_MUTE_MS } from './impulse.js'
 import type { PriceAlertCondition, ImpulseAlertCondition, UnifiedCandle, UnifiedTicker } from '../../types.js'
+import type { Alert as AlertRow } from '@prisma/client'
 import { formatPriceByPrecision, extractBaseAsset } from '../../utils/format.js'
 
 let checkInterval: ReturnType<typeof setInterval> | null = null
@@ -211,7 +212,7 @@ interface FireOptions {
   exchange?: string
 }
 
-async function fireAlert(alert: any, price: number, overrideSymbol?: string, pricePrecision?: number, opts: FireOptions = {}) {
+async function fireAlert(alert: AlertRow, price: number, overrideSymbol?: string, pricePrecision?: number, opts: FireOptions = {}) {
   const symbol = overrideSymbol || alert.symbol
   const condition = JSON.parse(alert.condition)
   if (opts.impulseCandleTime !== undefined) {

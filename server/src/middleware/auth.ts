@@ -2,6 +2,14 @@ import jwt from 'jsonwebtoken'
 import type { Request, Response, NextFunction } from 'express'
 import { prisma } from '../db/index.js'
 
+declare global {
+  namespace Express {
+    interface Request {
+      user?: JwtPayload
+    }
+  }
+}
+
 const JWT_SECRET = process.env.JWT_SECRET || (
   process.env.NODE_ENV === 'production'
     ? (() => { throw new Error('JWT_SECRET env var is required in production') })()
@@ -60,9 +68,9 @@ export function generateResetToken(userId: string): string {
 
 export function verifyResetToken(token: string): string | null {
   try {
-    const payload = jwt.verify(token, RESET_JWT_SECRET) as any
+    const payload = jwt.verify(token, RESET_JWT_SECRET) as { userId?: string; purpose?: string }
     if (payload.purpose !== 'password-reset') return null
-    return payload.userId as string
+    return payload.userId ?? null
   } catch {
     return null
   }
@@ -103,11 +111,11 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
     return
   }
 
-  ;(req as any).user = payload
+  req.user = payload
 
   // Auto-refresh: if token expires in < 1 day, issue a new one
   try {
-    const decoded = jwt.decode(token) as any
+    const decoded = jwt.decode(token) as { exp?: number } | null
     if (decoded?.exp) {
       const expiresAt = decoded.exp * 1000
       const now = Date.now()
@@ -128,7 +136,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 // the Telegram bot which updates the row without touching the JWT — a token
 // claim would go stale the moment the user binds.
 export async function requireTelegramVerified(req: Request, res: Response, next: NextFunction) {
-  const { userId } = (req as any).user
+  const { userId } = req.user || {}
   try {
     const user = await prisma.user.findUnique({
       where: { id: userId },

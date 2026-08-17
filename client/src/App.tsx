@@ -197,7 +197,7 @@ function App() {
   if (isChecking) {
     return (
       <div className="w-full h-full flex items-center justify-center bg-[#0a0a0a]">
-        <div className="text-zinc-500 text-lg">Загрузка...</div>
+        <div className="text-zinc-500 text-lg">Loading...</div>
       </div>
     )
   }
@@ -207,7 +207,7 @@ function App() {
     return (
       <Suspense fallback={
         <div className="w-full h-full flex items-center justify-center bg-[#0a0a0a]">
-          <div className="text-zinc-500 text-lg">Загрузка...</div>
+          <div className="text-zinc-500 text-lg">Loading...</div>
         </div>
       }>
         <AuthModal />
@@ -221,7 +221,7 @@ function App() {
     return (
       <Suspense fallback={
         <div className="w-full h-full flex items-center justify-center bg-[#0a0a0a]">
-          <div className="text-zinc-500 text-lg">Загрузка...</div>
+          <div className="text-zinc-500 text-lg">Loading...</div>
         </div>
       }>
         <TelegramGate />
@@ -239,7 +239,7 @@ function App() {
         </ErrorBoundary>
         <div
           className="group w-[5px] h-full flex-shrink-0 cursor-col-resize flex items-stretch justify-center touch-none select-none"
-          title="Перетащите, чтобы изменить ширину панели. Двойной клик — сброс."
+          title="Drag to resize the panel. Double-click to reset."
           onPointerDown={startPanelDrag}
           onDoubleClick={resetPanelWidth}
         >

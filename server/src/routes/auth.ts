@@ -84,7 +84,7 @@ router.post('/logout', (_req, res) => {
 })
 
 router.get('/me', authMiddleware, async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { id: true, username: true, telegramChatId: true, telegramVerified: true, settings: true },
@@ -101,7 +101,7 @@ router.get('/me', authMiddleware, async (req, res) => {
 })
 
 router.put('/settings', authMiddleware, requireTelegramVerified, async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const { settings } = req.body
   if (settings === undefined || settings === null) {
     res.status(400).json({ error: 'Settings body required' })
@@ -123,7 +123,7 @@ router.put('/settings', authMiddleware, requireTelegramVerified, async (req, res
 })
 
 router.get('/telegram-status', authMiddleware, async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { telegramVerified: true, id: true, telegramBindError: true },
@@ -145,7 +145,7 @@ router.post('/reset-request', authLimiter, async (req, res) => {
     return
   }
 
-  let user: any
+  let user: { id: string; telegramVerified: boolean; telegramChatId: string | null } | null
   if (username) {
     user = await prisma.user.findUnique({ where: { username } })
   } else {

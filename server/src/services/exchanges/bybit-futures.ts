@@ -8,6 +8,37 @@ const TF_MAP: Record<string, string> = {
   '1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1d': 'D', '1w': 'W',
 }
 
+interface BybitTickerRaw {
+  symbol?: string
+  lastPrice?: string
+  prevPrice24h?: string
+  highPrice24h?: string
+  lowPrice24h?: string
+  volume24h?: string
+  turnover24h?: string
+}
+
+interface BybitCandleRaw {
+  start?: number
+  open?: string
+  high?: string
+  low?: string
+  close?: string
+  volume?: string
+  confirm?: boolean
+  symbol?: string
+}
+
+type BybitDepthLevel = Array<string | number>
+
+interface BybitDepthRaw {
+  s?: string
+  b?: BybitDepthLevel[]
+  a?: BybitDepthLevel[]
+  bids?: BybitDepthLevel[]
+  asks?: BybitDepthLevel[]
+}
+
 export class BybitFuturesAdapter implements ExchangeAdapter {
   name = 'Bybit Futures'
   type: 'spot' | 'futures' = 'futures'
@@ -123,25 +154,25 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     }
   }
 
-  private parseTicker(d: any): UnifiedTicker | null {
-    const price = parseFloat(d.lastPrice)
+  parseTicker(d: BybitTickerRaw): UnifiedTicker | null {
+    const price = parseFloat(d.lastPrice ?? '')
     // Bybit ticker 'delta' messages can omit lastPrice (only changed fields) —
     // skip them instead of emitting NaN (which JSON-serializes to null and
     // made the price flicker to null in the UI).
     if (!isFinite(price) || price <= 0) return null
-    const open = parseFloat(d.prevPrice24h) || price
-    const pricePrecision = this.precisionMap.get(d.symbol) ?? fallbackPrecision(price)
+    const open = parseFloat(d.prevPrice24h ?? '') || price
+    const pricePrecision = this.precisionMap.get(d.symbol ?? '') ?? fallbackPrecision(price)
     return {
-      symbol: d.symbol,
+      symbol: d.symbol ?? '',
       exchange: this.exchange,
       price,
       openPrice24h: open,
       change24h: open > 0 ? ((price - open) / open) * 100 : 0,
-      high24h: parseFloat(d.highPrice24h),
-      low24h: parseFloat(d.lowPrice24h),
-      volume24h: parseFloat(d.volume24h),
+      high24h: parseFloat(d.highPrice24h ?? ''),
+      low24h: parseFloat(d.lowPrice24h ?? ''),
+      volume24h: parseFloat(d.volume24h ?? ''),
       trades24h: 0,
-      quoteVolume24h: parseFloat(d.turnover24h),
+      quoteVolume24h: parseFloat(d.turnover24h ?? ''),
       range1m: 0,
       natr5m: 0,
       corrBtc: null,
@@ -152,23 +183,23 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     }
   }
 
-  private parseCandle(d: any, topic: string): UnifiedCandle | null {
+  parseCandle(d: BybitCandleRaw | BybitCandleRaw[] | null, topic: string): UnifiedCandle | null {
     if (!d) return null
     const c = Array.isArray(d) ? d[0] : d
     const symbol = c.symbol || topic.split('.').pop() || ''
     const interval = topic.split('.')[1] || ''
     const timeframe = Object.entries(TF_MAP).find(([, v]) => v === interval)?.[0] || '5m'
-    if (!symbol || !isFinite(c.start)) return null
+    if (!symbol || !isFinite(c.start ?? NaN)) return null
     return {
       symbol,
       exchange: this.exchange,
       timeframe,
-      time: c.start / 1000,
-      open: parseFloat(c.open),
-      high: parseFloat(c.high),
-      low: parseFloat(c.low),
-      close: parseFloat(c.close),
-      volume: parseFloat(c.volume),
+      time: (c.start ?? 0) / 1000,
+      open: parseFloat(c.open ?? ''),
+      high: parseFloat(c.high ?? ''),
+      low: parseFloat(c.low ?? ''),
+      close: parseFloat(c.close ?? ''),
+      volume: parseFloat(c.volume ?? ''),
       isFinal: !!c.confirm,
     }
   }
@@ -191,7 +222,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     }
   }
 
-  private parseDepth(d: any, topic: string): UnifiedDepth | null {
+  parseDepth(d: BybitDepthRaw, topic: string): UnifiedDepth | null {
     // orderbook.<depth>.<symbol> push: { s, b: [[price,size]..], a: [...], u, ts }
     const bids = d.bids ?? d.b
     const asks = d.asks ?? d.a
@@ -200,8 +231,8 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     return {
       symbol,
       exchange: this.exchange,
-      bids: bids.map((b: any[]) => [parseFloat(String(b[0])), parseFloat(String(b[1]))]),
-      asks: asks.map((a: any[]) => [parseFloat(String(a[0])), parseFloat(String(a[1]))]),
+      bids: bids.map((b) => [parseFloat(String(b[0])), parseFloat(String(b[1]))]),
+      asks: asks.map((a) => [parseFloat(String(a[0])), parseFloat(String(a[1]))]),
       timestamp: Date.now(),
     }
   }
@@ -269,16 +300,16 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     const res = await fetchWithTimeout(url)
     const json = await res.json()
     if (json.retCode !== 0 || !json.result?.list) return []
-    return json.result.list.map((k: any[]) => ({
+    return json.result.list.map((k: unknown[]) => ({
       symbol,
       exchange: this.exchange,
       timeframe: tf,
-      time: k[0] / 1000,
-      open: parseFloat(k[1]),
-      high: parseFloat(k[2]),
-      low: parseFloat(k[3]),
-      close: parseFloat(k[4]),
-      volume: parseFloat(k[5]),
+      time: Number(k[0]) / 1000,
+      open: parseFloat(String(k[1])),
+      high: parseFloat(String(k[2])),
+      low: parseFloat(String(k[3])),
+      close: parseFloat(String(k[4])),
+      volume: parseFloat(String(k[5])),
     }))
   }
 
@@ -292,8 +323,8 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     return {
       symbol,
       exchange: this.exchange,
-      bids: json.result.bids.map((b: any[]) => [parseFloat(String(b[0])), parseFloat(String(b[1]))]),
-      asks: json.result.asks.map((a: any[]) => [parseFloat(String(a[0])), parseFloat(String(a[1]))]),
+      bids: json.result.bids.map((b: unknown[]) => [parseFloat(String(b[0])), parseFloat(String(b[1]))]),
+      asks: json.result.asks.map((a: unknown[]) => [parseFloat(String(a[0])), parseFloat(String(a[1]))]),
       timestamp: Date.now(),
     }
   }

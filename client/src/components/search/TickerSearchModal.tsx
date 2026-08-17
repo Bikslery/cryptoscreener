@@ -91,18 +91,18 @@ export default function TickerSearchModal() {
 
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [filtered, selectedIndex, setShowTickerSearch, expandChart])
+  }, [filtered, selectedIndex, setShowTickerSearch, expandChart, query])
 
   return createPortal(
     <div className="ticker-search-overlay" onClick={() => setShowTickerSearch(false)}>
       <div className="ticker-search-backdrop" />
       <div className="ticker-search-modal" onClick={(e) => e.stopPropagation()}>
         <div className="ticker-search-header">
-          <div className="ticker-search-title">Поиск тикера</div>
+          <div className="ticker-search-title">Search ticker</div>
           <button
             className="ticker-search-close"
             onClick={() => setShowTickerSearch(false)}
-            aria-label="Закрыть"
+            aria-label="Close"
           >
             <X size={14} />
           </button>
@@ -123,7 +123,7 @@ export default function TickerSearchModal() {
 
         <div className="ticker-search-results">
           {filtered.length === 0 ? (
-            <div className="ticker-search-empty">Ничего не найдено</div>
+            <div className="ticker-search-empty">Nothing found</div>
           ) : (
             filtered.map((coin, idx) => {
               const isSelected = idx === selectedIndex

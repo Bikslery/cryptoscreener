@@ -76,15 +76,15 @@ export function VolumeSlider() {
       onKeyDown={onKeyDown}
       tabIndex={0}
       role="slider"
-      aria-label="Минимальный объём за 24 часа в миллионах"
+      aria-label="Minimum 24h volume in millions"
       aria-valuemin={MIN_VOLUME_M}
       aria-valuemax={MAX_VOLUME_M}
       aria-valuenow={valueM}
       aria-valuetext={formatVolumeLabel(valueM)}
-      title={`Минимальный объём 24ч: ${formatVolumeLabel(valueM)}`}
+      title={`Minimum 24h volume: ${formatVolumeLabel(valueM)}`}
     >
       <AudioLines size={12} className="volume-filter-icon" strokeWidth={2} />
-      <span className="volume-filter-label">24ч</span>
+      <span className="volume-filter-label">24h</span>
       <span className="volume-filter-value">{formatVolumeLabel(valueM)}</span>
     </div>
   )

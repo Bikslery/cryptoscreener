@@ -4,7 +4,6 @@ export const DEFAULT_IMPULSE_EXCHANGES: ImpulseExchangeCondition[] = [
   { exchange: 'binance-futures', minVolume24h: 0 },
   { exchange: 'binance-spot', minVolume24h: 0 },
   { exchange: 'bybit-futures', minVolume24h: 0 },
-  { exchange: 'okx-spot', minVolume24h: 0 },
 ]
 
 /** Legacy pre-upgrade rows {percent, within} get the new defaults in memory. */

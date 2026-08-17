@@ -249,7 +249,7 @@ function initMatrixDrops(count: number, _w: number, _h: number): MatrixDrop[] {
 }
 
 function drawMatrix(ctx: CanvasRenderingContext2D, drops: MatrixDrop[], _mouse: { x: number; y: number }, _w: number, h: number) {
-  ctx.font = '14px "Noto Sans Variable", sans-serif'
+  ctx.font = '14px "JetBrains Mono Variable", monospace'
 
   for (const d of drops) {
     d.y += d.speed
@@ -283,7 +283,9 @@ type ParticleStyle = 'white' | 'rain' | 'snow' | 'matrix' | 'none'
 
 interface StyleConfig {
   count: number
-  init: (count: number, w: number, h: number) => any[]
+  init: (count: number, w: number, h: number) => unknown[]
+  // Each style's draw reads its own particle shape (WhiteParticle, RainDrop, …).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   draw: (ctx: CanvasRenderingContext2D, particles: any[], mouse: { x: number; y: number }, w: number, h: number) => void
 }
 
@@ -302,7 +304,7 @@ interface ParticlesProps {
 
 export default function Particles({ fixed = true, style = 'white' }: ParticlesProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const particlesRef = useRef<any[]>([])
+  const particlesRef = useRef<unknown[]>([])
   const mouseRef = useRef({ x: -9999, y: -9999 })
   const frameRef = useRef(0)
 
@@ -374,5 +376,3 @@ export default function Particles({ fixed = true, style = 'white' }: ParticlesPr
     />
   )
 }
-
-export { drawGlowParticle }

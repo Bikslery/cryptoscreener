@@ -330,7 +330,7 @@
 /* в”Ђв”Ђ Code input в”Ђв”Ђ */
 
 .auth-code-input {
-  font-family: 'Noto Sans Variable', ui-sans-serif, system-ui, sans-serif !important;
+  font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
   font-size: 1.6rem !important;
   letter-spacing: 0.8em !important;
   text-align: center !important;

@@ -50,7 +50,7 @@ function loadFromStorage(symbol: string): Drawing[] {
 function saveToStorage(symbol: string, drawings: Drawing[]) {
   try {
     localStorage.setItem(storageKey(symbol), JSON.stringify(drawings))
-  } catch {}
+  } catch { /* storage quota / availability errors are non-fatal for drawings */ }
 }
 
 function isFiniteNum(n: unknown): n is number {
@@ -160,20 +160,20 @@ export function useDrawings(
   const pricePrecision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
 
   const drawingsRef = useRef(drawings)
-  drawingsRef.current = drawings
-
   const activeToolRef = useRef<DrawingTool | null>(activeTool)
-  activeToolRef.current = activeTool
-
   const deactivateGlobal = useDrawingHotkeysStore(s => s.deactivate)
-
   const pendingPointRef = useRef(pendingPoint)
-  pendingPointRef.current = pendingPoint
-
   const primitiveRef = useRef<DrawingsPrimitive | null>(null)
-
   const symbolRef = useRef(symbol)
-  symbolRef.current = symbol
+
+  // "Latest value" refs must not be written during render (React 19 rule) —
+  // keep them in sync after every commit instead.
+  useEffect(() => {
+    drawingsRef.current = drawings
+    activeToolRef.current = activeTool
+    pendingPointRef.current = pendingPoint
+    symbolRef.current = symbol
+  })
 
   const pushHistory = useCallback(() => {
     undoStackRef.current.push(drawingsRef.current)
@@ -208,6 +208,9 @@ export function useDrawings(
     const stored = sanitizeDrawings(loadFromStorage(reqSymbol)).filter(
       d => SUPPORTED_DRAWING_TYPES.has(d.type)
     )
+    // External-source sync (localStorage) — the lint rule targets cascading
+    // render loops, not one-shot hydration when the symbol changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDrawings(stored)
     undoStackRef.current = []
     redoStackRef.current = []
@@ -262,7 +265,7 @@ export function useDrawings(
       }
       primitiveRef.current = null
     }
-  }, [chartVersion])
+  }, [chartVersion, chartRef, candleRef])
 
   const removeDrawing = useCallback((id: string) => {
     // If the deleted line is an alert ray, remove the linked alert too — the
@@ -402,7 +405,7 @@ export function useDrawings(
       setDrawings(toPersist)
       saveToStorage(symbolRef.current, toPersist)
     }
-  }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, updateDrawingState, isInitialLoading, dataVersion, candlesDataRef])
+  }, [drawings, symbol, tf, pricePrecision, chartVersion, removeDrawing, updateDrawingState, isInitialLoading, dataVersion, candlesDataRef, chartRef, candleRef, containerRef])
 
   const saveDrawing = useCallback(async (drawing: Drawing): Promise<Drawing | null> => {
     if (!isLoggedIn) return null
@@ -593,10 +596,12 @@ export function useDrawings(
       setActiveTool(null)
       clearPending()
     }
-  }, [saveDrawing, clearPending, pushHistory])
+  }, [saveDrawing, clearPending, pushHistory, setActiveTool, isLoggedIn, candleRef, chartRef, containerRef, candlesDataRef])
 
   useEffect(() => {
     deactivateGlobal()
+    // State reset when the chart symbol changes — not a cascading loop.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     clearPending()
   }, [symbol, clearPending, deactivateGlobal])
 
@@ -604,12 +609,14 @@ export function useDrawings(
   // half-placed ray from a previous tool session snaps its second point to the
   // wrong bar (stale pendingPointRef from the old tool).
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     clearPending()
   }, [activeTool, clearPending])
 
   // Same for TF switch: the pending point's `time` belongs to the old TF's
   // candles; keeping it makes the second click land on a shifted bar.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     clearPending()
   }, [tf, clearPending])
 
@@ -629,7 +636,7 @@ export function useDrawings(
     if (time === null) return null
 
     return { price, time, logical }
-  }, [candlesDataRef])
+  }, [candlesDataRef, chartRef, candleRef])
 
   // Magnet: snap a placement point to the nearest candle's high/low when the
   // click lands within MAGNET_PX of it (in screen pixels). Like scalpboard.
@@ -646,7 +653,7 @@ export function useDrawings(
     if (yHigh !== null && Math.abs(y - yHigh) <= MAGNET_PX) return bar.high
     if (yLow !== null && Math.abs(y - yLow) <= MAGNET_PX) return bar.low
     return price
-  }, [candlesDataRef])
+  }, [candlesDataRef, candleRef])
 
   const handleClick = useCallback((e: MouseEvent) => {
     const tool = activeToolRef.current
@@ -664,7 +671,7 @@ export function useDrawings(
 
     const snappedPrice = applyMagnet(y, result.price, result.logical)
     placeDrawing(snappedPrice, result.time, result.logical)
-  }, [placeDrawing, pixelToPriceTime, applyMagnet])
+  }, [placeDrawing, pixelToPriceTime, applyMagnet, containerRef])
 
   const handleMouseDown = useCallback((e: MouseEvent) => {
     if (activeToolRef.current !== null) return
@@ -693,7 +700,7 @@ export function useDrawings(
       originalData: drawing.data as HRayDrawing | TwoPointDrawing,
     }
     isDraggingRef.current = true
-  }, [])
+  }, [chartRef, candleRef, containerRef])
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     const container = containerRef.current
@@ -748,7 +755,7 @@ export function useDrawings(
       hoveredIdRef.current = hoveredId
       primitive.setHoveredId(hoveredId)
     }
-  }, [pixelToPriceTime, candlesDataRef])
+  }, [pixelToPriceTime, candlesDataRef, containerRef, chartRef, candleRef])
 
   const handleMouseUp = useCallback((e: MouseEvent) => {
     void e
@@ -791,7 +798,7 @@ export function useDrawings(
     } else {
       primitive.setPendingPoint(null)
     }
-  }, [pendingPoint, drawings, symbol, tf, chartVersion, candlesDataRef])
+  }, [pendingPoint, drawings, symbol, tf, chartVersion, candlesDataRef, chartRef, candleRef])
 
   // Undo/redo history navigation: Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo.
   useEffect(() => {

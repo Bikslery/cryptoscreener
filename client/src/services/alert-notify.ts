@@ -2,9 +2,9 @@ import type { Alert } from '../types'
 import { formatPrice, extractBaseAsset } from '../utils/format'
 
 const ALERT_LABELS: Record<string, string> = {
-  price: 'Пересечение цены',
-  impulse: 'Импульс',
-  listing: 'Листинг',
+  price: 'Price cross',
+  impulse: 'Impulse',
+  listing: 'Listing',
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ export function notifyNewAlert(alert: Alert, opts: AlertNotifyOptions = {}): voi
   if (opts.sound !== false) playAlertSound(opts.volume ?? 1)
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
   const base = extractBaseAsset(alert.symbol) || 'ANY'
-  const label = ALERT_LABELS[alert.type] ?? 'Алерт'
+  const label = ALERT_LABELS[alert.type] ?? 'Alert'
   const priceText = alert.price != null ? ` — $${formatPrice(alert.price, 2)}` : ''
   const exchangeText = alert.exchange ? ` · ${alert.exchange}` : ''
   try {

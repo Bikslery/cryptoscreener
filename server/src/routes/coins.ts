@@ -18,7 +18,7 @@ const apiLimiter = rateLimit({
 
 const router = Router()
 const SUPPORTED_TIMEFRAMES = new Set(['1s', '5s', '15s', '1m', '5m', '15m', '1h', '4h', '1d', '1w'])
-const SUPPORTED_EXCHANGES = new Set<Exchange>(['binance-spot', 'binance-futures', 'bybit-futures', 'okx-spot', 'okx-futures'])
+const SUPPORTED_EXCHANGES = new Set<Exchange>(['binance-spot', 'binance-futures', 'bybit-futures'])
 const MAX_CANDLE_LIMIT = 3000
 
 function normalizeExchange(value: unknown): Exchange | undefined {
@@ -185,12 +185,12 @@ router.get('/:symbol/candles', async (req, res) => {
   }
 
   if (before !== undefined) {
-    const candles = await getHistory(symbol, tf, { before, limit, exchange: exchange as any })
+    const candles = await getHistory(symbol, tf, { before, limit, exchange: normalizeExchange(exchange) })
     send(candles)
     return
   }
 
-  const cacheExchange = (exchange as any) || getTicker(symbol)?.exchange
+  const cacheExchange = normalizeExchange(exchange) || getTicker(symbol)?.exchange
   const cached = getCachedCandles(symbol, tf, cacheExchange)
   // Serve the cache only when it can satisfy the REQUESTED depth — a shallow
   // WS-built cache served for a deep request is exactly the "almost empty
@@ -202,7 +202,7 @@ router.get('/:symbol/candles', async (req, res) => {
     return
   }
 
-  const candles = await getHistory(symbol, tf, { limit, exchange: exchange as any })
+  const candles = await getHistory(symbol, tf, { limit, exchange: normalizeExchange(exchange) })
   if (candles.length > 0) {
     // Key by the same exchange used for reads/WS updates so cache hits align.
     setCachedCandlesFromRest(symbol, tf, candles, cacheExchange || candles[0]?.exchange)
@@ -214,7 +214,7 @@ router.get('/:symbol/depth', async (req, res) => {
   const { symbol } = req.params
   const limit = parseInt(req.query.limit as string) || 20
   const exchange = req.query.exchange as string | undefined
-  const depth = await fetchDepth(symbol, limit, exchange as any)
+  const depth = await fetchDepth(symbol, limit, normalizeExchange(exchange))
   if (!depth) {
     res.status(404).json({ error: 'Depth not available' })
     return

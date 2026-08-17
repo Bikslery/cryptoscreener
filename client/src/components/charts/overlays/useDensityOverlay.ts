@@ -12,25 +12,25 @@ import {
 } from '../../../services/density'
 import { calcTier } from '../../../services/density-cluster'
 import { DensityPrimitive, type DensityLineSpec } from './DensityPrimitive'
-import type { Exchange } from '../../../types'
 
 /** density color scheme (scalpboard): bid green, ask red */
 const DENSITY_DOWN = '#43c743'
 const DENSITY_UP = '#c74343'
 
 /**
- * Attaches the density (orderbook walls) primitive to the expanded chart.
- * Walls come from the global density snapshot, filtered by symbol AND the
- * chart's exchange (a wall's price belongs to that venue's book); a wall is
- * drawn only when it reaches at least the Small tier, which requires it to
- * have lived past the tier's minimum lifetime.
+ * Attaches the density (orderbook walls) primitive to a chart.
+ * Walls come from the global density snapshot and are drawn on ANY chart,
+ * regardless of which exchange the wall lives on: a wall's price is plotted
+ * on the chart's own price scale and the label carries the source venue
+ * (cross-exchange display). A wall is drawn only when it reaches at least
+ * the Small tier, which requires it to have lived past the tier's minimum
+ * lifetime.
  */
 export function useDensityOverlay(
   candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
   chartVersion: number,
   symbol: string,
   pricePrecision: number,
-  exchange: Exchange | undefined,
 ): void {
   const primitiveRef = useRef<DensityPrimitive | null>(null)
   const walls = useDensityStore(s => s.walls)
@@ -60,7 +60,7 @@ export function useDensityOverlay(
     const prim = primitiveRef.current
     if (!prim) return
     if (!showDensities) {
-      prim.update(null, pricePrecision)
+      prim.update(null)
       return
     }
     const settings = resolveDensitySettings(settingsPatch)
@@ -69,7 +69,6 @@ export function useDensityOverlay(
     const specs: DensityLineSpec[] = []
     for (const wall of walls) {
       if (wall.symbol !== symbol) continue
-      if (exchange && wall.exchange !== exchange) continue
       if (wall.bornAt - now > 60_000) continue
       const tier = calcTier(wall, settings, brps.get(`${wall.exchange}:${wall.symbol}`) ?? null, now)
       if (tier === undefined) continue
@@ -81,6 +80,6 @@ export function useDensityOverlay(
         baseline: wall.side === 'ask' ? 'bottom' : 'top',
       })
     }
-    prim.update(specs, pricePrecision)
-  }, [walls, autoBrps, settingsPatch, showDensities, symbol, pricePrecision, exchange, chartVersion])
+    prim.update(specs)
+  }, [walls, autoBrps, settingsPatch, showDensities, symbol, pricePrecision, chartVersion])
 }

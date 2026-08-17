@@ -9,16 +9,16 @@ import './TopBar.css'
 const SCANNER_URL = (import.meta.env.VITE_SCANNER_URL as string | undefined) ?? 'https://redscalp.ru/screener'
 
 const TF_OPTIONS: { value: Timeframe; label: string }[] = [
-  { value: '1s', label: '1С' },
-  { value: '5s', label: '5С' },
-  { value: '15s', label: '15С' },
-  { value: '1m', label: '1М' },
-  { value: '5m', label: '5М' },
-  { value: '15m', label: '15М' },
-  { value: '1h', label: '1Ч' },
-  { value: '4h', label: '4Ч' },
-  { value: '1d', label: 'Д' },
-  { value: '1w', label: 'Н' },
+  { value: '1s', label: '1s' },
+  { value: '5s', label: '5s' },
+  { value: '15s', label: '15s' },
+  { value: '1m', label: '1m' },
+  { value: '5m', label: '5m' },
+  { value: '15m', label: '15m' },
+  { value: '1h', label: '1h' },
+  { value: '4h', label: '4h' },
+  { value: '1d', label: '1d' },
+  { value: '1w', label: '1w' },
 ]
 
 export function TopBar() {
@@ -34,7 +34,10 @@ export function TopBar() {
   const toggleAutoRefresh = useCoinListStore(s => s.toggleAutoRefresh)
   const tickCountdown = useCoinListStore(s => s.tickCountdown)
   const tickRef = useRef(tickCountdown)
-  tickRef.current = tickCountdown
+
+  useEffect(() => {
+    tickRef.current = tickCountdown
+  })
 
   useEffect(() => {
     const id = setInterval(() => tickRef.current(), 1000)
@@ -70,7 +73,7 @@ export function TopBar() {
         <div className="w-[1px] h-[20px] bg-[#1f1f1f] mx-2" />
 
         <button
-          aria-label="На первую страницу"
+          aria-label="First page"
           disabled={pageIndex === 0}
           className="clinic-btn clinic-btn-sm flex items-center justify-center h-[30px] px-[9px] text-[12px]"
           onClick={() => setPageIndex(0)}
@@ -79,7 +82,7 @@ export function TopBar() {
         </button>
 
         <button
-          aria-label="Предыдущие 9 графиков"
+          aria-label="Previous 9 charts"
           disabled={pageIndex === 0}
           className="clinic-btn clinic-btn-sm flex items-center justify-center h-[30px] px-[9px] text-[12px]"
           onClick={() => setPageIndex(pageIndex - 1)}
@@ -92,7 +95,7 @@ export function TopBar() {
         </span>
 
         <button
-          aria-label="Следующие 9 графиков"
+          aria-label="Next 9 charts"
           disabled={pageIndex >= pageCount - 1}
           className="clinic-btn clinic-btn-sm flex items-center justify-center h-[30px] px-[9px] text-[12px]"
           onClick={() => setPageIndex(pageIndex + 1)}
@@ -101,7 +104,7 @@ export function TopBar() {
         </button>
 
         <button
-          aria-label={autoRefresh ? 'Выключить автообновление' : 'Включить автообновление'}
+          aria-label={autoRefresh ? 'Disable auto-refresh' : 'Enable auto-refresh'}
           className={`clinic-btn clinic-btn-sm flex items-center justify-center h-[30px] px-[9px] text-[12px] gap-[4px] ${
             autoRefresh ? 'clinic-btn-active' : 'clinic-btn-secondary'
           }`}
@@ -118,11 +121,11 @@ export function TopBar() {
       <div className="flex items-center gap-[2px] shrink-0">
         <button
           className="clinic-btn clinic-btn-ghost clinic-btn-sm flex items-center gap-1.5 text-[11px]"
-          title="Открыть скринер плотностей"
+          title="Open the density scanner"
           onClick={() => window.open(SCANNER_URL, '_blank', 'noopener,noreferrer')}
         >
           <Layers size={13} />
-          <span>Плотности</span>
+          <span>Density</span>
         </button>
 
         <button
@@ -130,7 +133,7 @@ export function TopBar() {
           onClick={() => setShowExchangeModal(true)}
         >
           <ArrowLeftRight size={13} />
-          <span>Сменить биржу</span>
+          <span>Change exchange</span>
         </button>
 
         <div className="w-[1px] h-[20px] bg-[#1f1f1f] mx-2" />
@@ -141,7 +144,7 @@ export function TopBar() {
             onClick={() => setShowProfile(true)}
           >
             <User size={13} />
-            <span>Личный кабинет</span>
+            <span>My account</span>
           </button>
         ) : (
           <button
@@ -149,7 +152,7 @@ export function TopBar() {
             onClick={() => setShowAuth(true)}
           >
             <LogIn size={13} />
-            Вход
+            Sign in
           </button>
         )}
       </div>

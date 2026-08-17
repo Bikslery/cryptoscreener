@@ -8,13 +8,13 @@ const router = Router()
 const writeLimiter = writeRateLimit(60)
 
 router.get('/', async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const alerts = await prisma.alert.findMany({ where: { userId }, orderBy: { createdAt: 'desc' } })
   res.json(alerts.map(a => ({ ...a, condition: JSON.parse(a.condition) })))
 })
 
 router.post('/', writeLimiter, async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const { type, symbol, exchange, condition: rawCondition } = req.body
 
   if (typeof type !== 'string' || !['price', 'impulse', 'listing'].includes(type)) {
@@ -55,7 +55,7 @@ router.post('/', writeLimiter, async (req, res) => {
     res.status(400).json({ error: 'exchange: строка' })
     return
   }
-  if (typeof exchange === 'string' && !VALID_EXCHANGES.includes(exchange as any)) {
+  if (typeof exchange === 'string' && !(VALID_EXCHANGES as readonly string[]).includes(exchange)) {
     res.status(400).json({ error: 'exchange: неизвестная биржа' })
     return
   }
@@ -83,7 +83,7 @@ router.post('/', writeLimiter, async (req, res) => {
 })
 
 router.patch('/:id', writeLimiter, async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const id = String(req.params.id)
   const { active, muted, condition: rawCondition } = req.body
 
@@ -154,7 +154,7 @@ router.patch('/:id', writeLimiter, async (req, res) => {
 })
 
 router.delete('/:id', writeLimiter, async (req, res) => {
-  const { userId } = (req as any).user
+  const { userId } = req.user!
   const id = String(req.params.id)
   await prisma.alert.delete({ where: { id, userId } })
   res.json({ ok: true })

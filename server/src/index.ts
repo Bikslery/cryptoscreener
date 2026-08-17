@@ -84,7 +84,20 @@ async function main() {
 
   app.use('/api/health', (_req, res) => res.json({ ok: true, role: ROLE }))
 
-  app.get('/metrics', authMiddleware, async (_req, res) => {
+  app.get('/metrics', async (req, res) => {
+    // /metrics is scraped by Prometheus inside the compose network. A static
+    // METRICS_TOKEN (env) is the preferred gate — it never expires like a JWT.
+    // Without it the route falls back to the user JWT (dev/local curl).
+    const token = process.env.METRICS_TOKEN
+    if (token) {
+      if (req.headers.authorization !== `Bearer ${token}` && req.query.token !== token) {
+        res.status(401).end('Unauthorized')
+        return
+      }
+    } else if (!req.cookies?.token && !req.headers.authorization?.startsWith('Bearer ')) {
+      res.status(401).end('Unauthorized')
+      return
+    }
     try {
       refreshMetrics()
       res.set('Content-Type', register.contentType)
@@ -150,18 +163,41 @@ async function main() {
     console.log(`WebSocket on ws://localhost:${PORT}/ws [compression enabled]`)
   })
 
+  // Force-close any connection still hanging after a bounded grace period.
+  // Plain server.close() never resolves while keep-alive connections stay up,
+  // which previously made the "graceful" shutdown block forever on hot charts.
+  const SHUTDOWN_CLOSE_TIMEOUT_MS = 5000
+
+  function closeHttpServer(): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        server.closeAllConnections()
+        resolve()
+      }, SHUTDOWN_CLOSE_TIMEOUT_MS)
+      server.close(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+  }
+
   const shutdown = async (signal: string) => {
     console.log(`\n[${signal}] Graceful shutdown...`)
+    // 1. Stop accepting new client frames.
+    stopWsHub()
+    // 2. Ask connected clients to disconnect cleanly (1001 = going away).
     wss.clients.forEach(c => {
       if (c.readyState === WebSocket.OPEN) c.close(1001, 'server shutting down')
     })
+    // 3. Cut exchange streams — no more inbound tickers/candles/depth.
     for (const adapter of adapters) adapter.disconnect()
+    // 4. Flush buffered lanes so no candle/trade frame is lost on the wire.
     flushTradeLane()
     flushCandleLane()
     stopAlertEngine()
     stopDensityService()
-    stopWsHub()
-    server.close()
+    // 5. Close the HTTP/WS server, awaiting open connections (bounded).
+    await closeHttpServer()
     await disconnectRedis()
     await prisma.$disconnect()
     process.exit(0)

@@ -25,13 +25,13 @@ describe('alert-notify — sound + native notifications', () => {
   })
 
   it('creates a native notification with title/body/tag when permission granted', () => {
-    const created: Array<{ title: string; options: any }> = []
+    const created: Array<{ title: string; options: NotificationOptions }> = []
     vi.stubGlobal('Notification', class {
       static permission: NotificationPermission = 'granted'
       title: string
-      options: any
+      options: NotificationOptions
       onclick: (() => void) | null = null
-      constructor(title: string, options: any) {
+      constructor(title: string, options: NotificationOptions) {
         this.title = title
         this.options = options
         created.push({ title, options })
@@ -41,7 +41,7 @@ describe('alert-notify — sound + native notifications', () => {
     notifyNewAlert(makeAlert())
     expect(created).toHaveLength(1)
     expect(created[0].title).toContain('BTC')
-    expect(created[0].options.body).toContain('Пересечение цены')
+    expect(created[0].options.body).toContain('Price cross')
     expect(created[0].options.body).toContain('65,100')
     expect(created[0].options.tag).toBe('serotonin-alert-a1')
   })
@@ -50,7 +50,7 @@ describe('alert-notify — sound + native notifications', () => {
     let constructed = 0
     vi.stubGlobal('Notification', class {
       static permission: NotificationPermission = 'denied'
-      constructor(_title: string, _options: any) { constructed++ }
+      constructor() { constructed++ }
       close() {}
     })
     notifyNewAlert(makeAlert())
@@ -72,7 +72,7 @@ describe('alert-notify — sound + native notifications', () => {
     vi.stubGlobal('Notification', class {
       static permission: NotificationPermission = 'default'
       static requestPermission() { asked++; return Promise.resolve('granted' as NotificationPermission) }
-      constructor(_title: string, _options: any) {}
+      constructor() {}
       close() {}
     })
     initAlertNotifications()

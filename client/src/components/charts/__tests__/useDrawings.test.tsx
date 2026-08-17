@@ -59,7 +59,6 @@ function makeMockRefs(): MockRefs {
     logicalToCoordinate: vi.fn((l: number) => l * 6 as never),
     coordinateToTime: vi.fn(() => null),
     coordinateToLogical: vi.fn((x: number) => x / 6 as never),
-    options: vi.fn(() => ({ barSpacing: 6 }) as any),
     subscribeVisibleLogicalRangeChange: vi.fn(),
     unsubscribeVisibleLogicalRangeChange: vi.fn(),
   }

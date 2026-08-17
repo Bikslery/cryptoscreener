@@ -579,13 +579,13 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
     const unsubTradeWild = wsOnMessage((msg) => {
       const t = msg.type as string | undefined
       if (!t || !t.startsWith('trade:')) return
-      const trade = msg.data as any
+      const trade = msg.data as { symbol?: string; exchange?: string; price: number | string }
       if (!trade || !trade.symbol) return
       const p = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(p) || p <= 0) return
-      setLivePrice(trade.symbol as string, p)
+      setLivePrice(trade.symbol, p)
       if (typeof trade.exchange === 'string' && trade.exchange) {
-        setLivePriceEx(trade.symbol as string, trade.exchange, p)
+        setLivePriceEx(trade.symbol, trade.exchange, p)
       }
     })
 

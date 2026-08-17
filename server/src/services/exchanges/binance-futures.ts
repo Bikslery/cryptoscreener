@@ -60,6 +60,56 @@ const STABLECOIN_BASES = new Set([
   'USDC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'EUR', 'AEUR', 'EURI', 'USDSB', 'PYUSD',
 ])
 
+interface BinanceTickerRaw {
+  // WS miniTicker format
+  s?: string
+  c?: string
+  o?: string
+  h?: string
+  l?: string
+  v?: string
+  n?: string
+  q?: string
+  // REST 24hr format
+  symbol?: string
+  lastPrice?: string
+  openPrice?: string
+  highPrice?: string
+  lowPrice?: string
+  volume?: string
+  count?: number
+  quoteVolume?: string
+}
+
+interface BinanceKline {
+  s?: string
+  i?: string
+  t?: number
+  o?: string
+  h?: string
+  l?: string
+  c?: string
+  v?: string
+  x?: boolean
+}
+
+interface BinanceCandleMsg {
+  k?: BinanceKline
+  data?: { k?: BinanceKline }
+}
+
+type BinanceLevel = [string, string]
+
+interface BinanceDepthDiffRaw {
+  data?: BinanceDepthDiffRaw
+  s?: string
+  symbol?: string
+  U?: number
+  u?: number
+  b?: BinanceLevel[]
+  a?: BinanceLevel[]
+}
+
 // NOTE: fstream.binance.com is geo-blocked from some regions (e.g. EU/Germany
 // datacenter IPs) — the connection opens then closes without data. The official
 // new futures stream domain fstream.binancefuture.com is NOT blocked and
@@ -365,7 +415,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     this.priceTimer = setInterval(() => this.pollTickerPrices(), TICKER_PRICE_POLL_INTERVAL)
   }
 
-  private processTickerArray(arr: any[], fromWs = false) {
+  processTickerArray(arr: BinanceTickerRaw[], fromWs = false) {
     for (const t of arr) {
       const symbol = t.s || t.symbol
       if (!symbol?.endsWith('USDT')) continue
@@ -474,11 +524,11 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     }
   }
 
-  private parseTicker(t: any): UnifiedTicker {
+  parseTicker(t: BinanceTickerRaw): UnifiedTicker {
     const isWs = !!t.s
-    const symbol = isWs ? t.s : t.symbol
-    const price = parseFloat(isWs ? t.c : t.lastPrice)
-    const open = parseFloat(isWs ? t.o : t.openPrice)
+    const symbol = (isWs ? t.s : t.symbol) ?? ''
+    const price = parseFloat((isWs ? t.c : t.lastPrice) ?? '')
+    const open = parseFloat((isWs ? t.o : t.openPrice) ?? '')
     const pricePrecision = this.precisionMap.get(symbol) ?? fallbackPrecision(price)
     return {
       symbol,
@@ -486,11 +536,11 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       price,
       openPrice24h: open,
       change24h: open > 0 ? ((price - open) / open) * 100 : 0,
-      high24h: parseFloat(isWs ? t.h : t.highPrice),
-      low24h: parseFloat(isWs ? t.l : t.lowPrice),
-      volume24h: parseFloat(isWs ? t.v : t.volume),
-      trades24h: parseInt(isWs ? (t.n ?? '0') : t.count),
-      quoteVolume24h: parseFloat(isWs ? t.q : t.quoteVolume),
+      high24h: parseFloat((isWs ? t.h : t.highPrice) ?? ''),
+      low24h: parseFloat((isWs ? t.l : t.lowPrice) ?? ''),
+      volume24h: parseFloat((isWs ? t.v : t.volume) ?? ''),
+      trades24h: parseInt(isWs ? (t.n ?? '0') : String(t.count ?? 0), 10),
+      quoteVolume24h: parseFloat((isWs ? t.q : t.quoteVolume) ?? ''),
       range1m: 0,
       natr5m: 0,
       corrBtc: null,
@@ -640,7 +690,7 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     noBookSamples: new Set<string>(), bufferedSamples: new Set<string>(),
   }
 
-  private handleDepthMsg(msg: any): UnifiedDepth | null {
+  private handleDepthMsg(msg: BinanceDepthDiffRaw): UnifiedDepth | null {
     const now = Date.now()
     if (now - this.depthMsgDiag.lastLog > 60_000) {
       this.depthMsgDiag.lastLog = now
@@ -789,19 +839,19 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
     }
   }
 
-  private parseCandle(msg: any): UnifiedCandle | null {
+  parseCandle(msg: BinanceCandleMsg): UnifiedCandle | null {
     const k = msg.k || msg.data?.k
     if (!k) return null
     return {
-      symbol: k.s,
+      symbol: k.s ?? '',
       exchange: this.exchange,
-      timeframe: k.i,
-      time: k.t / 1000,
-      open: parseFloat(k.o),
-      high: parseFloat(k.h),
-      low: parseFloat(k.l),
-      close: parseFloat(k.c),
-      volume: parseFloat(k.v),
+      timeframe: k.i ?? '',
+      time: (k.t ?? 0) / 1000,
+      open: parseFloat(k.o ?? ''),
+      high: parseFloat(k.h ?? ''),
+      low: parseFloat(k.l ?? ''),
+      close: parseFloat(k.c ?? ''),
+      volume: parseFloat(k.v ?? ''),
       isFinal: !!k.x,
     }
   }
@@ -827,16 +877,16 @@ export class BinanceFuturesAdapter implements ExchangeAdapter {
       const data = await res.json()
       if (!Array.isArray(data)) { this.rateLimiter.recordError(); throw new ExchangeRequestError(`fapi invalid body (${symbol} ${tf})`) }
       this.rateLimiter.recordSuccess()
-      return data.map((k: any[]) => ({
+      return data.map((k: unknown[]) => ({
         symbol,
         exchange: this.exchange,
         timeframe: tf,
-        time: k[0] / 1000,
-        open: parseFloat(k[1]),
-        high: parseFloat(k[2]),
-        low: parseFloat(k[3]),
-        close: parseFloat(k[4]),
-        volume: parseFloat(k[5]),
+        time: Number(k[0]) / 1000,
+        open: parseFloat(String(k[1])),
+        high: parseFloat(String(k[2])),
+        low: parseFloat(String(k[3])),
+        close: parseFloat(String(k[4])),
+        volume: parseFloat(String(k[5])),
       }))
     } catch (e) {
       this.rateLimiter.recordError()

@@ -22,7 +22,6 @@ export class ErrorBoundary extends Component<Props, State> {
     // DIAG: log to console with full stack + componentStack so we can see WHICH
     // component crashed and where in the React tree. Tagged with [DIAG-err] for
     // easy cleanup via grep.
-    // eslint-disable-next-line no-console
     console.error(
       `[DIAG-err] ErrorBoundary caught: ${error?.message ?? error}\n` +
       `stack: ${error?.stack ?? '(no stack)'}\n` +

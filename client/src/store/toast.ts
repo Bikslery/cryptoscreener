@@ -161,7 +161,7 @@ export const useToastStore = create<ToastState>((set) => ({
       const next: Toast[] = [...s.toasts, {
         id,
         kind: 'alert',
-        message: ALERT_LABELS[alert.type] ?? 'Алерт',
+        message: ALERT_LABELS[alert.type] ?? 'Alert',
         duration,
         position,
         alertData: buildAlertData(alert),

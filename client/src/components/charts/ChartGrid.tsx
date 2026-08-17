@@ -490,7 +490,7 @@ function StaleDataOverlay({ visible }: { visible: boolean }) {
     <div className="stale-data-overlay absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-[#0a0a0a]/60 backdrop-blur-[3px]">
       <div className="rounded-[6px] border border-[#e74c3c]/40 bg-[#1a1010]/95 px-4 py-3 text-[12px] font-medium shadow-[0_12px_30px_rgba(0,0,0,0.35)] flex items-center gap-3">
         <div className="w-[14px] h-[14px] border-2 border-[#e74c3c]/40 border-t-[#e74c3c] rounded-full animate-spin" />
-        <span className="text-[#f0b0aa]">Переподключение к серверу...</span>
+        <span className="text-[#f0b0aa]">Reconnecting to server...</span>
       </div>
     </div>
   )
@@ -1188,7 +1188,7 @@ function useWsTrade(
       unsubPrice()
       wsUnsubscribe(priceChannel)
     }
-  }, [symbol, exchange, tf, adjustingRef, aggregatorRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
+  }, [symbol, exchange, tf, precision, adjustingRef, aggregatorRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
 }
 
 
@@ -1351,7 +1351,9 @@ const MiniChart = memo(function MiniChart({
 
   const baseSettings = useChartSettings()
   const settingsRef = useRef(baseSettings)
-  settingsRef.current = baseSettings
+  useEffect(() => {
+    settingsRef.current = baseSettings
+  })
 
   useEffect(() => {
     destroyedRef.current = false
@@ -1472,6 +1474,7 @@ const MiniChart = memo(function MiniChart({
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
 
   useChartOverlays(candleRef, candlesDataRef, dataVersion, chartVersion, pricePrecision)
+  useDensityOverlay(candleRef, chartVersion, symbol, pricePrecision)
 
   const aggregatorRef = useSecondCandleAggregator(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
 
@@ -1745,11 +1748,11 @@ const MiniChart = memo(function MiniChart({
                   ${formatPrice(selection.startPrice, pricePrecision)} → ${formatPrice(selection.endPrice, pricePrecision)}
                 </div>
                 <div className="text-[10px] text-[#666]">
-                  О” {formatDuration(selection.durationSec)}
+                  {formatDuration(selection.durationSec)}
                 </div>
               </>
             ) : (
-              <span>Выделите диапазон</span>
+              <span>Select a range</span>
             )}
           </div>
         </div>
@@ -1760,8 +1763,8 @@ const MiniChart = memo(function MiniChart({
         <div className="w-[18px] h-[18px] border-2 border-[#333] border-t-[#999] rounded-full animate-spin" />
       </div>
     )}
-    {status === 'empty' && <ChartMessageOverlay label="Нет данных для таймфрейма" />}
-    {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных" tone="error" />}
+    {status === 'empty' && <ChartMessageOverlay label="No data for this timeframe" />}
+    {status === 'error' && <ChartMessageOverlay label="Error loading data" tone="error" />}
   </div>
 )
 })
@@ -1796,11 +1799,11 @@ function formatDuration(sec: number): string {
 const TF_SETTINGS: Timeframe[] = ['1s', '5s', '15s', '1m', '5m', '15m', '1h', '4h', '1d', '1w']
 
 const WM_PLACE_OPTIONS: { value: WatermarkPlace; label: string }[] = [
-  { value: 'center-center', label: 'Центр' },
-  { value: 'center-top', label: 'Сверху' },
-  { value: 'center-bottom', label: 'Снизу' },
-  { value: 'left-center', label: 'Слева' },
-  { value: 'right-center', label: 'Справа' },
+  { value: 'center-center', label: 'Center' },
+  { value: 'center-top', label: 'Top' },
+  { value: 'center-bottom', label: 'Bottom' },
+  { value: 'left-center', label: 'Left' },
+  { value: 'right-center', label: 'Right' },
 ]
 
 function SettingsRow({ label, children }: { label: string; children: React.ReactNode }) {
@@ -1855,16 +1858,16 @@ function ChartSettingsPanel() {
   return (
     <div className="fixed right-[12px] top-[100px] z-40 w-[320px] max-h-[70vh] overflow-y-auto rounded-[6px] border border-[#2a2a2a] bg-[#141414] shadow-[0_20px_50px_rgba(0,0,0,0.6)] p-3">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-[12px] font-bold text-[#e0e0e0]">Вид</span>
+        <span className="text-[12px] font-bold text-[#e0e0e0]">View</span>
         <button
           className="text-[10px] text-[#888] hover:text-[#ccc] px-[6px] py-[2px] rounded-[3px] border border-[#2a2a2a]"
           onClick={resetChartSettings}
         >
-          Сбросить
+          Reset
         </button>
       </div>
 
-      <SettingsRow label="Интервал">
+      <SettingsRow label="Interval">
         <div className="flex gap-[2px]">
           {TF_SETTINGS.map(tf => (
             <button
@@ -1880,56 +1883,56 @@ function ChartSettingsPanel() {
         </div>
       </SettingsRow>
 
-      <SettingsRow label="Свечи">
+      <SettingsRow label="Candles">
         <div className="flex gap-[2px]">
           {(['default', 'hollow', 'bars', 'line'] as const).map(t => (
             <Toggle
               key={t}
               checked={s.candlesType === t}
               onChange={() => setSetting('candlesType', t)}
-              label={t === 'default' ? 'Свечи' : t === 'hollow' ? 'Полые' : t === 'bars' ? 'Бары' : 'Линия'}
+              label={t === 'default' ? 'Candles' : t === 'hollow' ? 'Hollow' : t === 'bars' ? 'Bars' : 'Line'}
             />
           ))}
         </div>
       </SettingsRow>
 
-      <SettingsRow label="Объём">
+      <SettingsRow label="Volume">
         <SettingsSlider value={s.volumesHeight} min={3} max={50} step={1} onChange={v => setSetting('volumesHeight', v)} />
       </SettingsRow>
 
-      <SettingsRow label="Отступ">
+      <SettingsRow label="Offset">
         <SettingsSlider value={s.rightOffset} min={0} max={100} step={1} onChange={v => setSetting('rightOffset', v)} />
       </SettingsRow>
 
-      <SettingsRow label="Плотность">
+      <SettingsRow label="Density">
         <SettingsSlider value={s.barSpace} min={0.5} max={10} step={0.1} onChange={v => setSetting('barSpace', v)} />
       </SettingsRow>
 
-      <SettingsRow label="Шкала">
+      <SettingsRow label="Scale">
         <div className="flex gap-[2px]">
-          <Toggle checked={s.priceScaleMode === 'default'} onChange={() => setSetting('priceScaleMode', 'default')} label="Обычная" />
+          <Toggle checked={s.priceScaleMode === 'default'} onChange={() => setSetting('priceScaleMode', 'default')} label="Normal" />
           <Toggle checked={s.priceScaleMode === 'log'} onChange={() => setSetting('priceScaleMode', 'log')} label="Log" />
         </div>
       </SettingsRow>
 
-      <SettingsRow label="Сетка">
+      <SettingsRow label="Grid">
         <>
-          <Toggle checked={s.vertGrid} onChange={v => setSetting('vertGrid', v)} label="Вер" />
-          <Toggle checked={s.horzGrid} onChange={v => setSetting('horzGrid', v)} label="Гор" />
+          <Toggle checked={s.vertGrid} onChange={v => setSetting('vertGrid', v)} label="V" />
+          <Toggle checked={s.horzGrid} onChange={v => setSetting('horzGrid', v)} label="H" />
         </>
       </SettingsRow>
 
       <div className="my-2 border-t border-[#222]" />
 
-      <SettingsRow label="Знак">
+      <SettingsRow label="Mark">
         <SettingsSlider value={s.watermark} min={0} max={1} step={0.05} onChange={v => setSetting('watermark', v)} />
       </SettingsRow>
 
-      <SettingsRow label="Размер">
+      <SettingsRow label="Size">
         <SettingsSlider value={s.watermarkSize} min={12} max={96} step={1} onChange={v => setSetting('watermarkSize', v)} />
       </SettingsRow>
 
-      <SettingsRow label="Позиция">
+      <SettingsRow label="Position">
         <select
           value={s.watermarkPlace}
           onChange={e => setSetting('watermarkPlace', e.target.value as WatermarkPlace)}
@@ -1939,7 +1942,7 @@ function ChartSettingsPanel() {
         </select>
       </SettingsRow>
 
-      <SettingsRow label="Текст">
+      <SettingsRow label="Text">
         <input
           value={s.watermarkPattern}
           onChange={e => setSetting('watermarkPattern', e.target.value)}
@@ -1949,18 +1952,18 @@ function ChartSettingsPanel() {
 
       <div className="mt-2 border-t border-[#222] pt-2">
         <div className="text-[10px] text-[#666] leading-[1.5]">
-          Каскады — полная настройка в личном кабинете
+          Cascades — full configuration in the account
         </div>
       </div>
       <div className="mt-2 flex items-center gap-3">
-        <Toggle checked={s.showTriggeredAlerts} onChange={v => setSetting('showTriggeredAlerts', v)} label="Алерты" />
+        <Toggle checked={s.showTriggeredAlerts} onChange={v => setSetting('showTriggeredAlerts', v)} label="Alerts" />
       </div>
 
       <div className="mt-2 flex items-center gap-3">
-        <Toggle checked={s.showDensities} onChange={v => setSetting('showDensities', v)} label="Плотности" />
+        <Toggle checked={s.showDensities} onChange={v => setSetting('showDensities', v)} label="Density" />
       </div>
 
-      <div className="mt-1 text-[10px] text-[#666]">{'{ticker}'} — тикер в тексте знака</div>
+      <div className="mt-1 text-[10px] text-[#666]">{'{ticker}'} — ticker placeholder in the mark text</div>
     </div>
   )
 }
@@ -1995,7 +1998,7 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
       <button
         className="clinic-btn clinic-btn-sm flex items-center justify-center w-[28px] h-[28px] p-0"
         onClick={onBack}
-        title="Назад к сетке"
+        title="Back to grid"
       >
         <ArrowLeft size={15} />
       </button>
@@ -2036,10 +2039,10 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
         <button
           className={`clinic-btn clinic-btn-sm flex items-center gap-1 text-[11px] ${settingsOpen ? 'clinic-btn-active' : 'clinic-btn-secondary'}`}
           onClick={() => setSettingsOpen(o => !o)}
-          title="Настройки вида"
+          title="View settings"
         >
           <Settings2 size={13} />
-          <span>Вид</span>
+          <span>View</span>
         </button>
         {settingsOpen && (
           <>
@@ -2049,11 +2052,11 @@ const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, 
         )}
         {activeTool !== null && (
           <span className="text-[10px] text-[#ccc] font-mono bg-[#333] px-[6px] py-[2px] rounded-[3px] border border-[#444]">
-            {activeTool === 'h-ray' ? 'Гориз. луч' : activeTool === 't-ray' ? 'Тренд. луч' : activeTool === 'alert' ? 'Ценовой алерт' : 'Отрезок'} — клик на графике | Esc — отмена
+            {activeTool === 'h-ray' ? 'Horiz. ray' : activeTool === 't-ray' ? 'Trend ray' : activeTool === 'alert' ? 'Price alert' : 'Segment'} — click on chart | Esc — cancel
           </span>
         )}
         <span className="text-[10px] text-[#666] font-mono">
-          Shift + ЛКМ / Колёсико — измерить %
+          Shift + LMB / wheel — measure %
         </span>
       </div>
     </div>
@@ -2072,7 +2075,9 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   const pricePrecision = useCoinPrecision(symbol, chartExchange)
   const baseSettings = useChartSettings()
   const settingsRef = useRef(baseSettings)
-  settingsRef.current = baseSettings
+  useEffect(() => {
+    settingsRef.current = baseSettings
+  })
   const exchange: Exchange | undefined = chartExchange
   const [selection, setSelection] = useState<RangeSelection | null>(null)
   const [chartVersion, setChartVersion] = useState(0)
@@ -2171,7 +2176,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
       watermarkRef.current?.detach()
       watermarkRef.current = applyWatermark(chart, s, symbol)
     }
-  }, [baseSettings.priceScaleMode, baseSettings.vertGrid, baseSettings.horzGrid, baseSettings.interval, baseSettings.barSpace, baseSettings.rightOffset, baseSettings.volumesHeight, baseSettings.watermark, baseSettings.watermarkSize, baseSettings.watermarkPlace, baseSettings.watermarkPattern])
+  }, [baseSettings.priceScaleMode, baseSettings.vertGrid, baseSettings.horzGrid, baseSettings.interval, baseSettings.barSpace, baseSettings.rightOffset, baseSettings.volumesHeight, baseSettings.watermark, baseSettings.watermarkSize, baseSettings.watermarkPlace, baseSettings.watermarkPattern, symbol])
 
   const [wsCount, setWsCount] = useState(getWsOpenCount)
   const [mountWsCount] = useState(() => getWsOpenCount())
@@ -2207,7 +2212,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
 
   useChartOverlays(candleRef, candlesDataRef, dataVersion, chartVersion, pricePrecision)
-  useDensityOverlay(candleRef, chartVersion, symbol, pricePrecision, exchange)
+  useDensityOverlay(candleRef, chartVersion, symbol, pricePrecision)
 
   const focusPrice = useCoinListStore(s => s.expandedFocusPrice)
   const clearFocusPrice = useCoinListStore(s => s.clearExpandedFocusPrice)
@@ -2478,13 +2483,13 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
           <div className="absolute top-[8px] left-[8px] z-30 pointer-events-none">
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-[4px] bg-[#1a1a1a]/95 border border-[#2a2a2a] shadow-lg">
               <div className="w-[12px] h-[12px] border-2 border-[#555] border-t-[#ccc] rounded-full animate-spin" />
-              <span className="text-[11px] text-[#aaa] font-medium">Загрузка истории...</span>
+              <span className="text-[11px] text-[#aaa] font-medium">Loading history...</span>
             </div>
           </div>
         )}
         {isStale && <StaleDataOverlay visible={true} />}
-        {status === 'empty' && <ChartMessageOverlay label="Нет данных для этого таймфрейма" />}
-        {status === 'error' && <ChartMessageOverlay label="Ошибка загрузки данных. Попробуйте другой таймфрейм." tone="error" />}
+        {status === 'empty' && <ChartMessageOverlay label="No data for this timeframe" />}
+        {status === 'error' && <ChartMessageOverlay label="Error loading data. Try another timeframe." tone="error" />}
 
         <DrawingToolsPanel
           activeTool={activeTool}
@@ -2534,11 +2539,11 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
                     ${formatPrice(selection.startPrice, precision)} → ${formatPrice(selection.endPrice, precision)}
                   </div>
                   <div className="text-[10px] text-[#666]">
-                    О” {formatDuration(selection.durationSec)}
+{formatDuration(selection.durationSec)}
                   </div>
                 </>
               ) : (
-                <span>Выделите диапазон</span>
+                <span>Select a range</span>
               )}
             </div>
           </div>

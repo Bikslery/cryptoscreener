@@ -45,7 +45,7 @@ function AlertCard({ id, data, count, onClose, onOpen }: {
     <div
       className="pointer-events-auto relative w-[280px] text-[16px] font-mono rounded-[0.4em] border border-[#262626] bg-[#171717] shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden grid grid-cols-[0.4em_auto] animate-in fade-in slide-in-from-bottom-2 transition-colors duration-150 hover:bg-[#1b1b1b] cursor-pointer"
       onClick={onOpen}
-      title="Открыть график"
+      title="Open chart"
     >
       <div className={`w-full h-full rounded-l-[1rem] ${barColor(data)}`} />
       <div className="relative flex flex-col justify-center p-[0.9em_1.25em] min-w-0 text-[#d4d4d4]">

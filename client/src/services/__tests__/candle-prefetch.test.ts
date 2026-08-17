@@ -55,7 +55,7 @@ describe('getOrFetchHistory — limit-aware cache semantics', () => {
   it('does not deduplicate a 300-bar request against an in-flight 3000-bar one', async () => {
     // The mini-chart 300 fetch and the expanded-chart 3000 fetch are different
     // needs: the big chart must not receive the small one's partial result.
-    mockGet.mockImplementation((_url: string, _cfg: unknown) =>
+    mockGet.mockImplementation(() =>
       Promise.resolve({ data: makeCandles(3000) }),
     )
     const [small, big] = await Promise.all([

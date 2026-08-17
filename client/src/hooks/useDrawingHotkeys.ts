@@ -29,10 +29,10 @@ export function useDrawingHotkeys() {
           const isActive = activeTool === tool
           if (isActive) {
             deactivate()
-            showToast(`${DRAWING_TOOL_LABELS[tool]}: отключен`)
+            showToast(`${DRAWING_TOOL_LABELS[tool]}: disabled`)
           } else {
             activateTool(tool)
-            showToast(`${DRAWING_TOOL_LABELS[tool]}: активен`)
+            showToast(`${DRAWING_TOOL_LABELS[tool]}: active`)
           }
           return
         }

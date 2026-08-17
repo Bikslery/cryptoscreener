@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef, useState, useCallback } from 'react'
+﻿import { memo, useMemo, useRef, useState, useCallback } from 'react'
 import { useDensityStore } from '../../store/density'
 import { useCoinListStore, useAuthStore } from '../../store'
 import type { DensityWall, DensitySymbolBrp, UnifiedTicker } from '../../types'
@@ -18,6 +18,12 @@ const TIER_COUNT = 3
 const MAP_TOP = '#bc3838'
 const MAP_BOTTOM = '#38bc38'
 const FOREGROUND_FULL = '#0d0d0d'
+/** Ширина полосы расстояний в % цены — каждая полоса = 0.5% */
+const BAND_PCT = 0.5
+/** Цвет разделительных линий между полосами — серый, полупрозрачный */
+const BAND_LINE = 'rgba(140,140,140,0.14)'
+/** Стопка «книжкой»: сдвиг каждой следующей плашки, px — выглядывает снизу. */
+const STACK_PEEK_PX = 10
 
 /** Точная копия их zone-фона (yt из бандла): linear-gradient(to left) из
  *  tier-колонок с альфой 0.11 → 0.02 — правая колонка (Малые) насыщеннее. */
@@ -55,6 +61,12 @@ interface MapBlock {
   roundNumber: boolean
   hue: number
   lOffset: number
+  /** полоса расстояний (bandIndex-я 0.5%) — общая для всех блоков карты */
+  bandIndex: number
+  /** позиция в стопке «книжкой» внутри (side, band, tier) — 0 сверху */
+  stackIndex: number
+  /** размер стопки, в которой лежит блок */
+  stackCount: number
 }
 
 function buildBlocks(
@@ -62,6 +74,7 @@ function buildBlocks(
   autoBrps: DensitySymbolBrp[],
   settingsPatch: Parameters<typeof resolveDensitySettings>[0],
   coinMap: Map<string, UnifiedTicker>,
+  bandCount: number,
 ): MapBlock[] {
   const settings = resolveDensitySettings(settingsPatch)
   const brps = autoBrpMap({ ts: 0, walls, autoBrps })
@@ -95,15 +108,34 @@ function buildBlocks(
       roundNumber: item.members.some(m => m.roundNumber),
       hue,
       lOffset,
+      bandIndex: Math.min(Math.floor(Math.abs(distancePct) / BAND_PCT), bandCount - 1),
+      stackIndex: 0,
+      stackCount: 1,
+    })
+  }
+  // Стопка «книжкой»: несколько плашек одной (side, band, tier) полностью
+  // перекрываются, поэтому каждая следующая получает stackIndex и выглядывает
+  // снизу на STACK_PEEK_PX. Порядок — как пришли (в снапшоте крупные первыми).
+  const groups = new Map<string, MapBlock[]>()
+  for (const b of out) {
+    const key = `${b.side}:${b.bandIndex}:${b.tier}`
+    const arr = groups.get(key)
+    if (arr) arr.push(b)
+    else groups.set(key, [b])
+  }
+  for (const arr of groups.values()) {
+    arr.forEach((b, i) => {
+      b.stackIndex = i
+      b.stackCount = arr.length
     })
   }
   return out
 }
 
 const TIER_LABEL: Record<Tier, string> = {
-  1: 'Большие',
-  2: 'Средние',
-  3: 'Малые',
+  1: 'Large',
+  2: 'Medium',
+  3: 'Small',
 }
 
 /**
@@ -146,20 +178,22 @@ export const DensityMap = memo(function DensityMap() {
     onWheelZoom(e.deltaY)
   }, [onWheelZoom])
 
+  const bandCount = Math.max(1, Math.round(zoomPct / BAND_PCT))
+
   const blocks = useMemo(
-    () => buildBlocks(walls, autoBrps, settingsPatch, coinMap),
-    [walls, autoBrps, settingsPatch, coinMap],
+    () => buildBlocks(walls, autoBrps, settingsPatch, coinMap, bandCount),
+    [walls, autoBrps, settingsPatch, coinMap, bandCount],
   )
 
-  /** Полосы расстояний: ceil(глубина/0.5) тиков, подпись i/2% (их формула). */
+  /** Полосы расстояний: ceil(глубина/0.5) полос, разделительная линия между ними. */
   const ticks = useMemo(() => {
-    const count = Math.ceil(zoomPct / 0.5)
+    const count = bandCount
     return Array.from({ length: Math.max(0, count - 1) }, (_, i) => ({
-      pos: ((i + 1) * (100 / count)),
+      pos: (i + 1) * (100 / count),
       label: `${(i + 1) / 2}%`,
-      big: (i + 1) % 2 === 1,
+      big: (i + 1) % 2 === 0, // целые проценты (1%, 2%) — крупнее
     }))
-  }, [zoomPct])
+  }, [bandCount])
 
   const colW = 100 / TIER_COUNT
 
@@ -169,40 +203,40 @@ export const DensityMap = memo(function DensityMap() {
     const left = colW * b.tier - colW / 2
     const color = wallColor(b.hue, b.lOffset)
     const focused = focusedKey === key
-    const yPct = Math.min(100, Math.max(0, (Math.abs(b.distancePct) / zoomPct) * 100))
+    // Блок стоит по центру своей полосы (b.bandIndex-я полоса 0.5%).
+    const yPct = (b.bandIndex + 0.5) * (100 / bandCount)
+    // Стопка «книжкой»: каждая следующая плашка (stackIndex) выглядывает
+    // снизу на STACK_PEEK_PX, верхняя — с большим z-index поверх остальных.
+    const peekPx = b.stackIndex * STACK_PEEK_PX
     return (
       <button
         key={key}
-        className={`absolute flex items-center gap-[3px] px-[5px] h-[20px] rounded-[3px] cursor-pointer border text-left will-change-[top,bottom,left] ${
+        className={`absolute flex items-center gap-[3px] px-[5px] h-[24px] pb-[4px] rounded-[3px] cursor-pointer border text-left font-jb-mono will-change-[top,bottom,left,transform] ${
           focused ? 'brightness-150' : 'hover:brightness-125'
         }`}
         style={{
-          zIndex: focused ? 200 : 99,
+          zIndex: focused ? 200 : 99 - b.stackIndex,
           left: `${left}%`,
           width: `${colW - 6}%`,
-          // аски прижаты к линии сверху, биды — снизу (2px от центра);
-          // переходы — блоки плавно текут между полосами и колонками тиров
+          // трансформ центрирует блок на своей полосе и добавляет сдвиг стопки
           ...(b.side === 'ask'
-            ? { bottom: `${yPct}%`, transform: 'translateX(-50%) translateY(calc(-100% - 2px))' }
-            : { top: `${yPct}%`, transform: 'translateX(-50%) translateY(2px)' }),
+            ? { bottom: `${yPct}%`, transform: `translate(-50%, calc(50% + ${peekPx}px))` }
+            : { top: `${yPct}%`, transform: `translate(-50%, calc(-50% + ${peekPx}px))` }),
           backgroundColor: color,
-          transition: 'top 600ms ease-out, bottom 600ms ease-out, left 600ms ease-out, background-color 600ms ease-out',
+          transition: 'top 600ms ease-out, bottom 600ms ease-out, left 600ms ease-out, transform 600ms ease-out, background-color 600ms ease-out',
         }}
-        title={`${b.symbol} ${b.side === 'bid' ? 'BID' : 'ASK'} @ ${b.price} — ${formatUsdt(b.sumUsdt)} · ${formatAge(b.bornAt)}${b.roundNumber ? ' · круглое число' : ''}`}
+        title={`${b.symbol} ${b.side === 'bid' ? 'BID' : 'ASK'} @ ${b.price} — ${formatUsdt(b.sumUsdt)} · ${formatAge(b.bornAt)}${b.roundNumber ? ' · round number' : ''}${b.stackCount > 1 ? ` · stack ${b.stackIndex + 1}/${b.stackCount}` : ''}`}
         onMouseEnter={() => setFocusedKey(key)}
         onMouseLeave={() => setFocusedKey(null)}
         onClick={() => expandChartAtPrice(b.symbol, b.price)}
       >
-        <span className="truncate text-[10px] font-bold text-white/95">
+        {resolved.showMarket && (
+          <span className="shrink-0 text-[10px] font-semibold text-black/70">{EXCHANGE_BADGE[b.exchange]}</span>
+        )}
+        <span className="truncate text-[12px] font-bold text-black/90">
           {extractBaseAsset(b.symbol)}
         </span>
-        {resolved.showMarket && (
-          <span className="shrink-0 text-[7px] text-white/70">{EXCHANGE_BADGE[b.exchange]}</span>
-        )}
-        {b.roundNumber && (
-          <span className="shrink-0 w-[4px] h-[4px] rounded-full bg-white/90" />
-        )}
-        <span className="shrink-0 text-[9px] text-white/90 tabular-nums">
+        <span className="shrink-0 text-[11px] text-black/85 tabular-nums">
           {b.count > 1 ? `${b.count} ` : ''}{formatUsdt(b.sumUsdt)}
         </span>
       </button>
@@ -225,8 +259,8 @@ export const DensityMap = memo(function DensityMap() {
             style={{ bottom: `${t.pos}%`, height: 0 }}
             data-testid="density-map-tick"
           >
-            <div className="flex-1 h-px bg-white/8" />
-            <span className={`absolute left-1 ${t.big ? 'text-[11px]' : 'text-[9px]'} text-[#888] bg-transparent pl-[2px]`}>
+            <div className="absolute inset-x-0 h-[1px] -translate-y-1/2" style={{ background: BAND_LINE }} />
+            <span className={`absolute left-1/2 -translate-x-1/2 ${t.big ? 'text-[11px]' : 'text-[9px]'} text-[#999] leading-none`}>
               {t.label}
             </span>
           </div>
@@ -249,8 +283,8 @@ export const DensityMap = memo(function DensityMap() {
             style={{ top: `${t.pos}%`, height: 0 }}
             data-testid="density-map-tick"
           >
-            <div className="flex-1 h-px bg-white/8" />
-            <span className={`absolute left-1 ${t.big ? 'text-[11px]' : 'text-[9px]'} text-[#888] bg-transparent pl-[2px]`}>
+            <div className="absolute inset-x-0 h-[1px] -translate-y-1/2" style={{ background: BAND_LINE }} />
+            <span className={`absolute left-1/2 -translate-x-1/2 ${t.big ? 'text-[11px]' : 'text-[9px]'} text-[#999] leading-none`}>
               {t.label}
             </span>
           </div>
@@ -279,7 +313,7 @@ export const DensityMap = memo(function DensityMap() {
 
       {asks.length === 0 && bids.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center text-[10px] text-[#555] z-20">
-          Плотностей нет — сервер собирает стаканы…
+          No density yet — server is collecting order books…
         </div>
       )}
     </div>

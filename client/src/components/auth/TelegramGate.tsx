@@ -38,7 +38,7 @@ export default function TelegramGate() {
       attempts++
       if (attempts > POLL_MAX_ATTEMPTS) {
         stopPolling()
-        setError('Время ожидания истекло. Обновите страницу и попробуйте снова.')
+        setError('Timeout expired. Refresh the page and try again.')
         return
       }
       try {
@@ -71,7 +71,7 @@ export default function TelegramGate() {
         }
         startPolling()
       } catch {
-        if (!cancelled) setError('Не удалось получить ссылку для привязки. Обновите страницу.')
+        if (!cancelled) setError('Failed to get the binding link. Refresh the page.')
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -90,16 +90,16 @@ export default function TelegramGate() {
 
       <div className="auth-card">
         <div className="auth-step-enter">
-          <div className="auth-heading">Привяжите Telegram</div>
+          <div className="auth-heading">Link Telegram</div>
           <p className="auth-telegram-text">
-            Для доступа к сервису необходимо привязать Telegram-аккаунт
+            To access the service you must link your Telegram account
           </p>
           <p className="auth-telegram-hint">
-            Нажмите кнопку ниже, откройте бота и напишите <code>/start</code>
+            Click the button below, open the bot and send <code>/start</code>
           </p>
 
           {loading ? (
-            <p className="auth-polling-text">Загрузка...</p>
+            <p className="auth-polling-text">Loading...</p>
           ) : (
             <>
               <a
@@ -108,11 +108,11 @@ export default function TelegramGate() {
                 rel="noopener noreferrer"
                 className="auth-telegram-link"
               >
-                Открыть Telegram
+                Open Telegram
               </a>
               {!bindError && !error && (
                 <p className="auth-polling-text">
-                  Ожидание подтверждения привязки...
+                  Waiting for binding confirmation...
                 </p>
               )}
               {bindError && (
@@ -129,7 +129,7 @@ export default function TelegramGate() {
             className="auth-back"
             style={{ marginTop: '1.5rem' }}
           >
-            выйти из аккаунта
+            log out
           </button>
         </div>
       </div>

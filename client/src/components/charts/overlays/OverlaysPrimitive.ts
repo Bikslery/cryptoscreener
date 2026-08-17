@@ -24,7 +24,7 @@ import { toChartTime } from '../../../services/candle-events'
  *        box.y = attrs.y (top) | attrs.y - (4+10+3) (bottom)
  *        box.w = 4 + round(measure(text)) + 4, box.h = 17
  *        fill = m+"20", border 1px m (centered: +0.5,-1), radius 0
- *        text at (box.x+4, box.y+4) font 300 10px Noto Sans Variable,
+ *        text at (box.x+4, box.y+4) font 300 10px JetBrains Mono Variable,
  *        color = figures.text.color, maxWidth = box.w - 8
  *    - drawPrice label on hover/selected only (not implemented)
  *
@@ -50,7 +50,7 @@ const BOX_PAD_TOP = 4
 const BOX_PAD_BOTTOM = 3
 const FONT_SIZE = 10
 const BOX_H = BOX_PAD_TOP + FONT_SIZE + BOX_PAD_BOTTOM
-const FONT = "'Noto Sans Variable', ui-sans-serif, sans-serif"
+const FONT = "'JetBrains Mono Variable', ui-monospace, monospace"
 
 /** #rrggbb -> rgba with the given opacity (hex colors come from CSS vars) */
 function withAlpha(color: string, alpha: number): string {
@@ -219,7 +219,7 @@ class OverlaysPaneView implements IPrimitivePaneView {
         specs.push({
           time: cascade[0].t,
           price,
-          text: `${price.toFixed(this._primitive.pricePrecision())} Г—${cascade.length}`,
+          text: `${price.toFixed(this._primitive.pricePrecision())} ×${cascade.length}`,
           baseline: side === 'l' ? 'top' : 'bottom',
         })
       }

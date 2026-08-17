@@ -25,7 +25,35 @@ const BOX_PAD_TOP = 4
 const BOX_PAD_BOTTOM = 3
 const FONT_SIZE = 10
 const BOX_H = BOX_PAD_TOP + FONT_SIZE + BOX_PAD_BOTTOM
-const FONT = "'Noto Sans Variable', ui-sans-serif, sans-serif"
+const FONT = "'JetBrains Mono Variable', ui-monospace, monospace"
+
+/**
+ * Index of the bar that CONTAINS `birthChartSec` — the last bar whose time
+ * is <= the birth moment (the candle that was forming when the wall was
+ * created, chart-time space). Returns -1 when the birth predates every bar
+ * (the caller then anchors to the first bar instead). Binary search keeps
+ * this exact even when the birth falls into a data gap: instead of a
+ * floor-snapped time that `timeToCoordinate` cannot map (it returns null for
+ * non-bar-aligned times), the marker lands on a real bar, so the density's
+ * first point always sits on (or right after) its creation date.
+ */
+export function birthBarIndex(times: readonly number[], birthChartSec: number): number {
+  if (times.length === 0) return -1
+  if (birthChartSec < times[0]) return -1
+  let lo = 0
+  let hi = times.length - 1
+  let anchor = 0
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (times[mid] <= birthChartSec) {
+      anchor = mid
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+  return anchor
+}
 
 function withAlpha(color: string, alpha: number): string {
   if (alpha >= 0.999) return color
@@ -43,18 +71,14 @@ export class DensityPrimitive implements ISeriesPrimitive<Time> {
   private _series: ISeriesApi<SeriesType> | null = null
   private _requestUpdate: (() => void) | null = null
   private _data: DensityLineSpec[] | null = null
-  private _pricePrecision = 2
   private _view: DensityPaneView
-  private _barStep = 300
-  private _barStepKey = ''
 
   constructor() {
     this._view = new DensityPaneView(this)
   }
 
-  update(data: DensityLineSpec[] | null, pricePrecision: number): void {
+  update(data: DensityLineSpec[] | null): void {
     this._data = data
-    this._pricePrecision = pricePrecision
     this._requestUpdate?.()
   }
 
@@ -78,11 +102,6 @@ export class DensityPrimitive implements ISeriesPrimitive<Time> {
   chart(): IChartApi | null { return this._chart }
   series(): ISeriesApi<SeriesType> | null { return this._series }
   data(): DensityLineSpec[] | null { return this._data }
-  pricePrecision(): number { return this._pricePrecision }
-  barStep(): number { return this._barStep }
-  barStepSet(step: number): void { this._barStep = step }
-  barStepKey(): string { return this._barStepKey }
-  barStepKeySet(k: string): void { this._barStepKey = k }
 }
 
 interface CanvasTarget {
@@ -119,19 +138,11 @@ class DensityPaneView implements IPrimitivePaneView {
       ctx.textAlign = 'left'
       ctx.textBaseline = 'top'
 
-      // Bar step (seconds) from the series' last two bars — cached until the
-      // bars change. Needed to snap wall births to bar-aligned times.
+      // Bar timeline (chart-time space) — used to anchor a wall's birth to
+      // the bar that contains its creation moment.
       const sd = series.data()
-      if (sd.length >= 2) {
-        const t1 = sd[sd.length - 1].time as number
-        const t2 = sd[sd.length - 2].time as number
-        const key = `${t1}:${t2}`
-        if (key !== this._primitive.barStepKey()) {
-          this._primitive.barStepKeySet(key)
-          const step = Math.abs(t1 - t2)
-          if (isFinite(step) && step > 0) this._primitive.barStepSet(step)
-        }
-      }
+      if (sd.length === 0) return
+      const barTimes = sd.map(b => b.time as number)
 
       for (const s of data) {
         const y0 = series.priceToCoordinate(s.price)
@@ -140,16 +151,19 @@ class DensityPaneView implements IPrimitivePaneView {
         // The candle series paints SHIFTED times (toChartTime — local-tz
         // offset), so the wall's birth time must be asked in the same space.
         // v5.2.0's timeToCoordinate has no findNearest: it returns null for
-        // any non-bar-aligned time, so snap the birth to the containing bar
-        // (scalpboard semantics: the line starts at the birth bar).
+        // any non-bar-aligned time, so anchor the birth to the CONTAINING
+        // bar (scalpboard semantics: the line starts at the birth bar).
         const timeScale = chart.timeScale()
         const birthChartSec = toChartTime(s.birthTimeSec)
-        const birthBarSec = Math.floor(birthChartSec / this._primitive.barStep()) * this._primitive.barStep()
-        const rawX = timeScale.timeToCoordinate(birthBarSec as Time)
+        const birthIdx = birthBarIndex(barTimes, birthChartSec)
+        const anchor = birthIdx >= 0 ? birthIdx : 0
+        const rawX = timeScale.timeToCoordinate(barTimes[anchor] as Time)
         let x0: number
         if (rawX !== null && isFinite(rawX)) {
           x0 = rawX
         } else {
+          // Birth before the visible range (or before the first bar) — the
+          // line starts at the left pane edge.
           const range = timeScale.getVisibleRange()
           if (!range || birthChartSec >= (range.from as number)) { continue }
           x0 = 0
