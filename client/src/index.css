@@ -1,0 +1,308 @@
+@import "@fontsource-variable/jetbrains-mono";
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-jb-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+:root {
+  /* Цвета фона (TZ) */
+  --bg: #0a0a0a;
+  --bg-surface: #0e0e0e;
+  --bg-elevated: #141414;
+  --bg-head: #1a1a1a;
+  --bg-hover: #1a1a1a;
+  --bg-border: #222222;
+
+  /* Текст (TZ) */
+  --text-primary: #ffffff;
+  --text-secondary: #e5e5e5;
+  --text-muted: #a0a0a0;
+  --text-faint: #555555;
+
+  /* Акценты (TZ) — scalpboard.io values */
+  --color-up: #4bd24b;
+  --color-down: #d24b4b;
+  --color-accent: #f9b600;
+
+  /* Границы (TZ) */
+  --border-color: #1f1f1f;
+  --border-hover: #2a2a2a;
+
+  /* .clinic design system vars */
+  --bg-card: #0f0f0f;
+  --bg-input: #141414;
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.1);
+  --border-focus: rgba(255, 255, 255, 0.5);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 20px rgba(255, 255, 255, 0.06);
+  --transition: 0.2s ease;
+  --glow-text: 0 0 10px rgba(255, 255, 255, 0.25);
+  --glow-border: 0 0 15px rgba(255, 255, 255, 0.08);
+  --glow-border-hover: 0 0 25px rgba(255, 255, 255, 0.15);
+  --glow-text-strong: 0 0 12px rgba(255, 255, 255, 0.4), 0 0 30px rgba(255, 255, 255, 0.1);
+  --accent-glow: rgba(255, 255, 255, 0.12);
+
+  /* Legacy переменные (для совместимости пока не всё переименовано) */
+  --primary: #6f4db3;
+  --primary-glow: #6f4db355;
+  --bg-block: #0e0e0e;
+  --bg-focused: #3d3d3d;
+  --bg-selected: #6f4db3;
+  --fg: #e5e5e5;
+  --fg-75: #e5e5e5bf;
+  --fg-50: #a0a0a080;
+  --fg-25: #55555566;
+  --fg-10: #5555551a;
+  --fg-alt: #333333;
+  --border: #242424;
+  --scrollbar: #666666;
+  --candle-up: #4bd24b;
+  --candle-down: #d24b4b;
+  --grid: #1f1f1f;
+  --crosshair: #4d4d4d;
+  --price-label: #666666;
+  --volume: #4d4d4d;
+
+  /* Scalpboard.io dark palette (chart parity) — live values from scalpboard.io */
+  --chart--candle-up: #4bd24b;
+  --chart--candle-down: #d24b4b;
+  --chart--candle-border-up: #4bd24b;
+  --chart--candle-border-down: #d24b4b;
+  --chart--grid: #1f1f1f;
+  --chart--crosshair: #4d4d4d;
+  --chart--peak: #4d4d4d;
+  --chart--price: #b3b3b3;
+  --chart--volumes: #4d4d4d;
+  --chart--measure-up: #43c74333;
+  --chart--measure-down: #c7434333;
+  --chart--fire: #c74343;
+  --chart--indicator-fire: #c7434333;
+  --background: #0f0f0f;
+  --foreground-full: #f2f2f2;
+  --foreground-full-alt: #0d0d0d;
+  --foreground: #cccccc;
+  --foreground-75: #ccccccbf;
+  --foreground-60: #cccccc99;
+  --foreground-50: #cccccc80;
+  --foreground-25: #cccccc40;
+  --foreground-20: #cccccc33;
+  --foreground-10: #cccccc1a;
+  --foreground-alt: #333333;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+    font-weight: 400;
+  }
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+
+button, input, textarea, select,
+.font-mono,
+code, kbd, samp, pre {
+  font-family: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+a[href*="tradingview.com"] { display: none !important; }
+
+@keyframes chart-loading-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.chart-loading-overlay {
+  animation: chart-loading-fade-in 160ms ease-out;
+}
+
+/* Loading text — gentle breathing, no frame/background, just the words */
+.chart-loading-text {
+  animation: chart-loading-breathe 1.8s ease-in-out infinite;
+}
+@keyframes chart-loading-breathe {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1; }
+}
+
+/* Trailing dots that fill up then erase, one by one.
+   Fixed-width box keeps the text centered as the dots change. */
+.chart-loading-dots {
+  display: inline-block;
+  width: 1.6em;
+  text-align: left;
+}
+.chart-loading-dots::after {
+  content: '';
+  animation: chart-loading-dots 1.6s steps(1, end) infinite;
+}
+@keyframes chart-loading-dots {
+  0%    { content: ''; }
+  12.5% { content: '.'; }
+  25%   { content: '..'; }
+  37.5% { content: '...'; }
+  50%   { content: '...'; }
+  62.5% { content: '..'; }
+  75%   { content: '.'; }
+  87.5% { content: ''; }
+  100%  { content: ''; }
+}
+
+/* Live indicator animations */
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.7; transform: scale(1.1); }
+}
+
+.live-indicator-pulse {
+  animation: live-pulse 1.5s ease-in-out infinite;
+}
+
+.connecting-indicator-pulse {
+  animation: connecting-pulse 1s ease-in-out infinite;
+}
+
+@keyframes connecting-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Stale data overlay — opacity-only fade; static blur comes from the
+   Tailwind backdrop-blur-[3px] class, not animated, to avoid per-frame
+   re-rasterization of the chart canvas behind it. */
+@keyframes stale-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.stale-data-overlay {
+  animation: stale-fade-in 400ms ease-out;
+}
+
+/* ═══════════════════════════════════════════════════════
+   .clinic button system — glow borders, transparent bg
+   ═══════════════════════════════════════════════════════ */
+
+.clinic-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-weight: 600 !important;
+  text-shadow: var(--glow-text);
+  transition: all var(--transition);
+}
+.clinic-btn:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.5);
+  box-shadow: var(--glow-border-hover);
+  text-shadow: var(--glow-text-strong);
+  transform: translateY(-1px);
+}
+.clinic-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: var(--glow-border);
+}
+.clinic-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ── Small ── */
+.clinic-btn-sm {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.8rem;
+  border-radius: 6px;
+}
+
+/* ── Danger ── */
+.clinic-btn-danger {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: var(--color-down);
+  text-shadow: 0 0 8px rgba(239, 68, 68, 0.3);
+}
+.clinic-btn-danger:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.7);
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.2);
+  text-shadow: 0 0 12px rgba(239, 68, 68, 0.5);
+}
+
+/* ── Secondary ── */
+.clinic-btn-secondary {
+  border-color: rgba(255, 255, 255, 0.15);
+  color: var(--text-muted);
+  text-shadow: none;
+}
+.clinic-btn-secondary:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: var(--text-primary);
+  box-shadow: var(--glow-border);
+  text-shadow: var(--glow-text);
+}
+
+/* ── Ghost ── */
+.clinic-btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+  text-shadow: none;
+}
+.clinic-btn-ghost:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.1);
+  text-shadow: var(--glow-text);
+  box-shadow: none;
+  transform: none;
+}
+
+/* ── Active/selected state (tabs, toggles) ── */
+.clinic-btn-active {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: var(--text-primary);
+  text-shadow: var(--glow-text-strong);
+  box-shadow: var(--glow-border);
+}
+
+/* ── Exchange filter — inverse style with glow ── */
+.clinic-btn-exchange-active {
+  background: #ffffff;
+  border-color: #ffffff;
+  color: #000000;
+  text-shadow: none;
+  font-weight: 700 !important;
+  box-shadow: var(--glow-border-hover);
+}

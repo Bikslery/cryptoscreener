@@ -1,0 +1,2691 @@
+import { useEffect, useRef, memo, useState, useMemo } from 'react'
+import { createChart, CandlestickSeries, BarSeries, LineSeries, HistogramSeries, PriceScaleMode } from 'lightweight-charts'
+import type { IChartApi, ISeriesApi, Time, SeriesType, DeepPartial, CandlestickSeriesOptions, BarSeriesOptions, LineSeriesOptions } from 'lightweight-charts'
+import { useCoinListStore, setLivePrice, setLivePriceEx, useAuthStore } from '../../store'
+import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
+import { registerGlider, unregisterGlider, type Glider } from '../../services/glide'
+import { stepFormingAnimation, formingGlideK, FORMING_SNAP_INTERVAL_MS, type FormingTarget } from '../../services/candle-anim'
+import type { ChartExchange } from '../../store'
+import { useShallow } from 'zustand/shallow'
+import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount, getWsLastMessageAt } from '../../services/ws'
+import type { Timeframe, UnifiedCandle, Exchange, DrawingTool } from '../../types'
+import { formatPrice, formatCompact, extractBaseAsset, snapToTick } from '../../utils/format'
+import { resolveIndicators, formatIndicator } from '../../services/indicators'
+import { ArrowLeft, Settings2 } from 'lucide-react'
+import * as candleCache from '../../services/candle-cache'
+import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT, EXPANDED_CANDLE_LIMIT } from '../../services/candle-prefetch'
+import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
+import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatch, type TickPayload } from '../../services/candle-events'
+import { createSecondCandleAggregator, type SecondCandleAggregator } from '../../services/second-candle-aggregator'
+import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
+import { isFiniteOHLCV, validateCandle } from '../../services/candle-utils'
+import { recordDiag } from '../../services/candle-diag'
+import { useDrawings } from './useDrawings'
+import DrawingToolsPanel from './DrawingToolsPanel'
+import { useChartOverlays } from './overlays/useChartOverlays'
+import { useDensityOverlay } from './overlays/useDensityOverlay'
+import { useChartSettings, resetChartSettings, type WatermarkPlace } from '../../services/chart-settings'
+import {
+  buildChartOptions, candleSeriesOptions, volumeSeriesOptions,
+  applyWatermark, volumePaneTop, timeVisibleFor, secondsVisibleFor,
+} from '../../services/chart-config'
+
+
+const TF_SECONDS: Record<string, number> = {
+  '1s': 1, '5s': 5, '15s': 15,
+  '1m': 60, '5m': 300, '15m': 900,
+  '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
+}
+function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
+
+const SECOND_TIMEFRAMES = new Set<Timeframe>(['1s', '5s', '15s'])
+function isSecondTimeframe(tf: Timeframe): boolean { return SECOND_TIMEFRAMES.has(tf) }
+
+/**
+ * "Dumb renderer" (scalpboard.io parity).
+ *
+ * The server is the ONLY source of truth for candles. The client paints
+ * kline snapshots wholesale and mutates ONLY the last bar's close/high/low
+ * from price ticks (open and volume are never touched by a tick). There is
+ * no client-side aggregation, no glide, no sanity clamping, no synthetic
+ * filler candles and no self-heal: what the server says is what is drawn.
+ */
+function upsertBar(candlesDataRef: React.RefObject<UnifiedCandle[]>, bar: UnifiedCandle): void {
+  const arr = candlesDataRef.current
+  if (!arr) return
+  const last = arr[arr.length - 1]
+  if (!last) { arr.push(bar); return }
+  if (bar.time === last.time) {
+    arr[arr.length - 1] = bar
+  } else if (bar.time > last.time) {
+    arr.push(bar)
+  }
+  // Older than the tail is dropped by the events layer — nothing to do.
+}
+
+/**
+ * Smooth forming-candle renderer (scalpboard-style glide).
+ *
+ * The backing array stays authoritative and exact; this animator only
+ * interpolates what gets PAINTED on the last (forming) bar. Each live update
+ * (price tick / kline snapshot for the current period) sets a new target; the
+ * SHARED rAF coordinator (glide.ts) advances it with frame-rate-independent
+ * exponential smoothing and stops when converged (~100ms). Final candles,
+ * history loads and repaints always paint exact values — the animation never
+ * touches data.
+ */
+// Exported for unit tests only (see __tests__/forming-animator.test.ts) —
+// not part of the component's public surface. This breaks the
+// components-only-exports assumption react-refresh relies on for this file;
+// acceptable since ChartGrid.tsx already isn't a clean fast-refresh boundary
+// (it also exports helper hooks alongside components).
+// eslint-disable-next-line react-refresh/only-export-components
+export class FormingAnimator implements Glider {
+  private displayed: FormingTarget | null = null
+  private target: FormingTarget | null = null
+  private running = false
+  private readonly series: ISeriesApi<SeriesType>
+  private readonly getRef: () => ISeriesApi<SeriesType> | null
+  /** When the last target was set — a retarget sooner than the snap
+   *  interval means a live pair, which SNAPS instead of gliding. */
+  private lastTargetAt = 0
+
+  constructor(series: ISeriesApi<SeriesType>, getRef: () => ISeriesApi<SeriesType> | null) {
+    this.series = series
+    this.getRef = getRef
+  }
+
+  get isAnimating(): boolean {
+    return this.running
+  }
+
+  /**
+   * Route a live forming-candle update through the animator. Returns true
+   * when handled.
+   *
+   * NOTE: under the current applyChartPatch dispatch, this only ever
+   * receives updates for the SAME period this animator is already tracking
+   * (isFormingBar gates on the caller's side); a genuinely new period is
+   * routed through the exact-paint branch + `finalizeAndReset()` instead.
+   * The `displayed.time !== t.time` branch below is kept as a defensive
+   * fallback for that invariant — if it's ever hit, it still does the right
+   * thing (finalize the old bar's exact target before snapping to the new
+   * one) rather than silently glide-jumping across a period boundary.
+   */
+  paint(c: UnifiedCandle): boolean {
+    const t: FormingTarget = { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }
+    if (!this.displayed || this.displayed.time !== t.time) {
+      // Bar handoff (Stage 2 item 3): finalize whatever the PREVIOUS bar's
+      // glide was converging toward — its exact last-known target — before
+      // abandoning it. Without this, a glide frozen mid-flight (running,
+      // displayed lagging target) leaves the closed bar's body stuck at a
+      // non-final interpolated frame forever, since nothing ever repaints a
+      // bar again once it's no longer the series' last one.
+      this.finalizeCurrent()
+      // Fully clear + unregister rather than leaving `running`/registration
+      // dangling: `displayed` is about to be set equal to `target` for the
+      // NEW bar below (a fresh snap has no glide yet), so there is nothing
+      // for the shared rAF coordinator to advance until an actual second
+      // update arrives for this new bar. Without this explicit clear, the
+      // OLD registration would linger in the shared gliders Set for one
+      // extra (wasted, self-converging) frame before naturally dropping out.
+      this.clearState()
+      // New bar: snap exactly — the glide must never stretch across period
+      // boundaries. (Starting the new bar's displayed body from anything
+      // other than the server-provided `c.open` — e.g. forcing
+      // open = previous close — would silently override authoritative
+      // data on a real price gap, so `open` here is always exactly what the
+      // server sent.)
+      this.target = t
+      this.displayed = { ...t }
+      this.lastTargetAt = performance.now()
+      this.paintSeries(this.displayed)
+      return true
+    }
+    this.target = t
+    const now = performance.now()
+    if (now - this.lastTargetAt <= FORMING_SNAP_INTERVAL_MS) {
+      // LIVE pair: snap straight to the target — a glide restarted by every
+      // retarget never converges and visibly chases the стакан. The body
+      // then moves on the exact frame the trade arrives, like the book.
+      this.lastTargetAt = now
+      if (this.running) {
+        unregisterGlider(this)
+        this.running = false
+      }
+      this.displayed = { ...t }
+      this.paintSeries(this.displayed)
+      return true
+    }
+    // Quiet pair — smooth glide toward the new target.
+    this.lastTargetAt = now
+    this.ensureLoop()
+    return true
+  }
+
+  /**
+   * Called when the previously-forming bar is being abandoned because the
+   * caller is about to exact-paint a DIFFERENT bar directly (new period, an
+   * out-of-order correction, or a candlesType flip) — snaps the OLD bar to
+   * its last known exact target first (see `paint()` doc), then clears.
+   */
+  finalizeAndReset(): void {
+    this.finalizeCurrent()
+    this.clearState()
+  }
+
+  /**
+   * Exact-data paths (setData) must stop any pending glide WITHOUT an extra
+   * repaint: setData() is about to overwrite the entire series a moment
+   * later (with the exact authoritative array), so finalizing here would be
+   * wasted work at best and, since the series' internal bar set is about to
+   * change wholesale, a needless extra `update()` call at worst.
+   */
+  reset() {
+    this.clearState()
+  }
+
+  /** Shared-coordinator entry: advance one frame, false = converged/stop. */
+  tick(dt: number): boolean {
+    if (this.getRef() !== this.series || !this.target || !this.displayed) return false
+    const { next, converged } = stepFormingAnimation(this.displayed, this.target, formingGlideK(dt))
+    if (converged) {
+      this.displayed = { ...this.target }
+      this.paintSeries(this.displayed)
+      this.running = false
+      return false
+    }
+    this.displayed = next
+    this.paintSeries(next)
+    return true
+  }
+
+  private ensureLoop() {
+    if (this.running) return
+    this.running = true
+    registerGlider(this)
+  }
+
+  /** Snap the CURRENT bar to its exact last-known target if a glide was in
+   * flight. No-op if nothing was running. Never clears state itself (callers
+   * decide that) and never recurses into finalize/reset on failure — see
+   * `paintSeries`. */
+  private finalizeCurrent(): void {
+    if (this.running && this.target) {
+      this.paintSeries(this.target)
+    }
+  }
+
+  private clearState(): void {
+    if (this.running) {
+      unregisterGlider(this)
+      this.running = false
+    }
+    this.displayed = null
+    this.target = null
+  }
+
+  private paintSeries(t: FormingTarget) {
+    try {
+      this.series.update({
+        time: toChartTime(t.time) as Time,
+        open: t.open,
+        high: t.high,
+        low: t.low,
+        close: t.close,
+      })
+    } catch {
+      // Series is gone (chart removed / recreated). This is a leaf
+      // operation — clear state directly instead of recursing into
+      // finalizeAndReset()/reset() (which would call back into
+      // paintSeries() and could loop if the series keeps throwing).
+      this.clearState()
+    }
+  }
+}
+
+// One animator per candle series (chart instance). WeakMap → GC'd with the
+// series; the loop self-stops when the ref no longer points at this series
+// (unmount, or a series recreate like the candlesType flip).
+const formingAnimators = new WeakMap<ISeriesApi<SeriesType>, FormingAnimator>()
+
+function getFormingAnimator(
+  series: ISeriesApi<SeriesType>,
+  getRef: () => ISeriesApi<SeriesType> | null,
+): FormingAnimator {
+  let a = formingAnimators.get(series)
+  if (!a) {
+    a = new FormingAnimator(series, getRef)
+    formingAnimators.set(series, a)
+  }
+  return a
+}
+
+/** Exact-data paths (setData) must stop any pending forming-candle glide. */
+function stopFormingGlide(candleRef: React.RefObject<ISeriesApi<SeriesType> | null>): void {
+  const s = candleRef.current
+  if (s) getFormingAnimator(s, () => candleRef.current).reset()
+}
+
+/** True when the update targets the current forming (last) bar. */
+function isFormingBar(bar: UnifiedCandle, candlesDataRef: React.RefObject<UnifiedCandle[]>): boolean {
+  const arr = candlesDataRef.current
+  const last = arr && arr.length > 0 ? arr[arr.length - 1] : null
+  return !!last && bar.time === last.time
+}
+
+/**
+ * Source tag for diagnostics only — identifies which lane produced the patch
+ * being applied (kline stream, trade tick, bookTicker mid, second-candle
+ * aggregator, or a buffered-flush replay from a history/lazy-scroll cycle).
+ * Never affects behavior, only what gets logged when something looks wrong.
+ */
+type PatchSource = 'kline' | 'tick-trade' | 'tick-price' | 'second-agg' | 'history-flush' | 'lazy-scroll-flush'
+
+function applyChartPatch(
+  patch: ChartEventPatch,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  source: PatchSource,
+) {
+  const candlesType = useChartSettings.getState().candlesType
+  const series = candleRef.current
+  // Only OHLC series can glide — a line series paints { time, value } only.
+  const animator = series && candlesType !== 'line' ? getFormingAnimator(series, () => candleRef.current) : null
+  for (const u of patch.updates) {
+    const bar = u.bar
+    const t = toChartTime(bar.time) as Time
+    try {
+      if (candlesType === 'line') {
+        candleRef.current?.update({ time: t, value: bar.close })
+      } else if (animator && isFormingBar(bar, candlesDataRef)) {
+        // Live forming-candle update (price tick / current-period kline):
+        // the body GLIDES toward the new price instead of teleporting. The
+        // array keeps the exact authoritative bar (upsertBar below).
+        animator.paint(bar)
+      } else {
+        // New period / full snapshot: this is the bar-handoff point (Stage 2
+        // item 3). The animator may still be mid-glide for the PREVIOUS
+        // forming bar (its `displayed` lagging `target`) — finalizeAndReset
+        // snaps that old bar to its exact final target first (so it never
+        // freezes on a stale interpolated frame once it stops being the
+        // last bar) and only then clears the glide state, before this new
+        // bar's exact values are painted below.
+        if (animator) animator.finalizeAndReset()
+        candleRef.current?.update({ time: t, open: bar.open, high: bar.high, low: bar.low, close: bar.close })
+      }
+      if (u.paintVolume) {
+        volumeRef.current?.update({ time: t, value: bar.volume })
+      }
+    } catch (err) {
+      // series.update() throws when the bar's time is older than the
+      // series' current last bar (lightweight-charts monotonic-time
+      // invariant) or when the series was recreated mid-paint
+      // (pricePrecision flip). Never swallow silently — log exactly which
+      // bar/source caused it so a reconnect/lazy-scroll/tf-switch race can
+      // be traced back to its origin instead of just "candles look wrong".
+      const arr = candlesDataRef.current
+      const lastArrBar = arr && arr.length > 0 ? arr[arr.length - 1] : null
+      recordDiag('series_update_rejected', {
+        symbol, exchange, tf,
+        from: bar.time,
+        to: lastArrBar?.time,
+        detail: `source=${source} error=${err instanceof Error ? err.message : String(err)}`,
+      })
+    }
+    upsertBar(candlesDataRef, bar)
+  }
+  if (patch.outOfOrder && patch.outOfOrder.length > 0) {
+    applyOutOfOrderCorrections(patch.outOfOrder, candleRef, candlesDataRef, symbol, exchange, tf, source)
+  }
+  if (patch.livePrice != null) {
+    setLivePrice(symbol, patch.livePrice)
+    if (exchange) setLivePriceEx(symbol, exchange, patch.livePrice)
+  }
+  if (patch.cacheWrites && exchange) {
+    for (const c of patch.cacheWrites) {
+      candleCache.updateCandle(exchange, symbol, tf, c)
+    }
+  }
+}
+
+/**
+ * Out-of-order kline correction (Stage 2, item "Out-of-order коррекции"):
+ * a late kline snapshot arrived for a period the events layer has already
+ * moved past (older than its own bounded tail window). Instead of a silent
+ * drop, check whether the bar still exists in the FULL candlesDataRef array
+ * (which is not bounded to MAX_TAIL) — if so, correct it in place via
+ * lightweight-charts v5's `series.update(bar, true)` (historicalUpdate),
+ * which repaints a non-last bar without a setData()/viewport reset. This is
+ * a rare path (only real out-of-order server data triggers it), so a linear
+ * findIndex from the tail backward is fine.
+ */
+function applyOutOfOrderCorrections(
+  corrections: { time: number; bar: UnifiedCandle }[],
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  source: PatchSource,
+) {
+  const arr = candlesDataRef.current
+  if (!arr || arr.length === 0) return
+  const candlesType = useChartSettings.getState().candlesType
+  if (candlesType === 'line') return // line series has no meaningful OHLC historical-update here
+  const series = candleRef.current
+  if (!series) return
+
+  for (const { time, bar } of corrections) {
+    const idx = arr.findIndex(c => c.time === time)
+    if (idx < 0) {
+      recordDiag('out_of_order_unresolved', {
+        symbol, exchange, tf, from: time,
+        detail: `source=${source} bar not found in candlesDataRef either — dropped`,
+      })
+      continue
+    }
+    arr[idx] = bar
+    try {
+      series.update(
+        { time: toChartTime(bar.time) as Time, open: bar.open, high: bar.high, low: bar.low, close: bar.close },
+        true, // historicalUpdate: allowed to touch a non-last bar
+      )
+      recordDiag('out_of_order_corrected', {
+        symbol, exchange, tf, from: time,
+        detail: `source=${source} repainted in place via historicalUpdate`,
+      })
+    } catch (err) {
+      recordDiag('out_of_order_repaint_failed', {
+        symbol, exchange, tf, from: time,
+        detail: `source=${source} error=${err instanceof Error ? err.message : String(err)}`,
+      })
+    }
+  }
+}
+
+/**
+ * Temporary invariant logger (Stage 1): after every applyChartPatch/flush,
+ * verify the tail of candlesDataRef agrees with the events layer's own tail
+ * bookkeeping. Any mismatch means the array and the event layer have
+ * diverged — which is exactly the class of bug this instrumentation exists
+ * to catch (lazy-scroll race, reconnect race, tf/symbol switch mid-close,
+ * animator handoff). Logs via candle-diag so it shows up in
+ * `window.__candleDiag.inspect()` without touching rendering.
+ */
+function checkTailInvariant(
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  eventsRef: React.RefObject<CandleEvents | null> | undefined,
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  source: PatchSource,
+  n = 3,
+) {
+  const ev = eventsRef?.current
+  if (!ev) return
+  const arr = candlesDataRef.current
+  if (!arr || arr.length === 0) return
+  const eventsTail = ev.peekTail(n)
+  if (eventsTail.length === 0) return
+  const arrTail = arr.slice(Math.max(0, arr.length - n)).map(c => ({ time: c.time, close: c.close }))
+
+  // Compare from the right (most recent) — the events layer's tail is
+  // capped at MAX_TAIL so it may hold fewer entries than requested.
+  for (let i = 1; i <= eventsTail.length; i++) {
+    const ePos = eventsTail.length - i
+    const aPos = arrTail.length - i
+    if (ePos < 0 || aPos < 0) break
+    const e = eventsTail[ePos]
+    const a = arrTail[aPos]
+    if (e.time !== a.time) {
+      recordDiag('tail_invariant_time_mismatch', {
+        symbol, exchange, tf,
+        from: e.time, to: a.time,
+        detail: `source=${source} events-tail vs candlesDataRef diverged at offset ${i}`,
+      })
+      return
+    }
+    if (Math.abs(e.close - a.close) > 1e-9) {
+      recordDiag('tail_invariant_price_mismatch', {
+        symbol, exchange, tf,
+        from: e.time,
+        detail: `source=${source} events.close=${e.close} arr.close=${a.close} at offset ${i}`,
+      })
+      return
+    }
+  }
+}
+
+function ChartMessageOverlay({ label, tone = 'muted' }: { label: string; tone?: 'muted' | 'error' }) {
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none bg-[#0a0a0a]/70">
+      <div className={`rounded-[6px] border px-4 py-3 text-[12px] font-medium shadow-[0_12px_30px_rgba(0,0,0,0.35)] ${
+        tone === 'error'
+          ? 'border-[#e74c3c]/40 bg-[#1a1010]/95 text-[#f0b0aa]'
+          : 'border-[#2a2a2a] bg-[#101010]/95 text-[#aaa]'
+      }`}>
+        {label}
+      </div>
+    </div>
+  )
+}
+
+function ChartCornerSpinner() {
+  return (
+    <div className="absolute top-[8px] right-[8px] z-30 pointer-events-none">
+      <div className="w-[14px] h-[14px] border-2 border-[#555] border-t-[#ccc] rounded-full animate-spin" />
+    </div>
+  )
+}
+
+function StaleDataOverlay({ visible }: { visible: boolean }) {
+  if (!visible) return null
+
+  return (
+    <div className="stale-data-overlay absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-[#0a0a0a]/60 backdrop-blur-[3px]">
+      <div className="rounded-[6px] border border-[#e74c3c]/40 bg-[#1a1010]/95 px-4 py-3 text-[12px] font-medium shadow-[0_12px_30px_rgba(0,0,0,0.35)] flex items-center gap-3">
+        <div className="w-[14px] h-[14px] border-2 border-[#e74c3c]/40 border-t-[#e74c3c] rounded-full animate-spin" />
+        <span className="text-[#f0b0aa]">Reconnecting to server...</span>
+      </div>
+    </div>
+  )
+}
+
+let initialPushReceived = false
+
+function useInitialCandlesPush() {
+  useEffect(() => {
+    const unsubReconnect = wsOnType('open', () => {
+      initialPushReceived = false
+    })
+    const unsubPush = wsOnType('initial-candles', (msg) => {
+      if (initialPushReceived) return
+      initialPushReceived = true
+      const data = msg.data as Record<string, UnifiedCandle[] | CompactCandle[]> | undefined
+      if (!data) return
+      if ((msg as { format?: string }).format === 'compact') {
+        // Keys are `${exchange}:${symbol}:${tf}`, values are [t,o,h,l,c,v] tuples
+        const expanded: Record<string, UnifiedCandle[]> = {}
+        for (const [key, tuples] of Object.entries(data)) {
+          const parts = key.split(':')
+          if (parts.length !== 3) continue
+          const [ex, symbol, tf] = parts
+          expanded[key] = expandCompactCandles(tuples as CompactCandle[], symbol, ex as Exchange, tf)
+        }
+        candleCache.storeBulk(expanded)
+        return
+      }
+      candleCache.storeBulk(data as Record<string, UnifiedCandle[]>)
+    })
+    return () => { unsubReconnect(); unsubPush() }
+  }, [])
+}
+
+type FullHistoryStatus = 'loading' | 'ready' | 'empty' | 'error' | 'retrying'
+
+/** Hard wall-clock deadline for the initial history load: after this the
+ *  chart paints whatever exists (partial cache / live WS candles) instead of
+ *  sitting on a blank spinner forever. Transient server failures (exchange
+ *  throttle, route timeout) trigger ONE background retry — no page reload. */
+const HISTORY_LOAD_DEADLINE_MS = 10_000
+
+/**
+ * Minimum candles worth painting from a partial cache. Painting 3 stray
+ * candles looks like a broken chart; 150 already renders a usable window.
+ */
+function minPartialCandles(limit: number): number {
+  return Math.min(150, Math.max(40, Math.floor(limit / 2)))
+}
+
+function useFullHistory(
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  chartRef: React.RefObject<IChartApi | null>,
+  destroyedRef: React.RefObject<boolean>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  options?: { limit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServer?: boolean; wsEpoch?: number; skipHistory?: boolean },
+  lastUpdateRef?: React.RefObject<number>,
+  eventsRef?: React.RefObject<CandleEvents | null>,
+  chartVersion?: number,
+): { isInitialLoading: boolean; status: FullHistoryStatus; dataVersion: number } {
+  const limit = options?.limit ?? 1000
+  const forceServer = options?.forceServer ?? false
+  const wsEpoch = options?.wsEpoch ?? 0
+  const fitOnOpen = options?.fitOnOpen ?? false
+  const visibleBars = options?.visibleBars ?? 150
+  const skipHistory = options?.skipHistory ?? false
+  const [isInitialLoading, setIsInitialLoading] = useState(true)
+  const [status, setStatus] = useState<FullHistoryStatus>('loading')
+  const [dataVersion, setDataVersion] = useState(0)
+
+  // Key of the last painted series — used to save the viewport we are about
+  // to leave and to know whether a reload is a same-key refresh.
+  const lastPaintedKeyRef = useRef<string | null>(null)
+  /** True once a PARTIAL cache paint happened in this effect run — the full
+   *  history that lands later must fitContent (expanded chart zoom-out) so
+   *  the partial first paint doesn't freeze the view at shallow depth. */
+  const partialPaintedRef = useRef(false)
+
+  useEffect(() => {
+    if (!exchange) return
+    const cancelled = { value: false }
+    const sameKeyReload = forceServer && lastPaintedKeyRef.current === `${exchange}:${symbol}:${tf}`
+    if (!sameKeyReload) setIsInitialLoading(true)
+    partialPaintedRef.current = false
+
+    const renderCandles = (candles: UnifiedCandle[], opts?: { fit?: boolean }) => {
+      if (destroyedRef.current || !candleRef.current || !volumeRef.current) {
+        // Nothing was painted — release reconciliation so realtime events
+        // that arrived during the fetch are not stuck in the buffer.
+        eventsRef?.current?.setBuffered(false)
+        return
+      }
+      const key = `${exchange}:${symbol}:${tf}`
+      const ts = chartRef.current?.timeScale()
+
+      // Save the viewport we're LEAVING (symbol/TF switch) so returning to
+      // that pair restores exactly where the user left off.
+      const prevKey = lastPaintedKeyRef.current
+      if (ts && prevKey && prevKey !== key) {
+        saveViewport(prevKey, captureViewport(chartRef.current))
+      }
+
+      const valid = candles.filter(validateCandle)
+      candlesDataRef.current = valid
+      const lineMode = useChartSettings.getState().candlesType === 'line'
+      const candleData = lineMode
+        ? valid.map(c => ({ time: toChartTime(c.time) as Time, value: c.close }))
+        : valid.map(c => ({
+            time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+          }))
+      const volumeData = valid.map(c => ({
+        time: toChartTime(c.time) as Time, value: c.volume,
+      }))
+      try {
+        // Capture BEFORE setData — setData resets the whole time scale.
+        const leavingKey = lastPaintedKeyRef.current
+        if (leavingKey && leavingKey === key) {
+          saveViewport(leavingKey, captureViewport(chartRef.current))
+        }
+        // Exact data replaces everything — a pending forming-candle glide
+        // must not paint stale interpolated values onto the new series.
+        stopFormingGlide(candleRef)
+        candleRef.current.setData(candleData)
+        volumeRef.current.setData(volumeData)
+      } catch { /* benign: setData may throw on a fresh/empty series */ }
+      if (ts && candleData.length > 0) {
+        if (opts?.fit) {
+          // A partial cache paint happened first (expanded chart): the full
+          // history just landed — open maximally zoomed out, exactly as the
+          // first-paint path would have.
+          ts.fitContent()
+        } else {
+          const saved = getViewport(key)
+          if (saved) {
+            // Restore the pair's saved viewport (scroll position, bar spacing,
+            // right offset, time visibility) — scalpboard's ae() equivalent.
+            restoreViewport(chartRef.current, saved)
+          } else if (fitOnOpen) {
+            // Expanded chart: open maximally zoomed out.
+            ts.fitContent()
+          } else {
+            // Mini charts: how many bars fit on screen.
+            const vbars = Math.min(Math.max(visibleBars, 20), 2000)
+            ts.setVisibleLogicalRange({ from: candleData.length - vbars, to: candleData.length + 5 })
+          }
+        }
+      }
+      lastPaintedKeyRef.current = key
+      // Bump dataVersion so the drawing primitive re-syncs.
+      setDataVersion(v => v + 1)
+      if (eventsRef) {
+        // History lands first, then buffered live events (klines/ticks that
+        // arrived during the fetch) are replayed on top — never lost, never
+        // double-painted.
+        eventsRef.current?.applyHistory(valid)
+        const flush = eventsRef.current?.setBuffered(false)
+        if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
+          applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'history-flush')
+        }
+        checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'history-flush')
+      }
+    }
+
+    const run = async () => {
+      // Second timeframes start live from a blank slate: the client-side
+      // aggregator fills the chart from trade prints, no server history
+      // exists (futures/bybit have no 1s klines), and painting a substituted
+      // 1m/5m interval as 1s would corrupt the axis. 'ready' (not 'empty')
+      // because live candles are expected to arrive immediately.
+      if (skipHistory) {
+        renderCandles([])
+        setIsInitialLoading(false)
+        setStatus('ready')
+        eventsRef?.current?.setBuffered(false)
+        if (lastUpdateRef) lastUpdateRef.current = Date.now()
+        return
+      }
+      // Reconcile: buffer live events while the history loads.
+      eventsRef?.current?.setBuffered(true)
+
+      const cached = candleCache.getCandles(exchange, symbol, tf)
+      // SWR-style partial paint: ANY usable cache paints immediately (chart
+      // visible at once, live WS events replay on top), then the fetch below
+      // tops up to the full requested depth in the background. Previously a
+      // cache with fewer than `limit` candles was discarded entirely, forcing
+      // a full network wait on every return to a chart.
+      if (cached && cached.length >= minPartialCandles(limit)) {
+        if (!cancelled.value && !destroyedRef.current) {
+          renderCandles(cached)
+          partialPaintedRef.current = cached.length < limit
+          setIsInitialLoading(false)
+          setStatus('ready')
+          if (lastUpdateRef) lastUpdateRef.current = Date.now()
+        }
+        if (cached.length >= limit) return
+      }
+
+      // Fetch with a hard deadline + bounded retries. Transient failures
+      // (5xx/timeout from the server, exchange throttle) retry within the
+      // deadline; afterwards the buffer is released so live events keep
+      // painting and ONE background retry heals the history — the chart can
+      // never be stuck blank until a page reload.
+      const deadline = Date.now() + HISTORY_LOAD_DEADLINE_MS
+      let fetched: UnifiedCandle[] = []
+      let transientFailure = false
+      let attempts = 0
+      while (Date.now() < deadline) {
+        attempts++
+        try {
+          fetched = await getOrFetchHistory(symbol, tf, limit, exchange, forceServer)
+          transientFailure = false
+          if (fetched.length > 0 || !transientFailure || attempts >= 3) break
+        } catch {
+          transientFailure = true
+          if (attempts >= 3 || cancelled.value || destroyedRef.current) break
+        }
+        if (cancelled.value || destroyedRef.current) {
+          eventsRef?.current?.setBuffered(false)
+          return
+        }
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) break
+        await new Promise(r => setTimeout(r, Math.min(300, remaining)))
+      }
+
+      if (cancelled.value || destroyedRef.current) {
+        eventsRef?.current?.setBuffered(false)
+        return
+      }
+      if (fetched.length > 0) {
+        renderCandles(fetched, { fit: fitOnOpen && partialPaintedRef.current })
+        setIsInitialLoading(false)
+        setStatus('ready')
+        if (lastUpdateRef) lastUpdateRef.current = Date.now()
+        // Convergence: the server may have SWR-served a shallow cache (its
+        // background refresh was throttled). Top up to the full requested
+        // depth with a bounded follow-up loop — the expanded chart must end
+        // up with 3000 bars, not 300. Each attempt is cheap (server cache);
+        // a repaint only happens when the depth actually improved.
+        if (fetched.length < limit) {
+          let attempts = 0
+          const topUp = () => {
+            if (cancelled.value || destroyedRef.current || attempts >= 3) return
+            attempts++
+            getOrFetchHistory(symbol, tf, limit, exchange, forceServer)
+              .then(data => {
+                if (cancelled.value || destroyedRef.current) return
+                if (data.length > candlesDataRef.current.length && data.length > 0) {
+                  renderCandles(data, { fit: fitOnOpen && partialPaintedRef.current })
+                  if (lastUpdateRef) lastUpdateRef.current = Date.now()
+                }
+                if (data.length < limit) setTimeout(topUp, 2500)
+              })
+              .catch(() => setTimeout(topUp, 5000))
+          }
+          setTimeout(topUp, 2500)
+        }
+        return
+      }
+      if (transientFailure) {
+        // Nothing painted and the server is having a bad moment: release the
+        // buffer so the forming candle can still paint from live events, and
+        // retry once in the background.
+        eventsRef?.current?.setBuffered(false)
+        setIsInitialLoading(false)
+        setStatus('retrying')
+        setTimeout(() => {
+          if (cancelled.value || destroyedRef.current) return
+          getOrFetchHistory(symbol, tf, limit, exchange, forceServer)
+            .then(data => {
+              if (data.length > 0 && !cancelled.value && !destroyedRef.current) {
+                renderCandles(data)
+                setStatus('ready')
+                if (lastUpdateRef) lastUpdateRef.current = Date.now()
+              }
+            })
+            .catch(() => {})
+        }, 5000)
+        return
+      }
+      // Server answered without candles (or every attempt failed cleanly):
+      // release the buffer so the forming candle can still paint from live
+      // events.
+      eventsRef?.current?.setBuffered(false)
+      setIsInitialLoading(false)
+      setStatus('empty')
+    }
+
+    run()
+    return () => { cancelled.value = true }
+    // `chartVersion` re-paints history when the canvas/series is recreated
+    // (pricePrecision flip) — the new chart starts empty.
+    // `wsEpoch` re-paints after a WS reconnect so periods that fell through
+    // the dead window are restored from the server.
+  }, [symbol, exchange, tf, chartVersion, wsEpoch, limit, forceServer, fitOnOpen, visibleBars, skipHistory,
+    candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, lastUpdateRef, eventsRef])
+
+  return { isInitialLoading, status, dataVersion }
+}
+
+function useLazyScroll(
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  chartRef: React.RefObject<IChartApi | null>,
+  destroyedRef: React.RefObject<boolean>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  isInitialLoading: boolean,
+  adjustingRef: React.RefObject<boolean>,
+  setIsLoadingMore?: (loading: boolean) => void,
+  eventsRef?: React.RefObject<CandleEvents | null>,
+  onLogicalShift?: (added: number) => void,
+) {
+  const inflightRef = useRef(false)
+  const reachedStartRef = useRef(false)
+  const symbolRef = useRef(symbol)
+  const exchangeRef = useRef(exchange)
+  const tfRef = useRef(tf)
+  const emptyCountRef = useRef(0)
+  const onLogicalShiftRef = useRef(onLogicalShift)
+  const setIsLoadingMoreRef = useRef(setIsLoadingMore)
+  const lastCallTimeRef = useRef(0)
+  const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingRangeRef = useRef<{ from: number; to: number } | null>(null)
+
+  useEffect(() => {
+    symbolRef.current = symbol
+    exchangeRef.current = exchange
+    tfRef.current = tf
+    reachedStartRef.current = false
+    inflightRef.current = false
+    adjustingRef.current = false
+    emptyCountRef.current = 0
+    onLogicalShiftRef.current = onLogicalShift
+    setIsLoadingMoreRef.current = setIsLoadingMore
+  }, [symbol, exchange, tf, adjustingRef, onLogicalShift, setIsLoadingMore])
+
+  // Throttle instead of debounce: first call fires immediately, subsequent
+  // calls within 100ms are suppressed but the last one is replayed.
+  const onRange = useMemo(() => {
+
+    const fire = (range: { from: number; to: number } | null) => {
+      if (!range || adjustingRef.current || inflightRef.current || reachedStartRef.current) return
+
+      const curSymbol = symbolRef.current
+      const curExchange = exchangeRef.current
+      const curTf = tfRef.current
+      if (!curExchange) return
+
+      // Scalpboard's pagination trigger (their I()): fetch the older page
+      // once the user crosses the LEFT EDGE of the loaded data (from < -10).
+      // Before that the loaded history fully covers the viewport.
+      if (range.from >= -10) return
+
+      inflightRef.current = true
+      setIsLoadingMoreRef.current?.(true)
+      // Reconcile: buffer live events for the whole fetch+prepend window.
+      eventsRef?.current?.setBuffered(true)
+
+      const paint = (merged: UnifiedCandle[]) => {
+        const chart = chartRef.current
+        const ts = chart?.timeScale()
+        if (!chart || !ts || destroyedRef.current) {
+          eventsRef?.current?.setBuffered(false)
+          return
+        }
+        // Capture BEFORE setData — prepending shifts every logical index.
+        const prevLogical = ts.getVisibleLogicalRange()
+        const prevLen = candlesDataRef.current.length
+        const added = merged.length - prevLen
+
+        if (added <= 0) {
+          const flush = eventsRef?.current?.setBuffered(false)
+          if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+          }
+          checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+          return
+        }
+
+        adjustingRef.current = true
+        try {
+          candlesDataRef.current = merged
+          // Prepend replaces everything — stop any pending forming-candle
+          // glide so it can't paint stale interpolated values.
+          stopFormingGlide(candleRef)
+          const lineMode = useChartSettings.getState().candlesType === 'line'
+          const candleData = lineMode
+            ? merged.map(c => ({ time: toChartTime(c.time) as Time, value: c.close }))
+            : merged.map(c => ({
+                time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close,
+              }))
+          const volumeData = merged.map(c => ({
+            time: toChartTime(c.time) as Time, value: c.volume,
+          }))
+          onLogicalShiftRef.current?.(added)
+          candleRef.current?.setData(candleData)
+          volumeRef.current?.setData(volumeData)
+          // End reconciliation: replay any live events captured since the
+          // fetch started ON TOP of the merged history.
+          const flush = eventsRef?.current?.setBuffered(false)
+          if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+          }
+          checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+        } catch (err) {
+          console.error('[ChartGrid] setData failed during lazy scroll', { symbol: curSymbol, tf: curTf, error: err })
+          eventsRef?.current?.setBuffered(false)
+        } finally {
+          adjustingRef.current = false
+        }
+        // Restore by logical range shifted by `added` — the exact same bars
+        // land at the exact same pixels as before the prepend.
+        if (prevLogical) {
+          try {
+            ts.setVisibleLogicalRange({ from: prevLogical.from + added, to: prevLogical.to + added })
+            // setVisibleLogicalRange can throw while the time scale is mid-sync;
+            // the next range event re-syncs the view.
+          } catch { /* benign: next visible-range event re-syncs */ }
+        }
+      }
+
+      const cached = candleCache.getCandles(curExchange, curSymbol, curTf)
+      if (!cached || cached.length === 0) {
+        inflightRef.current = false
+        setIsLoadingMoreRef.current?.(false)
+        eventsRef?.current?.setBuffered(false)
+        return
+      }
+
+      const before = cached[0].time
+      getOrFetchOlder(curSymbol, curTf, before, 1000, curExchange)
+        .then(older => {
+          if (destroyedRef.current) {
+            inflightRef.current = false
+            setIsLoadingMoreRef.current?.(false)
+            eventsRef?.current?.setBuffered(false)
+            return
+          }
+          const newCandles = older.filter(c => c.time < before)
+          if (newCandles.length === 0) {
+            emptyCountRef.current++
+            if (emptyCountRef.current >= 3) {
+              reachedStartRef.current = true
+            }
+            inflightRef.current = false
+            setIsLoadingMoreRef.current?.(false)
+            const flush = eventsRef?.current?.setBuffered(false)
+            if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
+              applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+            }
+            checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+            return
+          }
+
+          emptyCountRef.current = 0
+          candleCache.prependCandles(curExchange, curSymbol, curTf, newCandles)
+          const merged = candleCache.getCandles(curExchange, curSymbol, curTf)
+          if (!merged || merged.length === 0) {
+            inflightRef.current = false
+            setIsLoadingMoreRef.current?.(false)
+            eventsRef?.current?.setBuffered(false)
+            return
+          }
+
+          // scalpboard's Mn(): full setData with the merged array.
+          paint(merged)
+          inflightRef.current = false
+          setIsLoadingMoreRef.current?.(false)
+        })
+        .catch((err: Error & { isNetworkError?: boolean }) => {
+          // Network error — NOT end of history: stay ready to retry.
+          if (!err?.isNetworkError) {
+            emptyCountRef.current++
+            if (emptyCountRef.current >= 3) {
+              reachedStartRef.current = true
+            }
+          }
+          inflightRef.current = false
+          setIsLoadingMoreRef.current?.(false)
+          const flush = eventsRef?.current?.setBuffered(false)
+          if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+          }
+          checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+        })
+    }
+
+    const throttled = (range: { from: number; to: number } | null) => {
+      if (!range) { fire(null); return }
+      const now = Date.now()
+      if (now - lastCallTimeRef.current >= 100) {
+        lastCallTimeRef.current = now
+        if (pendingTimerRef.current) { clearTimeout(pendingTimerRef.current); pendingTimerRef.current = null }
+        fire(range)
+      } else {
+        pendingRangeRef.current = range
+        if (!pendingTimerRef.current) {
+          pendingTimerRef.current = setTimeout(() => {
+            pendingTimerRef.current = null
+            lastCallTimeRef.current = Date.now()
+            fire(pendingRangeRef.current)
+            pendingRangeRef.current = null
+          }, 100 - (now - lastCallTimeRef.current))
+        }
+      }
+    }
+
+    return throttled
+  }, [adjustingRef, candleRef, candlesDataRef, chartRef, destroyedRef, eventsRef, volumeRef])
+
+  useEffect(() => {
+    if (isInitialLoading) return
+    const chart = chartRef.current
+    if (!chart) return
+    const ts = chart.timeScale()
+
+    ts.subscribeVisibleLogicalRangeChange(onRange)
+    return () => { ts.unsubscribeVisibleLogicalRangeChange(onRange) }
+  }, [symbol, tf, isInitialLoading, onRange, chartRef])
+}
+
+function useStaleDataDetection(
+  lastUpdateRef: React.RefObject<number>,
+  threshold = 30000 // Увеличено до 30 секунд для низколиквидных пар
+): boolean {
+  const [isStale, setIsStale] = useState(false)
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const last = lastUpdateRef.current
+      // lastUpdate === 0 means "never received anything yet" — not stale.
+      const elapsed = last > 0 ? Date.now() - last : 0
+      // A quiet pair can legitimately go 30s+ without a trade/kline while the
+      // connection is perfectly healthy (its chart is still fed by the price
+      // lane). The "reconnecting" overlay must only appear when the GLOBAL
+      // feed is silent too — the server broadcasts tickers to every client at
+      // ~25Hz, so a live socket always has a fresh global timestamp.
+      const globalSilent = Date.now() - getWsLastMessageAt() > threshold
+      const shouldBeStale = elapsed > threshold && globalSilent
+      setIsStale(shouldBeStale)
+    }, 1000)
+
+    return () => clearInterval(interval)
+  }, [threshold, lastUpdateRef])
+
+  return isStale
+}
+
+function useWsCandle(
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  eventsRef: React.RefObject<CandleEvents | null>,
+  destroyedRef: React.RefObject<boolean>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  adjustingRef?: React.RefObject<boolean>,
+  lastUpdateRef?: React.RefObject<number>,
+) {
+  useEffect(() => {
+    // Second timeframes are aggregated client-side from the trade lane — no
+    // server kline stream exists for them (and adapters would silently
+    // substitute a 1m/5m interval), so the candle channel is never touched.
+    if (!exchange || isSecondTimeframe(tf)) return
+    const channel = `candle:${exchange}:${symbol}:${tf}`
+    const unsub = wsOnChannel(channel, (msg) => {
+      if (destroyedRef.current) return
+
+      const c = msg.data as UnifiedCandle
+      if (!c) return
+
+      if (lastUpdateRef) {
+        lastUpdateRef.current = Date.now()
+      }
+
+      if (!isFiniteOHLCV(c)) return
+
+      const ev = eventsRef.current
+      if (!ev) return
+
+      // kline snapshot → FULL replace of the bar (scalpboard's Cn).
+      const patch = ev.applyKline(c)
+      if (adjustingRef?.current) {
+        // Atomicity invariant (Stage 2 item 1): `adjustingRef` is only ever
+        // set true INSIDE a window where the events layer's own buffer is
+        // already held open (useLazyScroll calls setBuffered(true) before
+        // the fetch and only sets adjustingRef true within that window), so
+        // `ev.applyKline` above should have queued this event rather than
+        // mutating the tail — `patch` should be EMPTY_PATCH(). If it isn't
+        // (a future refactor decoupled the two flags), the event's tail
+        // already advanced but is about to be silently dropped here instead
+        // of replayed on flush — log it loudly instead of losing it quietly.
+        if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
+          recordDiag('adjusting_drop_unbuffered', {
+            symbol, exchange, tf, from: c.time,
+            detail: 'kline mutated events tail while adjustingRef was true but buffer was NOT held — event lost',
+          })
+        }
+        return
+      }
+
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'kline')
+      checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'kline')
+    })
+    wsSubscribe(channel)
+    return () => {
+      unsub()
+      wsUnsubscribe(channel)
+    }
+  }, [symbol, exchange, tf, adjustingRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
+}
+
+/**
+ * Price precision for a chart's displays, resolved to the CHART's exchange —
+ * the same tick grid the стакан (order book) is built on. coinMap is keyed by
+ * symbol and keeps the highest-priority exchange entry, so for a symbol not
+ * listed on the chart exchange it would leak a foreign venue's tick (BTC
+ * futures 0.1 vs spot 0.01) — the source of the "rounded differently than the
+ * стакан" look. The per-exchange master list is consulted first; falls back
+ * to coinMap, then 2.
+ */
+function useCoinPrecision(symbol: string, exchange?: string): number {
+  return useCoinListStore(s => {
+    const coin = s.coinMap.get(symbol)
+    if (coin && (!exchange || coin.exchange === exchange)) return coin.pricePrecision ?? 2
+    if (exchange) {
+      const byEx = s.coins.find(c => c.symbol === symbol && c.exchange === exchange)
+      if (byEx && typeof byEx.pricePrecision === 'number') return byEx.pricePrecision
+    }
+    return coin?.pricePrecision ?? 2
+  })
+}
+
+function useWsTrade(
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  eventsRef: React.RefObject<CandleEvents | null>,
+  destroyedRef: React.RefObject<boolean>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  adjustingRef?: React.RefObject<boolean>,
+  lastUpdateRef?: React.RefObject<number>,
+  aggregatorRef?: React.RefObject<SecondCandleAggregator | null>,
+) {
+  // The trade lane (aggTrade prints — the actual last trade price, what a
+  // trading terminal shows) is the primary tick source. The price lane
+  // (bookTicker mid) only kicks in when trades have been quiet for a second,
+  // so two prices never alternate on the same forming bar (mid sits in the
+  // spread and wobbles ±spread/2 on thin books — the source of the visible
+  // price flicker). Second timeframes (1s/5s/15s) are the exception: they
+  // run on the trade lane only, exactly like scalpboard's chart.
+  const lastTradeAtRef = useRef(0)
+  const precision = useCoinPrecision(symbol, exchange)
+
+  useEffect(() => {
+    if (!exchange) return
+    const tradeType = `trade:${exchange}:${symbol}`
+
+    const unsub = wsOnType(tradeType, (msg) => {
+      if (destroyedRef.current) return
+
+      const trade = (msg as { data?: { price: string | number; time?: number; volume?: string | number } | null }).data
+      if (!trade?.price) return
+
+      if (lastUpdateRef) {
+        lastUpdateRef.current = Date.now()
+      }
+      lastTradeAtRef.current = Date.now()
+
+      const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
+      if (!isFinite(price)) return
+
+      // Defensive floor (Stage 2 item 6): the server's aggTrade payload sends
+      // `data.T / 1000` — a bare division, not a floor — so `trade.time` can
+      // arrive as a fractional epoch-seconds value (e.g. 1712345678.123).
+      // Bucket math elsewhere (second-candle-aggregator) already floors to
+      // its own tf-bucket boundary so fractional input is harmless there,
+      // but the raw value also feeds `applyTick`'s window guard
+      // (`tick.timeSec > cur.candle.time`) directly — flooring here once,
+      // at the ingestion boundary, keeps every downstream consumer working
+      // with whole-second times without relying on each call site to guard
+      // it independently.
+      const tradeTime = typeof trade.time === 'number' && isFinite(trade.time)
+        ? Math.floor(trade.time)
+        : Math.floor(Date.now() / 1000)
+
+      // Second timeframes: every print feeds the client-side aggregator
+      // (volume included). The mid lane is not even subscribed for these
+      // timeframes — a quote can never open or skew a forming bucket.
+      if (isSecondTimeframe(tf)) {
+        const volume = typeof trade.volume === 'number' ? trade.volume : parseFloat(String(trade.volume ?? '0'))
+        aggregatorRef?.current?.addTrade(price, isFinite(volume) && volume > 0 ? volume : 0, tradeTime)
+        return
+      }
+
+      const ev = eventsRef.current
+      if (!ev) return
+
+      // Price tick → mutate ONLY the last bar's close/high/low (scalpboard's
+      // En). Volume never comes from trades.
+      const patch = ev.applyTick({ price, timeSec: tradeTime } as TickPayload)
+      if (adjustingRef?.current) {
+        if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
+          recordDiag('adjusting_drop_unbuffered', {
+            symbol, exchange, tf, from: tradeTime,
+            detail: 'trade tick mutated events tail while adjustingRef was true but buffer was NOT held — event lost',
+          })
+        }
+        return
+      }
+
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'tick-trade')
+      checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'tick-trade')
+    })
+    wsSubscribe(tradeType)
+
+    // Second timeframes: candles come exclusively from the trade lane —
+    // scalpboard's chart explicitly skips its own 'price' feed for 1s/5s/15s.
+    // Not subscribing to the mid at all is stricter than just ignoring it:
+    // bookTicker quotes can never leak into a forming second bucket.
+    if (isSecondTimeframe(tf)) {
+      return () => {
+        unsub()
+        wsUnsubscribe(tradeType)
+      }
+    }
+
+    // Fast-lane price: bookTicker mid — fallback for pairs with sparse
+    // trades. Exchange filter: the channel is keyed by symbol only; only the
+    // matching exchange's mid reaches this chart.
+    const priceChannel = `price:${symbol}`
+    const unsubPrice = wsOnChannel(priceChannel, (msg) => {
+      if (destroyedRef.current) return
+      const d = msg.data as { symbol: string; exchange?: string; price: number } | undefined
+      if (!d || typeof d.price !== 'number' || !isFinite(d.price) || d.price <= 0) return
+      if (exchange && d.exchange && d.exchange !== exchange) return
+      if (lastUpdateRef) lastUpdateRef.current = Date.now()
+
+      // Trades are the true price — skip the mid entirely while prints are
+      // flowing so the mid never wobbles the forming bar within the spread.
+      if (Date.now() - lastTradeAtRef.current < 1000) return
+
+      const ev = eventsRef.current
+      if (!ev) return
+
+      // Bug fix (Stage 2 item 1 — atomicity): this branch used to check
+      // `adjustingRef.current` BEFORE calling `ev.applyTick`, which meant a
+      // mid-price tick arriving during a lazy-scroll prepend was dropped
+      // entirely — never even queued into the events layer's buffer (which
+      // is already held open at this point, see useLazyScroll's
+      // setBuffered(true)). The kline/trade-lane branches above call
+      // apply*() FIRST (so the event is queued/buffered) and only then check
+      // adjustingRef to decide whether to paint immediately — mirror that
+      // ordering here so the tick's tail-events queue and the painted
+      // candlesDataRef/series can never diverge (the tail no longer "gets
+      // ahead" of the series during the adjusting window).
+      const patch = ev.applyTick({ price: snapToTick(d.price, precision), timeSec: Math.floor(Date.now() / 1000) } as TickPayload)
+      if (adjustingRef?.current) {
+        if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
+          recordDiag('adjusting_drop_unbuffered', {
+            symbol, exchange, tf,
+            detail: 'bookTicker mid tick mutated events tail while adjustingRef was true but buffer was NOT held — event lost',
+          })
+        }
+        return
+      }
+
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'tick-price')
+      checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'tick-price')
+    })
+    wsSubscribe(priceChannel)
+
+    return () => {
+      unsub()
+      wsUnsubscribe(tradeType)
+      unsubPrice()
+      wsUnsubscribe(priceChannel)
+    }
+  }, [symbol, exchange, tf, precision, adjustingRef, aggregatorRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
+}
+
+
+function useSecondCandleAggregator(
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  eventsRef: React.RefObject<CandleEvents | null>,
+  destroyedRef: React.RefObject<boolean>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  adjustingRef?: React.RefObject<boolean>,
+  lastUpdateRef?: React.RefObject<number>,
+): React.RefObject<SecondCandleAggregator | null> {
+  const aggregatorRef = useRef<SecondCandleAggregator | null>(null)
+
+  useEffect(() => {
+    if (!exchange || !isSecondTimeframe(tf)) return
+    const agg = createSecondCandleAggregator({
+      symbol,
+      exchange,
+      tf,
+      tfSeconds: getTfSeconds(tf),
+      onCandle: (c) => {
+        if (destroyedRef.current || !eventsRef.current) return
+        if (lastUpdateRef) lastUpdateRef.current = Date.now()
+        const patch = eventsRef.current.applyKline(c)
+        if (adjustingRef?.current) {
+          if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
+            recordDiag('adjusting_drop_unbuffered', {
+              symbol, exchange, tf, from: c.time,
+              detail: 'second-candle-aggregator kline mutated events tail while adjustingRef was true but buffer was NOT held — event lost',
+            })
+          }
+          return
+        }
+        applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'second-agg')
+        checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'second-agg')
+      },
+    })
+    aggregatorRef.current = agg
+    return () => {
+      agg.destroy()
+      aggregatorRef.current = null
+    }
+  }, [symbol, exchange, tf, adjustingRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
+
+  // WS reconnect: the dead window must not survive inside a forming bar —
+  // drop it so the next print re-opens a clean bucket.
+  const [wsCount, setWsCount] = useState(getWsOpenCount)
+  useEffect(() => {
+    const un = wsOnType('open', () => setWsCount(getWsOpenCount()))
+    return un
+  }, [])
+  useEffect(() => {
+    if (!isSecondTimeframe(tf)) return
+    aggregatorRef.current?.reset()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsCount])
+
+  return aggregatorRef
+}
+
+function exchangeBadge(ex: string): string {
+  if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
+  if (ex.includes('binance') && ex.includes('spot')) return 'BI-S'
+  if (ex.includes('bybit')) return 'BY-F'
+  if (ex.includes('okx') && ex.includes('futures')) return 'OK-F'
+  if (ex.includes('okx') && ex.includes('spot')) return 'OK-S'
+  return 'EX'
+}
+
+const MiniChartHeader = memo(function MiniChartHeader({ symbol, chartExchange }: { symbol: string; chartExchange: ChartExchange }) {
+  const coin = useCoinListStore(useShallow(s => {
+    const c = s.coinMap.get(symbol)
+    if (!c) return null
+    return {
+      exchange: c.exchange,
+      change24h: c.change24h,
+      quoteVolume24h: c.quoteVolume24h,
+      natr5m: c.natr5m,
+      range1m: c.range1m,
+      corrBtc: c.corrBtc,
+      tradesSpike: c.tradesSpike,
+      volumeSpike: c.volumeSpike,
+    }
+  }))
+  const settings = useAuthStore(s => s.settings)
+  const chartHeader = useMemo(() => resolveIndicators(settings?.indicators).chartHeader, [settings])
+
+  const isUp = coin ? coin.change24h >= 0 : true
+  const badge = exchangeBadge(chartExchange)
+  const vol = coin ? formatCompact(coin.quoteVolume24h) : '-'
+
+  return (
+    <div className="relative z-20 flex items-center justify-between px-[6px] py-[3px] border-b border-[#1f1f1f] flex-shrink-0 gap-2 bg-[#141414]">
+      <div className="flex items-center gap-[5px] min-w-0">
+        <span className="text-[9px] font-bold leading-none text-[#b3b3b3]">
+          {badge}
+        </span>
+        <span className="font-bold text-[11px] text-[#e0e0e0] truncate">
+          {extractBaseAsset(symbol)}
+        </span>
+      </div>
+      <div className="flex items-center gap-[6px] flex-shrink-0">
+        {coin && chartHeader.map(key => {
+          if (key === 'change24h') {
+            return (
+              <span key={key} className={`font-mono font-bold text-[10px] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+                {isUp ? '+' : ''}{coin.change24h.toFixed(1)}%
+              </span>
+            )
+          }
+          if (key === 'quoteVolume24h') {
+            return <span key={key} className="font-mono text-[10px] text-[#888]">{vol}</span>
+          }
+          const value = coin[key]
+          const isSpike = (key === 'tradesSpike' || key === 'volumeSpike') && typeof value === 'number' && value >= 2
+          return (
+            <span key={key} className={`font-mono text-[10px] ${isSpike ? 'text-[#f5c518] font-bold' : 'text-[#888]'}`}>
+              {formatIndicator(key, value)}
+            </span>
+          )
+        })}
+      </div>
+    </div>
+  )
+})
+
+const MiniChart = memo(function MiniChart({
+  symbol, chartExchange,
+}: { symbol: string; chartExchange: ChartExchange }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<IChartApi | null>(null)
+  const candleRef = useRef<ISeriesApi<SeriesType> | null>(null)
+  const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const tf = useCoinListStore(s => s.activeTimeframe)
+  const destroyedRef = useRef(false)
+  const pricePrecision = useCoinPrecision(symbol, chartExchange)
+  const exchange: Exchange | undefined = chartExchange
+  const candlesDataRef = useRef<UnifiedCandle[]>([])
+  const lastUpdateRef = useRef(0)
+  const [chartVersion, setChartVersion] = useState(0)
+  const [selection, setSelection] = useState<RangeSelection | null>(null)
+
+  const eventsRef = useRef<CandleEvents | null>(null)
+
+  useEffect(() => {
+    if (exchange) {
+      eventsRef.current?.destroy()
+      eventsRef.current = createCandleEvents({
+        symbol, exchange, tf, tfSeconds: getTfSeconds(tf),
+      })
+    }
+    return () => { eventsRef.current?.destroy() }
+  }, [symbol, exchange, tf])
+
+  const isStale = useStaleDataDetection(lastUpdateRef)
+
+  const baseSettings = useChartSettings()
+  const settingsRef = useRef(baseSettings)
+  useEffect(() => {
+    settingsRef.current = baseSettings
+  })
+
+  useEffect(() => {
+    destroyedRef.current = false
+    if (!containerRef.current) return
+    const s = settingsRef.current
+
+    const base = buildChartOptions(s, { top: 0.1, bottom: 0.25 })
+    const chart = createChart(containerRef.current, {
+      ...base,
+      handleScroll: true,
+      // Mouse-drag inertia OFF — the chart stops exactly where the mouse is
+      // released (inertia felt like the chart "flying away"). Touch stays
+      // off too. Lazy-scroll pagination is throttled at 100ms with an
+      // inflight guard, so range events can't flood the server.
+      kineticScroll: { touch: false, mouse: false },
+    })
+
+    const seriesOpts = candleSeriesOptions(s)
+    const candleSeries = s.candlesType === 'line'
+      ? chart.addSeries(LineSeries, seriesOpts as DeepPartial<LineSeriesOptions>)
+      : s.candlesType === 'bars'
+        ? chart.addSeries(BarSeries, seriesOpts as DeepPartial<BarSeriesOptions>)
+        : chart.addSeries(CandlestickSeries, seriesOpts as DeepPartial<CandlestickSeriesOptions>)
+    candleSeries.applyOptions({
+      priceFormat: {
+        type: 'price',
+        precision: pricePrecision,
+        minMove: Math.pow(10, -pricePrecision),
+      },
+    })
+    const volumeSeries = chart.addSeries(HistogramSeries, { ...volumeSeriesOptions(), priceScaleId: '' })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: volumePaneTop(s.volumesHeight), bottom: 0 }, textColor: '#666666' })
+
+    chartRef.current = chart
+    candleRef.current = candleSeries
+    volumeRef.current = volumeSeries
+
+    setChartVersion(v => v + 1)
+
+    let prevW = containerRef.current.clientWidth
+    let prevH = containerRef.current.clientHeight
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current && !destroyedRef.current) {
+        const w = containerRef.current.clientWidth
+        const h = containerRef.current.clientHeight
+        if (w < 10 || h < 10) return
+        if (w === prevW && h === prevH) return
+        prevW = w
+        prevH = h
+        chart.applyOptions({ width: w, height: h })
+      }
+    })
+    ro.observe(containerRef.current)
+
+    return () => {
+      destroyedRef.current = true
+      ro.disconnect()
+      // Explicitly stop any pending forming-candle glide (Stage 2 item 3:
+      // "Отменять rAF при setData, смене tf/символа, destroy"). The
+      // WeakMap-keyed animator would otherwise only stop lazily on its next
+      // rAF tick (once `getRef()` returns null and its `tick()` returns
+      // false) — up to one frame of `series.update()` calls against a
+      // series that's about to be removed. Calling reset() here unregisters
+      // it from the shared rAF coordinator synchronously, before
+      // chart.remove() disposes the series.
+      stopFormingGlide(candleRef)
+      chart.remove()
+      chartRef.current = null
+      candleRef.current = null
+      volumeRef.current = null
+    }
+    // NB: `tf` is deliberately NOT a dependency — a timeframe switch only
+    // needs new data (useFullHistory handles setData + visible range), not a
+    // full chart destroy/recreate. `candlesType` DOES trigger a recreate —
+    // the series construction differs per style.
+  }, [symbol, pricePrecision, baseSettings.candlesType])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    const s = useChartSettings.getState()
+    chart.applyOptions({
+      rightPriceScale: { mode: s.priceScaleMode === 'log' ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal },
+      grid: { vertLines: { visible: s.vertGrid }, horzLines: { visible: s.horzGrid } },
+      timeScale: { timeVisible: timeVisibleFor(s.interval), secondsVisible: secondsVisibleFor(s.interval), barSpacing: s.barSpace, rightOffset: s.rightOffset },
+    })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: volumePaneTop(s.volumesHeight), bottom: 0 } })
+  }, [baseSettings.priceScaleMode, baseSettings.vertGrid, baseSettings.horzGrid, baseSettings.interval, baseSettings.barSpace, baseSettings.rightOffset, baseSettings.volumesHeight])
+
+  const [wsCount, setWsCount] = useState(getWsOpenCount)
+  const [mountWsCount] = useState(() => getWsOpenCount())
+  useEffect(() => {
+    const un = wsOnType('open', () => setWsCount(getWsOpenCount()))
+    return un
+  }, [])
+
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
+    limit: GRID_CANDLE_LIMIT,
+    forceServer: wsCount > mountWsCount,
+    wsEpoch: wsCount,
+    skipHistory: isSecondTimeframe(tf),
+  }, lastUpdateRef, eventsRef, chartVersion)
+
+  const adjustingRef = useRef(false)
+
+  const {
+    activeTool,
+    removeDrawing,
+    handleClick: drawingClickHandler,
+    handleMouseDown: drawingMouseDownHandler,
+    handleMouseMove: drawingMouseMoveHandler,
+    handleMouseUp: drawingMouseUpHandler,
+    deactivateTool,
+    primitiveRef,
+    isDraggingRef,
+    shiftLogicalOffset,
+    CLICK_THRESHOLD,
+  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
+
+  useChartOverlays(candleRef, candlesDataRef, dataVersion, chartVersion, pricePrecision)
+  useDensityOverlay(candleRef, chartVersion, symbol, pricePrecision)
+
+  const aggregatorRef = useSecondCandleAggregator(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, aggregatorRef)
+  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, eventsRef, shiftLogicalOffset)
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    let mouseDownX = 0
+    let mouseDownY = 0
+    let restoreOpts: { handleScroll?: boolean; handleScale?: boolean } | null = null
+    let selDragging = false
+    let selStartX = 0
+    let selStartY = 0
+    let selRaf: number | null = null
+
+    const disableScroll = () => {
+      const chart = chartRef.current
+      if (!chart) return
+      restoreOpts = { handleScroll: true, handleScale: true }
+      chart.applyOptions({ handleScroll: false, handleScale: false })
+    }
+
+    const restoreDrawingScroll = () => {
+      const chart = chartRef.current
+      if (chart && restoreOpts) {
+        chart.applyOptions(restoreOpts)
+        restoreOpts = null
+      }
+    }
+
+    const computeSelection = (curX: number, curY: number): RangeSelection => {
+      const chart = chartRef.current
+      const series = candleRef.current
+      const x1 = Math.min(selStartX, curX)
+      const x2 = Math.max(selStartX, curX)
+      let startPrice = 0
+      let endPrice = 0
+      let changePct = 0
+      let durationSec = 0
+      let valid = false
+
+      if (chart && series) {
+        const pStart = series.coordinateToPrice(selStartY) as number | null
+        const pEnd = series.coordinateToPrice(curY) as number | null
+
+        if (pStart !== null && pEnd !== null && isFinite(pStart) && isFinite(pEnd) && pStart > 0) {
+          startPrice = pStart
+          endPrice = pEnd
+          changePct = ((endPrice - startPrice) / startPrice) * 100
+          valid = true
+        }
+
+        const t1Raw = chart.timeScale().coordinateToTime(x1) as number | null
+        const t2Raw = chart.timeScale().coordinateToTime(x2) as number | null
+        const t1Num = (t1Raw == null || typeof t1Raw === 'number')
+          ? t1Raw as number | null
+          : null
+        const t2Num = (t2Raw == null || typeof t2Raw === 'number')
+          ? t2Raw as number | null
+          : null
+
+        if (t1Num !== null && t2Num !== null) {
+          durationSec = Math.abs(t2Num - t1Num)
+        }
+      }
+
+      const box = containerRef.current
+      const boxW = box?.clientWidth ?? 9999
+      const boxH = box?.clientHeight ?? 9999
+      const tooltipLeft = Math.min(Math.max(curX + 10, 0), boxW - 180)
+      const tooltipTop = Math.min(Math.max(curY + 10, 0), boxH - 70)
+
+      return {
+        startX: selStartX,
+        startY: selStartY,
+        endX: curX,
+        endY: curY,
+        startPrice,
+        endPrice,
+        changePct,
+        durationSec,
+        valid,
+        tooltipLeft,
+        tooltipTop,
+      }
+    }
+
+    const onMouseDown = (e: MouseEvent) => {
+      // Shift+ЛКМ or middle-click (Колёсико) — select a region to measure %
+      // (same gestures as the expanded chart).
+      if ((e.button === 0 && e.shiftKey) || e.button === 1) {
+        const rect = container.getBoundingClientRect()
+        selStartX = e.clientX - rect.left
+        selStartY = e.clientY - rect.top
+        selDragging = true
+        e.preventDefault()
+        disableScroll()
+        setSelection(computeSelection(selStartX, selStartY))
+        return
+      }
+
+      if (e.button !== 0) return
+
+      if (activeTool !== null) {
+        mouseDownX = e.clientX - container.getBoundingClientRect().left
+        mouseDownY = e.clientY - container.getBoundingClientRect().top
+        disableScroll()
+      } else {
+        drawingMouseDownHandler(e)
+        if (isDraggingRef.current) {
+          disableScroll()
+        }
+      }
+    }
+
+    const onMouseMove = (e: MouseEvent) => {
+      drawingMouseMoveHandler(e)
+
+      if (!selDragging) return
+      const rect = container.getBoundingClientRect()
+      const curX = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
+      const curY = Math.max(0, Math.min(e.clientY - rect.top, rect.height))
+      if (selRaf != null) return
+      selRaf = requestAnimationFrame(() => {
+        selRaf = null
+        if (!selDragging) return
+        setSelection(computeSelection(curX, curY))
+      })
+    }
+
+    const onMouseUp = (e: MouseEvent) => {
+      if (selDragging) {
+        selDragging = false
+        if (selRaf != null) { cancelAnimationFrame(selRaf); selRaf = null }
+        restoreDrawingScroll()
+        setSelection(null)
+        return
+      }
+
+      if (e.button !== 0) return
+
+      const wasDragging = isDraggingRef.current
+      const toolActive = activeTool !== null
+
+      if (wasDragging) {
+        drawingMouseUpHandler(e)
+        restoreDrawingScroll()
+      }
+
+      if (toolActive && !wasDragging) {
+        restoreDrawingScroll()
+        const rect = container.getBoundingClientRect()
+        const upX = e.clientX - rect.left
+        const upY = e.clientY - rect.top
+        const dx = Math.abs(upX - mouseDownX)
+        const dy = Math.abs(upY - mouseDownY)
+        if (dx < CLICK_THRESHOLD && dy < CLICK_THRESHOLD) {
+          drawingClickHandler(e)
+        }
+      }
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSelection(null)
+        selDragging = false
+        if (selRaf != null) { cancelAnimationFrame(selRaf); selRaf = null }
+        restoreDrawingScroll()
+        deactivateTool()
+      }
+    }
+
+    container.addEventListener('mousedown', onMouseDown, true)
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    window.addEventListener('keydown', onKeyDown)
+
+    return () => {
+      container.removeEventListener('mousedown', onMouseDown, true)
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      window.removeEventListener('keydown', onKeyDown)
+      restoreDrawingScroll()
+      selDragging = false
+      if (selRaf != null) cancelAnimationFrame(selRaf)
+    }
+  }, [activeTool, drawingClickHandler, drawingMouseDownHandler, drawingMouseMoveHandler, drawingMouseUpHandler, deactivateTool, isDraggingRef, CLICK_THRESHOLD])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const onCtx = (e: MouseEvent) => {
+      e.preventDefault()
+      const primitive = primitiveRef.current
+      if (!primitive) return
+      const rect = container.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
+      const hit = primitive.hitTest?.(x, y)
+      if (hit) {
+        removeDrawing(hit.externalId)
+      }
+    }
+    container.addEventListener('contextmenu', onCtx)
+    // Middle-click is consumed by the %-measure selection on mousedown —
+    // block the browser's autoscroll on auxclick too (expanded-chart parity).
+    const onAuxclick = (e: MouseEvent) => { if (e.button === 1) e.preventDefault() }
+    container.addEventListener('auxclick', onAuxclick)
+    return () => {
+      container.removeEventListener('contextmenu', onCtx)
+      container.removeEventListener('auxclick', onAuxclick)
+    }
+  }, [primitiveRef, removeDrawing])
+
+  return (
+  <div className="relative flex flex-col h-full bg-[#0e0e0e] border border-[#1f1f1f] overflow-hidden rounded-[3px]">
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 select-none">
+      <span className="text-[48px] font-bold text-white/[0.04] tracking-tighter uppercase">
+        {extractBaseAsset(symbol)}
+      </span>
+    </div>
+    <MiniChartHeader symbol={symbol} chartExchange={chartExchange} />
+    <div
+      ref={containerRef}
+      className={`relative z-0 flex-1 min-h-0 [transform:translateZ(0)] [backface-visibility:hidden] [contain:paint] transition-opacity duration-300 ease-out ${
+        isInitialLoading ? 'opacity-0' : 'opacity-100'
+      }`}
+    >
+      {isStale && <StaleDataOverlay visible={true} />}
+      {selection && Math.abs(selection.endX - selection.startX) > 2 && (
+        <div className="pointer-events-none absolute inset-0 z-30">
+          <div
+            className={`absolute border ${
+              selection.valid && selection.changePct >= 0
+                ? 'border-[#26a65b]/70 bg-[#26a65b]/10'
+                : selection.valid
+                  ? 'border-[#e74c3c]/70 bg-[#e74c3c]/10'
+                  : 'border-[#f9b600]/70 bg-[#f9b600]/10'
+            }`}
+            style={{
+              left: Math.min(selection.startX, selection.endX),
+              top: Math.min(selection.startY, selection.endY),
+              width: Math.abs(selection.endX - selection.startX),
+              height: Math.max(2, Math.abs(selection.endY - selection.startY)),
+            }}
+          />
+          <div
+            className={`absolute px-[8px] py-[5px] rounded-[4px] text-[11px] font-mono bg-[#141414] border shadow-lg whitespace-nowrap ${
+              !selection.valid
+                ? 'border-[#3a3a3a] text-[#888]'
+                : selection.changePct >= 0
+                  ? 'border-[#26a65b] text-[#26a65b]'
+                  : 'border-[#e74c3c] text-[#e74c3c]'
+            }`}
+            style={{
+              left: selection.tooltipLeft,
+              top: selection.tooltipTop,
+            }}
+          >
+            {selection.valid ? (
+              <>
+                <div className="text-[13px] font-bold">
+                  {selection.changePct >= 0 ? '+' : ''}
+                  {selection.changePct.toFixed(2)}%
+                </div>
+                <div className="text-[10px] text-[#888] mt-[2px]">
+                  ${formatPrice(selection.startPrice, pricePrecision)} → ${formatPrice(selection.endPrice, pricePrecision)}
+                </div>
+                <div className="text-[10px] text-[#666]">
+                  {formatDuration(selection.durationSec)}
+                </div>
+              </>
+            ) : (
+              <span>Select a range</span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+    {isInitialLoading && (
+      <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+        <div className="w-[18px] h-[18px] border-2 border-[#333] border-t-[#999] rounded-full animate-spin" />
+      </div>
+    )}
+    {!isInitialLoading && status === 'retrying' && <ChartCornerSpinner />}
+    {status === 'empty' && <ChartMessageOverlay label="No data for this timeframe" />}
+    {status === 'error' && <ChartMessageOverlay label="Error loading data" tone="error" />}
+  </div>
+)
+})
+
+type RangeSelection = {
+  startX: number
+  startY: number
+  endX: number
+  endY: number
+  startPrice: number
+  endPrice: number
+  changePct: number
+  durationSec: number
+  valid: boolean
+  /** Tooltip anchor pre-clamped to the container (computed in the handler). */
+  tooltipLeft: number
+  tooltipTop: number
+}
+
+function formatDuration(sec: number): string {
+  if (!isFinite(sec) || sec <= 0) return '0s'
+  const s = Math.round(sec)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return s % 60 ? `${m}m ${s % 60}s` : `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`
+  const d = Math.floor(h / 24)
+  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`
+}
+
+const TF_SETTINGS: Timeframe[] = ['1s', '5s', '15s', '1m', '5m', '15m', '1h', '4h', '1d', '1w']
+
+const WM_PLACE_OPTIONS: { value: WatermarkPlace; label: string }[] = [
+  { value: 'center-center', label: 'Center' },
+  { value: 'center-top', label: 'Top' },
+  { value: 'center-bottom', label: 'Bottom' },
+  { value: 'left-center', label: 'Left' },
+  { value: 'right-center', label: 'Right' },
+]
+
+function SettingsRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-[5px]">
+      <span className="text-[11px] text-[#aaa] shrink-0 min-w-[90px]">{label}</span>
+      <div className="flex items-center gap-1 flex-1 justify-end">{children}</div>
+    </div>
+  )
+}
+
+function SettingsSlider({ value, min, max, step, onChange }: { value: number; min: number; max: number; step: number; onChange: (v: number) => void }) {
+  return (
+    <div className="flex items-center gap-2 flex-1">
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="flex-1 accent-[#f9b600]"
+      />
+      <span className="text-[10px] text-[#888] font-mono w-[34px] text-right tabular-nums">{value}</span>
+    </div>
+  )
+}
+
+function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <button
+      onClick={() => onChange(!checked)}
+      className={`px-[8px] py-[2px] rounded-[3px] border text-[11px] leading-none transition-colors ${
+        checked ? 'border-[#f9b600]/60 bg-[#f9b600]/10 text-[#f9b600]' : 'border-[#333] bg-[#1a1a1a] text-[#888]'
+      }`}
+    >
+      {label}
+    </button>
+  )
+}
+
+function ChartSettingsPanel() {
+  const s = useChartSettings()
+  const setSetting = useChartSettings(st => st.setSetting)
+  const setTimeframe = useCoinListStore(st => st.setTimeframe)
+
+  const changeInterval = (tf: Timeframe) => {
+    setSetting('interval', tf)
+    setTimeframe(tf)
+  }
+
+  return (
+    <div className="fixed right-[12px] top-[100px] z-40 w-[320px] max-h-[70vh] overflow-y-auto rounded-[6px] border border-[#2a2a2a] bg-[#141414] shadow-[0_20px_50px_rgba(0,0,0,0.6)] p-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[12px] font-bold text-[#e0e0e0]">View</span>
+        <button
+          className="text-[10px] text-[#888] hover:text-[#ccc] px-[6px] py-[2px] rounded-[3px] border border-[#2a2a2a]"
+          onClick={resetChartSettings}
+        >
+          Reset
+        </button>
+      </div>
+
+      <SettingsRow label="Interval">
+        <div className="flex gap-[2px]">
+          {TF_SETTINGS.map(tf => (
+            <button
+              key={tf}
+              className={`px-[6px] py-[2px] rounded-[3px] text-[10px] leading-none ${
+                s.interval === tf ? 'bg-[#f9b600]/15 text-[#f9b600] border border-[#f9b600]/50' : 'text-[#999] border border-[#2a2a2a] hover:border-[#444]'
+              }`}
+              onClick={() => changeInterval(tf)}
+            >
+              {tf}
+            </button>
+          ))}
+        </div>
+      </SettingsRow>
+
+      <SettingsRow label="Candles">
+        <div className="flex gap-[2px]">
+          {(['default', 'hollow', 'bars', 'line'] as const).map(t => (
+            <Toggle
+              key={t}
+              checked={s.candlesType === t}
+              onChange={() => setSetting('candlesType', t)}
+              label={t === 'default' ? 'Candles' : t === 'hollow' ? 'Hollow' : t === 'bars' ? 'Bars' : 'Line'}
+            />
+          ))}
+        </div>
+      </SettingsRow>
+
+      <SettingsRow label="Volume">
+        <SettingsSlider value={s.volumesHeight} min={3} max={50} step={1} onChange={v => setSetting('volumesHeight', v)} />
+      </SettingsRow>
+
+      <SettingsRow label="Offset">
+        <SettingsSlider value={s.rightOffset} min={0} max={100} step={1} onChange={v => setSetting('rightOffset', v)} />
+      </SettingsRow>
+
+      <SettingsRow label="Density">
+        <SettingsSlider value={s.barSpace} min={0.5} max={10} step={0.1} onChange={v => setSetting('barSpace', v)} />
+      </SettingsRow>
+
+      <SettingsRow label="Scale">
+        <div className="flex gap-[2px]">
+          <Toggle checked={s.priceScaleMode === 'default'} onChange={() => setSetting('priceScaleMode', 'default')} label="Normal" />
+          <Toggle checked={s.priceScaleMode === 'log'} onChange={() => setSetting('priceScaleMode', 'log')} label="Log" />
+        </div>
+      </SettingsRow>
+
+      <SettingsRow label="Grid">
+        <>
+          <Toggle checked={s.vertGrid} onChange={v => setSetting('vertGrid', v)} label="V" />
+          <Toggle checked={s.horzGrid} onChange={v => setSetting('horzGrid', v)} label="H" />
+        </>
+      </SettingsRow>
+
+      <div className="my-2 border-t border-[#222]" />
+
+      <SettingsRow label="Mark">
+        <SettingsSlider value={s.watermark} min={0} max={1} step={0.05} onChange={v => setSetting('watermark', v)} />
+      </SettingsRow>
+
+      <SettingsRow label="Size">
+        <SettingsSlider value={s.watermarkSize} min={12} max={96} step={1} onChange={v => setSetting('watermarkSize', v)} />
+      </SettingsRow>
+
+      <SettingsRow label="Position">
+        <select
+          value={s.watermarkPlace}
+          onChange={e => setSetting('watermarkPlace', e.target.value as WatermarkPlace)}
+          className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-[3px] text-[11px] text-[#ccc] px-[6px] py-[2px]"
+        >
+          {WM_PLACE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </SettingsRow>
+
+      <SettingsRow label="Text">
+        <input
+          value={s.watermarkPattern}
+          onChange={e => setSetting('watermarkPattern', e.target.value)}
+          className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-[3px] text-[11px] text-[#ccc] px-[6px] py-[2px] w-[150px] text-right font-mono"
+        />
+      </SettingsRow>
+
+      <div className="mt-2 border-t border-[#222] pt-2">
+        <div className="text-[10px] text-[#666] leading-[1.5]">
+          Cascades — full configuration in the account
+        </div>
+      </div>
+      <div className="mt-2 flex items-center gap-3">
+        <Toggle checked={s.showTriggeredAlerts} onChange={v => setSetting('showTriggeredAlerts', v)} label="Alerts" />
+      </div>
+
+      <div className="mt-2 flex items-center gap-3">
+        <Toggle checked={s.showDensities} onChange={v => setSetting('showDensities', v)} label="Density" />
+      </div>
+
+      <div className="mt-1 text-[10px] text-[#666]">{'{ticker}'} — ticker placeholder in the mark text</div>
+    </div>
+  )
+}
+
+const ExpandedChartHeader = memo(function ExpandedChartHeader({ symbol, onBack, activeTool, chartExchange }: { symbol: string; onBack: () => void; activeTool: DrawingTool | null; chartExchange: ChartExchange }) {
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const coin = useCoinListStore(useShallow(s => {
+    const c = s.coinMap.get(symbol)
+    if (!c) return null
+    return {
+      exchange: c.exchange,
+      change24h: c.change24h,
+      price: c.price,
+      quoteVolume24h: c.quoteVolume24h,
+      high24h: c.high24h,
+      low24h: c.low24h,
+    }
+  }))
+  // Smoothed price display (presentation only — chart/store data stays exact).
+  // Scoped to the chart's exchange so the header always shows THIS chart's
+  // last print with THIS venue's tick precision — never the best-exchange
+  // price or precision. Displayed values are snapped to the tick grid, so
+  // every shown number exists as a стакан level.
+  const precision = useCoinPrecision(symbol, chartExchange)
+  const priceRef = useSmoothedPriceRef(symbol, precision, coin?.price, '$', chartExchange)
+  const isUp = coin ? coin.change24h >= 0 : true
+  const badge = exchangeBadge(chartExchange)
+  const volDisplay = coin ? formatCompact(coin.quoteVolume24h) : '-'
+
+  return (
+    <div className="flex items-center gap-3 px-3 py-[6px] bg-[#141414] border-b border-[#1f1f1f] flex-shrink-0">
+      <button
+        className="clinic-btn clinic-btn-sm flex items-center justify-center w-[28px] h-[28px] p-0"
+        onClick={onBack}
+        title="Back to grid"
+      >
+        <ArrowLeft size={15} />
+      </button>
+
+      <div className="flex items-center gap-[8px] min-w-0">
+        <span className="text-[10px] font-bold leading-none text-[#b3b3b3]">
+          {badge}
+        </span>
+        <span className="font-bold text-[14px] text-[#f0f0f0] tracking-tight">
+          {extractBaseAsset(symbol)}
+        </span>
+      </div>
+
+      <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
+
+      <div className="flex items-center gap-[6px]">
+        <span className={`font-mono font-bold text-[13px] ${isUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+          {coin ? `${isUp ? '+' : ''}${coin.change24h.toFixed(2)}%` : ''}
+        </span>
+      </div>
+
+      <span ref={priceRef} className="font-mono font-bold text-[13px] text-[#e0e0e0]" />
+
+      <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
+
+      <div className="flex items-center gap-[6px] text-[11px] text-[#888]">
+        <span>H: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.high24h, precision)}` : '-'}</span></span>
+        <span>L: <span className="font-mono text-[#b3b3b3]">{coin ? `$${formatPrice(coin.low24h, precision)}` : '-'}</span></span>
+      </div>
+
+      <div className="w-[1px] h-[20px] bg-[#1f1f1f] flex-shrink-0" />
+
+      <div className="flex items-center gap-[4px] text-[11px] text-[#888]">
+        <span>Vol: <span className="font-mono text-[#b3b3b3]">${volDisplay}</span></span>
+      </div>
+
+      <div className="ml-auto flex items-center gap-2">
+        <button
+          className={`clinic-btn clinic-btn-sm flex items-center gap-1 text-[11px] ${settingsOpen ? 'clinic-btn-active' : 'clinic-btn-secondary'}`}
+          onClick={() => setSettingsOpen(o => !o)}
+          title="View settings"
+        >
+          <Settings2 size={13} />
+          <span>View</span>
+        </button>
+        {settingsOpen && (
+          <>
+            <div className="fixed inset-0 z-30" onClick={() => setSettingsOpen(false)} />
+            <ChartSettingsPanel />
+          </>
+        )}
+        {activeTool !== null && (
+          <span className="text-[10px] text-[#ccc] font-mono bg-[#333] px-[6px] py-[2px] rounded-[3px] border border-[#444]">
+            {activeTool === 'h-ray' ? 'Horiz. ray' : activeTool === 't-ray' ? 'Trend ray' : activeTool === 'alert' ? 'Price alert' : 'Segment'} — click on chart | Esc — cancel
+          </span>
+        )}
+        <span className="text-[10px] text-[#666] font-mono">
+          Shift + LMB / wheel — measure %
+        </span>
+      </div>
+    </div>
+  )
+})
+
+function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBack: () => void; chartExchange: ChartExchange }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<IChartApi | null>(null)
+  const candleRef = useRef<ISeriesApi<SeriesType> | null>(null)
+  const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const candlesDataRef = useRef<UnifiedCandle[]>([])
+  const tf = useCoinListStore(s => s.activeTimeframe)
+  const destroyedRef = useRef(false)
+  const adjustingRef = useRef(false)
+  const pricePrecision = useCoinPrecision(symbol, chartExchange)
+  const baseSettings = useChartSettings()
+  const settingsRef = useRef(baseSettings)
+  useEffect(() => {
+    settingsRef.current = baseSettings
+  })
+  const exchange: Exchange | undefined = chartExchange
+  const [selection, setSelection] = useState<RangeSelection | null>(null)
+  const [chartVersion, setChartVersion] = useState(0)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const lastUpdateRef = useRef(0)
+  const eventsRef = useRef<CandleEvents | null>(null)
+  const watermarkRef = useRef<ReturnType<typeof applyWatermark>>(null)
+
+  useEffect(() => {
+    if (exchange) {
+      eventsRef.current?.destroy()
+      eventsRef.current = createCandleEvents({
+        symbol, exchange, tf, tfSeconds: getTfSeconds(tf),
+      })
+    }
+    return () => { eventsRef.current?.destroy() }
+  }, [symbol, exchange, tf])
+
+  useEffect(() => {
+    destroyedRef.current = false
+    if (!containerRef.current) return
+    const s = settingsRef.current
+
+    const base = buildChartOptions(s, { top: 0.05, bottom: 0.15 })
+    const chart = createChart(containerRef.current, {
+      ...base,
+      handleScroll: true,
+      // Mouse-drag inertia OFF (see MiniChart comment).
+      kineticScroll: { touch: false, mouse: false },
+    })
+
+    const seriesOpts = candleSeriesOptions(s)
+    const candleSeries = s.candlesType === 'line'
+      ? chart.addSeries(LineSeries, seriesOpts as DeepPartial<LineSeriesOptions>)
+      : s.candlesType === 'bars'
+        ? chart.addSeries(BarSeries, seriesOpts as DeepPartial<BarSeriesOptions>)
+        : chart.addSeries(CandlestickSeries, seriesOpts as DeepPartial<CandlestickSeriesOptions>)
+    candleSeries.applyOptions({
+      priceFormat: {
+        type: 'price',
+        precision: pricePrecision,
+        minMove: Math.pow(10, -pricePrecision),
+      },
+    })
+    const volumeSeries = chart.addSeries(HistogramSeries, { ...volumeSeriesOptions(), priceScaleId: '' })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: volumePaneTop(s.volumesHeight), bottom: 0 }, textColor: '#666666' })
+    watermarkRef.current = applyWatermark(chart, s, symbol)
+
+    chartRef.current = chart
+    candleRef.current = candleSeries
+    volumeRef.current = volumeSeries
+
+    setChartVersion(v => v + 1)
+
+    let prevW = containerRef.current.clientWidth
+    let prevH = containerRef.current.clientHeight
+    const ro = new ResizeObserver(() => {
+      if (containerRef.current && !destroyedRef.current) {
+        const w = containerRef.current.clientWidth
+        const h = containerRef.current.clientHeight
+        if (w < 10 || h < 10) return
+        if (w === prevW && h === prevH) return
+        prevW = w
+        prevH = h
+        chart.applyOptions({ width: w, height: h })
+      }
+    })
+    ro.observe(containerRef.current)
+
+    return () => {
+      destroyedRef.current = true
+      ro.disconnect()
+      watermarkRef.current?.detach()
+      watermarkRef.current = null
+      // See MiniChart's identical comment: stop any pending forming-candle
+      // glide synchronously (Stage 2 item 3) before the series is disposed.
+      stopFormingGlide(candleRef)
+      chart.remove()
+      chartRef.current = null
+      candleRef.current = null
+      volumeRef.current = null
+    }
+  }, [symbol, tf, pricePrecision, baseSettings.candlesType])
+
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    const s = useChartSettings.getState()
+    chart.applyOptions({
+      rightPriceScale: { mode: s.priceScaleMode === 'log' ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal },
+      grid: { vertLines: { visible: s.vertGrid }, horzLines: { visible: s.horzGrid } },
+      timeScale: { timeVisible: timeVisibleFor(s.interval), secondsVisible: secondsVisibleFor(s.interval), barSpacing: s.barSpace, rightOffset: s.rightOffset },
+    })
+    chart.priceScale('').applyOptions({ scaleMargins: { top: volumePaneTop(s.volumesHeight), bottom: 0 } })
+    if (s.watermark >= 0) {
+      watermarkRef.current?.detach()
+      watermarkRef.current = applyWatermark(chart, s, symbol)
+    }
+  }, [baseSettings.priceScaleMode, baseSettings.vertGrid, baseSettings.horzGrid, baseSettings.interval, baseSettings.barSpace, baseSettings.rightOffset, baseSettings.volumesHeight, baseSettings.watermark, baseSettings.watermarkSize, baseSettings.watermarkPlace, baseSettings.watermarkPattern, symbol])
+
+  const [wsCount, setWsCount] = useState(getWsOpenCount)
+  const [mountWsCount] = useState(() => getWsOpenCount())
+  useEffect(() => {
+    const un = wsOnType('open', () => setWsCount(getWsOpenCount()))
+    return un
+  }, [])
+
+  const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
+    limit: EXPANDED_CANDLE_LIMIT,
+    fitOnOpen: true,
+    forceServer: wsCount > mountWsCount,
+    wsEpoch: wsCount,
+    skipHistory: isSecondTimeframe(tf),
+  }, lastUpdateRef, eventsRef, chartVersion)
+
+  const {
+    activeTool,
+    setActiveTool,
+    removeDrawing,
+    clearAllDrawings,
+    hasDrawings,
+    deactivateTool,
+    handleClick: drawingClickHandler,
+    handleMouseDown: drawingMouseDownHandler,
+    handleMouseMove: drawingMouseMoveHandler,
+    handleMouseUp: drawingMouseUpHandler,
+    pendingPoint,
+    primitiveRef,
+    isDraggingRef,
+    shiftLogicalOffset,
+    CLICK_THRESHOLD,
+  } = useDrawings(symbol, tf, chartRef, candleRef, containerRef, candlesDataRef, chartVersion, isInitialLoading, dataVersion)
+
+  useChartOverlays(candleRef, candlesDataRef, dataVersion, chartVersion, pricePrecision)
+  useDensityOverlay(candleRef, chartVersion, symbol, pricePrecision)
+
+  const focusPrice = useCoinListStore(s => s.expandedFocusPrice)
+  const clearFocusPrice = useCoinListStore(s => s.clearExpandedFocusPrice)
+  useEffect(() => {
+    if (!focusPrice || !isFinite(focusPrice) || focusPrice <= 0) return
+    // Wait until history painted — setVisibleRange is a no-op on an empty
+    // series and would be overwritten by the fit afterwards.
+    if (isInitialLoading || dataVersion === 0) return
+    const chart = chartRef.current
+    if (!chart) return
+    try {
+      // Center the price scale on the wall price: disable autoscale so the
+      // range sticks, then set a ±1.5% window around the target.
+      chart.priceScale('right').applyOptions({ autoScale: false })
+      const span = focusPrice * 0.015
+      chart.priceScale('right').setVisibleRange({ from: focusPrice - span, to: focusPrice + span })
+    } catch { /* chart mid-teardown */ }
+    clearFocusPrice()
+  }, [focusPrice, isInitialLoading, dataVersion, clearFocusPrice])
+
+  const isStale = useStaleDataDetection(lastUpdateRef)
+
+  const aggregatorRef = useSecondCandleAggregator(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+
+  useWsCandle(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, aggregatorRef)
+  useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, eventsRef, shiftLogicalOffset)
+
+  useEffect(() => {
+    // Deferred: the release handler finished the drag; clearing one frame
+    // later keeps the tooltip from flickering during symbol/TF switches.
+    const raf = requestAnimationFrame(() => setSelection(null))
+    return () => cancelAnimationFrame(raf)
+  }, [symbol, tf])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    let dragging = false
+    let startX = 0
+    let startY = 0
+    let mouseDownX = 0
+    let mouseDownY = 0
+    let restoreOpts: { handleScroll?: boolean; handleScale?: boolean } | null = null
+    let restoreDrawingOpts: { handleScroll?: boolean; handleScale?: boolean } | null = null
+
+    const computeSelection = (curX: number, curY: number): RangeSelection => {
+      const chart = chartRef.current
+      const series = candleRef.current
+      const x1 = Math.min(startX, curX)
+      const x2 = Math.max(startX, curX)
+      let startPrice = 0
+      let endPrice = 0
+      let changePct = 0
+      let durationSec = 0
+      let valid = false
+
+      if (chart && series) {
+        const pStart = series.coordinateToPrice(startY) as number | null
+        const pEnd = series.coordinateToPrice(curY) as number | null
+
+        if (pStart !== null && pEnd !== null && isFinite(pStart) && isFinite(pEnd) && pStart > 0) {
+          startPrice = pStart
+          endPrice = pEnd
+          changePct = ((endPrice - startPrice) / startPrice) * 100
+          valid = true
+        }
+
+        const t1Raw = chart.timeScale().coordinateToTime(x1) as number | null
+        const t2Raw = chart.timeScale().coordinateToTime(x2) as number | null
+        const t1Num = (t1Raw == null || typeof t1Raw === 'number')
+          ? t1Raw as number | null
+          : null
+        const t2Num = (t2Raw == null || typeof t2Raw === 'number')
+          ? t2Raw as number | null
+          : null
+
+        if (t1Num !== null && t2Num !== null) {
+          durationSec = Math.abs(t2Num - t1Num)
+        }
+      }
+
+      // Tooltip anchor clamped to the container HERE (event context — refs
+      // are legal in handlers); the render reads plain numbers only.
+      const box = containerRef.current
+      const boxW = box?.clientWidth ?? 9999
+      const boxH = box?.clientHeight ?? 9999
+      const tooltipLeft = Math.min(Math.max(curX + 10, 0), boxW - 180)
+      const tooltipTop = Math.min(Math.max(curY + 10, 0), boxH - 70)
+
+      return {
+        startX,
+        startY,
+        endX: curX,
+        endY: curY,
+        startPrice,
+        endPrice,
+        changePct,
+        durationSec,
+        valid,
+        tooltipLeft,
+        tooltipTop,
+      }
+    }
+
+    const onMouseDown = (e: MouseEvent) => {
+      const rect = container.getBoundingClientRect()
+      mouseDownX = e.clientX - rect.left
+      mouseDownY = e.clientY - rect.top
+
+      if ((e.button === 0 && e.shiftKey) || e.button === 1) {
+        startX = mouseDownX
+        startY = mouseDownY
+        dragging = true
+        e.preventDefault()
+        e.stopPropagation()
+        const chart = chartRef.current
+        if (chart) {
+          restoreOpts = { handleScroll: true, handleScale: true }
+          chart.applyOptions({ handleScroll: false, handleScale: false })
+        }
+        setSelection(computeSelection(startX, startY))
+        return
+      }
+
+      if (e.button === 0 && activeTool !== null && !e.shiftKey) {
+        const chart = chartRef.current
+        if (chart) {
+          restoreDrawingOpts = { handleScroll: true, handleScale: true }
+          chart.applyOptions({ handleScroll: false, handleScale: false })
+        }
+      } else if (e.button === 0 && !e.shiftKey) {
+        drawingMouseDownHandler(e)
+        if (isDraggingRef.current) {
+          const chart = chartRef.current
+          if (chart) {
+            restoreDrawingOpts = { handleScroll: true, handleScale: true }
+            chart.applyOptions({ handleScroll: false, handleScale: false })
+          }
+        }
+      }
+    }
+
+    let mmRaf: number | null = null
+    let mmX = 0, mmY = 0
+    const onMouseMove = (e: MouseEvent) => {
+      const rect = container.getBoundingClientRect()
+      const curX = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
+      const curY = Math.max(0, Math.min(e.clientY - rect.top, rect.height))
+
+      drawingMouseMoveHandler(e)
+
+      if (!dragging) return
+      mmX = curX
+      mmY = curY
+      if (mmRaf != null) return
+      mmRaf = requestAnimationFrame(() => {
+        mmRaf = null
+        if (!dragging) return
+        setSelection(computeSelection(mmX, mmY))
+      })
+    }
+
+    const restoreDrawingScroll = () => {
+      const chart = chartRef.current
+      if (chart && restoreDrawingOpts) {
+        chart.applyOptions(restoreDrawingOpts)
+        restoreDrawingOpts = null
+      }
+    }
+
+    const onMouseUp = (e: MouseEvent) => {
+      if (dragging) {
+        dragging = false
+        if (mmRaf != null) { cancelAnimationFrame(mmRaf); mmRaf = null }
+        const chart = chartRef.current
+        if (chart && restoreOpts) {
+          chart.applyOptions(restoreOpts)
+        }
+        restoreOpts = null
+        setSelection(null)
+        restoreDrawingScroll()
+        return
+      }
+
+      const wasDragging = isDraggingRef.current
+
+      if (wasDragging) {
+        drawingMouseUpHandler(e)
+        restoreDrawingScroll()
+      }
+
+      if (e.button === 0 && activeTool !== null && !wasDragging) {
+        restoreDrawingScroll()
+        const rect = container.getBoundingClientRect()
+        const upX = e.clientX - rect.left
+        const upY = e.clientY - rect.top
+        const dx = Math.abs(upX - mouseDownX)
+        const dy = Math.abs(upY - mouseDownY)
+        if (dx < CLICK_THRESHOLD && dy < CLICK_THRESHOLD) {
+          drawingClickHandler(e)
+        }
+      }
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSelection(null)
+        dragging = false
+        if (mmRaf != null) { cancelAnimationFrame(mmRaf); mmRaf = null }
+        const chart = chartRef.current
+        if (chart && restoreOpts) {
+          chart.applyOptions(restoreOpts)
+        }
+        restoreOpts = null
+        restoreDrawingScroll()
+        deactivateTool()
+      }
+    }
+
+    const onAuxclick = (e: MouseEvent) => { if (e.button === 1) e.preventDefault() }
+
+    container.addEventListener('mousedown', onMouseDown, true)
+    container.addEventListener('auxclick', onAuxclick)
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    window.addEventListener('keydown', onKeyDown)
+
+    return () => {
+      container.removeEventListener('mousedown', onMouseDown, true)
+      container.removeEventListener('auxclick', onAuxclick)
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      window.removeEventListener('keydown', onKeyDown)
+      dragging = false
+      if (mmRaf != null) cancelAnimationFrame(mmRaf)
+    }
+  }, [symbol, tf, activeTool, drawingClickHandler, drawingMouseDownHandler, drawingMouseMoveHandler, drawingMouseUpHandler, deactivateTool, isDraggingRef, CLICK_THRESHOLD, removeDrawing])
+
+  const precision = useCoinListStore(s => s.coinMap.get(symbol)?.pricePrecision ?? 2)
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const onCtx = (e: MouseEvent) => {
+      e.preventDefault()
+      const primitive = primitiveRef.current
+      if (!primitive) return
+      const rect = container.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
+      const hit = primitive.hitTest?.(x, y)
+      if (hit) {
+        removeDrawing(hit.externalId)
+      }
+    }
+    container.addEventListener('contextmenu', onCtx)
+    return () => container.removeEventListener('contextmenu', onCtx)
+  }, [primitiveRef, removeDrawing])
+
+  return (
+    <div className="flex-1 flex flex-col h-full bg-[#0e0e0e]">
+      <ExpandedChartHeader symbol={symbol} onBack={onBack} activeTool={activeTool} chartExchange={chartExchange} />
+      <div ref={containerRef} className="relative flex-1 min-h-0 [transform:translateZ(0)] [backface-visibility:hidden] [contain:paint]">
+        {isInitialLoading && <ChartCornerSpinner />}
+        {!isInitialLoading && status === 'retrying' && <ChartCornerSpinner />}
+        {!isInitialLoading && isLoadingMore && (
+          <div className="absolute top-[8px] left-[8px] z-30 pointer-events-none">
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-[4px] bg-[#1a1a1a]/95 border border-[#2a2a2a] shadow-lg">
+              <div className="w-[12px] h-[12px] border-2 border-[#555] border-t-[#ccc] rounded-full animate-spin" />
+              <span className="text-[11px] text-[#aaa] font-medium">Loading history...</span>
+            </div>
+          </div>
+        )}
+        {isStale && <StaleDataOverlay visible={true} />}
+        {status === 'empty' && <ChartMessageOverlay label="No data for this timeframe" />}
+        {status === 'error' && <ChartMessageOverlay label="Error loading data. Try another timeframe." tone="error" />}
+
+        <DrawingToolsPanel
+          activeTool={activeTool}
+          setActiveTool={setActiveTool}
+          clearAllDrawings={clearAllDrawings}
+          hasDrawings={hasDrawings}
+          pendingPoint={pendingPoint}
+        />
+
+        {selection && Math.abs(selection.endX - selection.startX) > 2 && (
+          <div className="pointer-events-none absolute inset-0 z-30">
+            <div
+              className={`absolute border ${
+                selection.valid && selection.changePct >= 0
+                  ? 'border-[#26a65b]/70 bg-[#26a65b]/10'
+                  : selection.valid
+                    ? 'border-[#e74c3c]/70 bg-[#e74c3c]/10'
+                    : 'border-[#f9b600]/70 bg-[#f9b600]/10'
+              }`}
+              style={{
+                left: Math.min(selection.startX, selection.endX),
+                top: Math.min(selection.startY, selection.endY),
+                width: Math.abs(selection.endX - selection.startX),
+                height: Math.max(2, Math.abs(selection.endY - selection.startY)),
+              }}
+            />
+            <div
+              className={`absolute px-[8px] py-[5px] rounded-[4px] text-[11px] font-mono bg-[#141414] border shadow-lg whitespace-nowrap ${
+                !selection.valid
+                  ? 'border-[#3a3a3a] text-[#888]'
+                  : selection.changePct >= 0
+                    ? 'border-[#26a65b] text-[#26a65b]'
+                    : 'border-[#e74c3c] text-[#e74c3c]'
+              }`}
+              style={{
+                left: selection.tooltipLeft,
+                top: selection.tooltipTop,
+              }}
+            >
+              {selection.valid ? (
+                <>
+                  <div className="text-[13px] font-bold">
+                    {selection.changePct >= 0 ? '+' : ''}
+                    {selection.changePct.toFixed(2)}%
+                  </div>
+                  <div className="text-[10px] text-[#888] mt-[2px]">
+                    ${formatPrice(selection.startPrice, precision)} → ${formatPrice(selection.endPrice, precision)}
+                  </div>
+                  <div className="text-[10px] text-[#666]">
+{formatDuration(selection.durationSec)}
+                  </div>
+                </>
+              ) : (
+                <span>Select a range</span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export const ChartGrid = memo(function ChartGrid() {
+  const sortedCoins = useCoinListStore(s => s.sortedCoins)
+  const pageIndex = useCoinListStore(s => s.pageIndex)
+  // New array identity when sortedCoins reorders, but getOrFetchBulk serves
+  // every symbol from the cache, so a reorder never triggers a network fetch.
+  const topSymbols = useMemo(
+    () => sortedCoins.slice(pageIndex * 9, pageIndex * 9 + 9).map(c => c.symbol),
+    [sortedCoins, pageIndex],
+  )
+  const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
+  const expandChart = useCoinListStore(s => s.expandChart)
+  const tf = useCoinListStore(s => s.activeTimeframe)
+  const chartExchange = useCoinListStore(s => s.chartExchange)
+
+  useInitialCandlesPush()
+
+  useEffect(() => {
+    if (topSymbols.length === 0) return
+    getOrFetchBulk(topSymbols, tf, GRID_CANDLE_LIMIT, chartExchange)
+  }, [topSymbols, tf, chartExchange])
+
+  if (expandedSymbol) {
+    return <ExpandedChart symbol={expandedSymbol} onBack={() => expandChart(null)} chartExchange={chartExchange} />
+  }
+
+  return (
+    <div className="flex-1 h-full flex flex-col bg-[#0a0a0a]">
+      <div className="relative flex-1 min-h-0 p-[2px] grid grid-cols-3 grid-rows-3 gap-[2px] isolate">
+        {topSymbols.map((symbol) => (
+          <MiniChart
+            key={`${chartExchange}:${symbol}`}
+            symbol={symbol}
+            chartExchange={chartExchange}
+          />
+        ))}
+        {Array.from({ length: Math.max(0, 9 - topSymbols.length) }).map((_, idx) => (
+          <div key={`placeholder-${idx}`} className="flex items-center justify-center bg-[#0e0e0e] border border-[#1f1f1f]" />
+        ))}
+      </div>
+    </div>
+  )
+})

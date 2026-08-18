@@ -1,0 +1,260 @@
+import { getRedisData, REDIS_ENABLED } from '../../redis.js'
+import { fetchWithTimeout } from '../../utils/fetch.js'
+import type { ProxyAgent } from 'undici'
+import {
+  rateLimitWeightGauge,
+  rateLimitWeightMaxGauge,
+  rateLimitThrottledCounter,
+  rateLimit429Counter,
+  rateLimit418Counter,
+} from '../../metrics.js'
+
+const WEIGHT_THRESHOLD_RATIO = 0.8
+const CIRCUIT_BREAKER_ERRORS = 5
+const CIRCUIT_BREAKER_COOLDOWN_MS = 60_000
+const BAN_COOLDOWN_MS = 120_000
+
+const LIMITS: Record<string, number> = {
+  spot: 6000,
+  futures: 2400,
+}
+
+const PING_URLS: Record<string, string> = {
+  spot: 'https://api.binance.com/api/v3/ping',
+  futures: 'https://fapi.binance.com/fapi/v1/ping',
+}
+
+const WEIGHT_HEADERS = [
+  'X-Mbx-Used-Weight-1m',
+  'X-Mbx-Used-Weight',
+]
+
+const WEIGHT_HEADERS_FUTURES = [
+  'X-Mbx-Futures-Used-Weight-1m',
+  'X-Mbx-Used-Weight-1m',
+  'X-Mbx-Used-Weight',
+]
+
+const RETRY_AFTER_HEADER = 'Retry-After'
+
+export class BinanceRateLimiter {
+  private market: 'spot' | 'futures'
+  private limit: number
+  private currentWeight = 0
+  private throttledUntil = 0
+  private backoffUntil = 0
+  private lastWarning = 0
+  private consecutiveErrors = 0
+  private circuitBrokenUntil = 0
+  /** When the weight was last refreshed by an actual response header. */
+  private lastWeightUpdatedAt = Date.now()
+
+  constructor(market: 'spot' | 'futures') {
+    this.market = market
+    this.limit = LIMITS[market]
+    rateLimitWeightMaxGauge.set({ market: this.market }, this.limit)
+  }
+
+  updateFromHeaders(headers: Headers) {
+    const headerKeys = this.market === 'futures' ? WEIGHT_HEADERS_FUTURES : WEIGHT_HEADERS
+    for (const key of headerKeys) {
+      const val = headers.get(key)
+      if (val) {
+        const weight = parseInt(val, 10)
+        if (!isNaN(weight)) {
+          this.currentWeight = weight
+          this.lastWeightUpdatedAt = Date.now()
+          break
+        }
+      }
+    }
+
+    rateLimitWeightGauge.set({ market: this.market }, this.currentWeight)
+
+    const ratio = this.currentWeight / this.limit
+    if (ratio >= WEIGHT_THRESHOLD_RATIO && Date.now() - this.lastWarning > 30_000) {
+      this.lastWarning = Date.now()
+      console.warn(`[RateLimit:${this.market}] Weight at ${this.currentWeight}/${this.limit} (${(ratio * 100).toFixed(1)}%)`)
+    }
+  }
+
+  handle429(headers: Headers) {
+    const retryAfter = headers.get(RETRY_AFTER_HEADER)
+    let waitMs = 60_000
+    if (retryAfter) {
+      const parsed = parseInt(retryAfter, 10)
+      if (!isNaN(parsed)) waitMs = parsed * 1000
+    }
+    this.throttledUntil = Date.now() + waitMs
+    this.currentWeight = 0
+    this.lastWeightUpdatedAt = Date.now()
+    rateLimit429Counter.inc({ market: this.market })
+    console.error(`[RateLimit:${this.market}] 429 hit! Throttling for ${waitMs / 1000}s`)
+  }
+
+  handle418(headers: Headers) {
+    const retryAfter = headers.get(RETRY_AFTER_HEADER)
+    let waitMs = BAN_COOLDOWN_MS
+    if (retryAfter) {
+      const parsed = parseInt(retryAfter, 10)
+      if (!isNaN(parsed) && parsed * 1000 > waitMs) waitMs = parsed * 1000
+    }
+    this.throttledUntil = Date.now() + waitMs
+    this.currentWeight = 0
+    this.lastWeightUpdatedAt = Date.now()
+    rateLimit418Counter.inc({ market: this.market })
+    console.error(`[RateLimit:${this.market}] 418 IP ban! Throttling for ${waitMs / 1000}s`)
+  }
+
+  isOverThreshold(): boolean {
+    return this.isOverRatio(WEIGHT_THRESHOLD_RATIO)
+  }
+
+  /** Same as isOverThreshold but with a custom ratio of the weight limit.
+   *  Depth snapshots use 0.95: they must yield to candle history (which
+   *  stops at 0.8), so snapshots only pause when the exchange is truly
+   *  about to 429 the IP. */
+  isOverRatio(ratio: number): boolean {
+    // Weight windows expire after 60s. When every poller skips because we're
+    // over the threshold, no request refreshes the weight and the limiter is
+    // stuck over-threshold forever (a self-sustaining deadlock after any burst
+    // — preload, metrics, candle fallback). If no response refreshed the
+    // weight within a full window, assume it decayed and let the pollers
+    // retry; a fresh response header will re-raise it if Binance still reports
+    // heavy usage.
+    if (Date.now() - this.lastWeightUpdatedAt > 60_000) {
+      this.currentWeight = 0
+    }
+    return this.currentWeight >= this.limit * ratio
+  }
+
+  isThrottled(): boolean {
+    const now = Date.now()
+    return now < this.throttledUntil || now < this.backoffUntil || now < this.circuitBrokenUntil
+  }
+
+  async waitIfThrottled(): Promise<void> {
+    // Cap the total wait: an UNBOUNDED sleep here (418 ban = 120s, circuit
+    // breaker = 60s) parks every user-facing history request behind the
+    // pause — charts looked "stuck" for minutes until a page reload.
+    // Waiting at most 10s bounds the damage: the request then proceeds and
+    // Binance either answers (budget recovered) or 429s again quickly
+    // (handled, wait reset). Callers with cache fall back to SWR.
+    const MAX_WAIT_MS = 10_000
+    const started = Date.now()
+    while (this.isThrottled()) {
+      const waitUntil = Math.max(this.throttledUntil, this.backoffUntil, this.circuitBrokenUntil)
+      const delay = Math.min(Math.max(waitUntil - Date.now(), 100), MAX_WAIT_MS - (Date.now() - started))
+      if (delay <= 0) break
+      rateLimitThrottledCounter.inc({ market: this.market })
+      console.warn(`[RateLimit:${this.market}] Throttled, waiting ${Math.ceil(delay / 1000)}s (capped at ${MAX_WAIT_MS / 1000}s)...`)
+      await new Promise(r => setTimeout(r, delay))
+    }
+  }
+
+  recordError() {
+    this.consecutiveErrors++
+    if (this.consecutiveErrors >= CIRCUIT_BREAKER_ERRORS) {
+      this.circuitBrokenUntil = Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS
+      console.error(`[RateLimit:${this.market}] Circuit breaker triggered! ${this.consecutiveErrors} consecutive errors, pausing for ${CIRCUIT_BREAKER_COOLDOWN_MS / 1000}s`)
+    }
+  }
+
+  recordSuccess() {
+    this.consecutiveErrors = 0
+  }
+
+  getWeight(): number {
+    return this.currentWeight
+  }
+
+  getLimit(): number {
+    return this.limit
+  }
+
+  async probeWeight(dispatcher?: ProxyAgent): Promise<boolean> {
+    const url = PING_URLS[this.market]
+    if (!url) return false
+    try {
+      const res = await fetchWithTimeout(url, 5000, dispatcher)
+      this.updateFromHeaders(res.headers)
+      console.log(`[RateLimit:${this.market}] Probed weight: ${this.currentWeight}/${this.limit}`)
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+const BUDGET_KEY_PREFIX = 'bw:'
+const BUDGET_WINDOW_MS = 60_000
+const BUDGET_FILL_RATIO = 0.8
+
+const localBudgets = new Map<string, number>()
+
+// Evict stale local budget entries every 2 minutes
+setInterval(() => {
+  const currentBucket = Math.floor(Date.now() / BUDGET_WINDOW_MS)
+  for (const [key] of localBudgets) {
+    const bucket = parseInt(key.split(':')[1], 10)
+    if (!isNaN(bucket) && currentBucket - bucket > 2) {
+      localBudgets.delete(key)
+    }
+  }
+}, 120_000)
+
+function budgetKey(ipIndex: number): string {
+  const minuteBucket = Math.floor(Date.now() / BUDGET_WINDOW_MS)
+  return `${BUDGET_KEY_PREFIX}${ipIndex}:${minuteBucket}`
+}
+
+function localBudgetKey(ipIndex: number): string {
+  const minuteBucket = Math.floor(Date.now() / BUDGET_WINDOW_MS)
+  return `${ipIndex}:${minuteBucket}`
+}
+
+export async function acquireBudget(
+  market: 'spot' | 'futures',
+  weightCost: number,
+  ipIndex: number,
+  maxWaitMs: number = 30_000,
+): Promise<boolean> {
+  const limit = LIMITS[market]
+  const maxBudget = Math.floor(limit * BUDGET_FILL_RATIO)
+  const deadline = Date.now() + maxWaitMs
+
+  while (Date.now() < deadline) {
+    if (REDIS_ENABLED) {
+      try {
+        const redis = getRedisData()
+        const key = budgetKey(ipIndex)
+        const current = await redis.incrby(key, weightCost)
+        if (current <= maxBudget) {
+          await redis.expire(key, 90)
+          return true
+        }
+        await redis.incrby(key, -weightCost)
+      } catch {
+        const lKey = localBudgetKey(ipIndex)
+        const current = (localBudgets.get(lKey) ?? 0) + weightCost
+        if (current <= maxBudget) {
+          localBudgets.set(lKey, current)
+          return true
+        }
+      }
+    } else {
+      const lKey = localBudgetKey(ipIndex)
+      const current = (localBudgets.get(lKey) ?? 0) + weightCost
+      if (current <= maxBudget) {
+        localBudgets.set(lKey, current)
+        return true
+      }
+    }
+
+    const waitMs = Math.min(1000, deadline - Date.now())
+    if (waitMs <= 0) return false
+    await new Promise(r => setTimeout(r, waitMs))
+  }
+
+  return false
+}

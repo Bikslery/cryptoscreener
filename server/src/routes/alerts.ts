@@ -1,0 +1,163 @@
+import { Router } from 'express'
+import { prisma } from '../db/index.js'
+import { validateImpulseCondition, validatePriceCondition, validateListingCondition, VALID_EXCHANGES } from '../services/alerts/validate.js'
+import { writeRateLimit } from '../utils/rate-limit.js'
+
+const router = Router()
+
+const writeLimiter = writeRateLimit(60)
+
+router.get('/', async (req, res) => {
+  const { userId } = req.user!
+  const alerts = await prisma.alert.findMany({ where: { userId }, orderBy: { createdAt: 'desc' } })
+  res.json(alerts.map(a => ({ ...a, condition: JSON.parse(a.condition) })))
+})
+
+router.post('/', writeLimiter, async (req, res) => {
+  const { userId } = req.user!
+  const { type, symbol, exchange, condition: rawCondition } = req.body
+
+  if (typeof type !== 'string' || !['price', 'impulse', 'listing'].includes(type)) {
+    res.status(400).json({ error: 'Неизвестный тип алерта' })
+    return
+  }
+  if (typeof symbol !== 'string' || symbol.trim() === '' || symbol.length > 32) {
+    res.status(400).json({ error: 'symbol обязателен (до 32 символов)' })
+    return
+  }
+
+  let condition: unknown
+  if (type === 'impulse') {
+    const parsed = validateImpulseCondition(rawCondition)
+    if ('error' in parsed) {
+      res.status(400).json({ error: parsed.error })
+      return
+    }
+    condition = parsed.condition
+  } else if (type === 'price') {
+    const parsed = validatePriceCondition(rawCondition)
+    if ('error' in parsed) {
+      res.status(400).json({ error: parsed.error })
+      return
+    }
+    condition = parsed.condition
+  } else {
+    const parsed = validateListingCondition(rawCondition)
+    if ('error' in parsed) {
+      res.status(400).json({ error: parsed.error })
+      return
+    }
+    condition = parsed.condition
+  }
+
+  // Top-level exchange goes through the same whitelist as condition.exchange.
+  if (exchange !== undefined && exchange !== null && typeof exchange !== 'string') {
+    res.status(400).json({ error: 'exchange: строка' })
+    return
+  }
+  if (typeof exchange === 'string' && !(VALID_EXCHANGES as readonly string[]).includes(exchange)) {
+    res.status(400).json({ error: 'exchange: неизвестная биржа' })
+    return
+  }
+
+  const alert = await prisma.alert.create({
+    data: {
+      userId,
+      type,
+      symbol: type === 'impulse' ? (symbol.trim().toUpperCase() || 'ANY') : symbol.trim().toUpperCase(),
+      exchange: typeof exchange === 'string' ? exchange : null,
+      condition: JSON.stringify(condition),
+    },
+  })
+
+  // One active impulse alert per user — a new one replaces all others so a
+  // single market move can never produce a burst of duplicate notifications.
+  if (type === 'impulse') {
+    await prisma.alert.updateMany({
+      where: { userId, type: 'impulse', active: true, NOT: { id: alert.id } },
+      data: { active: false },
+    })
+  }
+
+  res.json({ ...alert, condition: JSON.parse(alert.condition) })
+})
+
+router.patch('/:id', writeLimiter, async (req, res) => {
+  const { userId } = req.user!
+  const id = String(req.params.id)
+  const { active, muted, condition: rawCondition } = req.body
+
+  const existing = await prisma.alert.findFirst({ where: { id, userId } })
+  if (!existing) {
+    res.status(404).json({ error: 'Алерт не найден' })
+    return
+  }
+
+  const data: { active?: boolean; muted?: boolean; condition?: string; triggeredAt?: Date | null } = {}
+  if (active !== undefined) {
+    data.active = Boolean(active)
+    data.triggeredAt = active ? null : undefined
+  }
+  if (muted !== undefined) data.muted = Boolean(muted)
+
+  if (rawCondition !== undefined) {
+    let condition: unknown
+    if (existing.type === 'impulse') {
+      const parsed = validateImpulseCondition(rawCondition)
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error })
+        return
+      }
+      condition = parsed.condition
+    } else if (existing.type === 'price') {
+      const parsed = validatePriceCondition(rawCondition)
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error })
+        return
+      }
+      condition = parsed.condition
+    } else {
+      const parsed = validateListingCondition(rawCondition)
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error })
+        return
+      }
+      condition = parsed.condition
+    }
+
+    // Engine bookkeeping must survive settings updates — otherwise saving
+    // the % / exchange / telegram resets the 5-minute mute and the same
+    // candle can immediately refire.
+    if (existing.type === 'impulse') {
+      let old: { lastFiredCandleTime?: number; mutedUntil?: number } = {}
+      try { old = JSON.parse(existing.condition) } catch { /* keep empty */ }
+      const next = condition as { lastFiredCandleTime?: number; mutedUntil?: number }
+      if (old.lastFiredCandleTime !== undefined) next.lastFiredCandleTime = old.lastFiredCandleTime
+      if (old.mutedUntil !== undefined) next.mutedUntil = old.mutedUntil
+    }
+
+    data.condition = JSON.stringify(condition)
+  }
+
+  const alert = await prisma.alert.update({ where: { id, userId }, data })
+
+  // Activating an impulse alert silences every other active impulse alert of
+  // the user — duplicates must never fire a burst on the same move.
+  if (existing.type === 'impulse' && active === true) {
+    await prisma.alert.updateMany({
+      where: { userId, type: 'impulse', active: true, NOT: { id } },
+      data: { active: false },
+    })
+  }
+
+  res.json({ ...alert, condition: JSON.parse(alert.condition) })
+})
+
+router.delete('/:id', writeLimiter, async (req, res) => {
+  const { userId } = req.user!
+  const id = String(req.params.id)
+  await prisma.alert.delete({ where: { id, userId } })
+  res.json({ ok: true })
+})
+
+export default router

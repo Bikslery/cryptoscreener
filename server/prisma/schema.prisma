@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String    @id @default(cuid())
+  username         String    @unique
+  passwordHash     String
+  telegramChatId    String?   @unique
+  telegramVerified  Boolean   @default(false)
+  telegramBindError String?
+  settings         String?
+  createdAt        DateTime  @default(now())
+  watchlists       Watchlist[]
+  alerts           Alert[]
+  drawings         Drawing[]
+  passwordResets   PasswordReset[]
+}
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  code      String
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([code, userId])
+}
+
+model Watchlist {
+  id     String @id @default(cuid())
+  userId String
+  name   String
+  coins  String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Alert {
+  id          String    @id @default(cuid())
+  userId      String
+  type        String
+  symbol      String
+  exchange    String?
+  condition   String
+  active      Boolean   @default(true)
+  muted       Boolean   @default(false)
+  triggeredAt DateTime?
+  createdAt   DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type, active])
+}
+
+model Drawing {
+  id        String @id @default(cuid())
+  userId    String
+  symbol    String
+  timeframe String
+  type      String
+  data      String
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, symbol, timeframe])
+}
+
+model KnownSymbol {
+  symbol    String
+  exchange  String
+  firstSeen DateTime @default(now())
+
+  @@unique([symbol, exchange])
+  @@index([symbol])
+}

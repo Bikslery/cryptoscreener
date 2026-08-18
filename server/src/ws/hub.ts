@@ -1,0 +1,701 @@
+import { deflateRaw, deflateRawSync } from 'zlib'
+import { WebSocket, WebSocketServer } from 'ws'
+import { verifyTokenWithTelegram, type JwtPayload } from '../middleware/auth.js'
+import type { WsMessage } from '../types.js'
+import type { UnifiedTicker, UnifiedCandle } from '../types.js'
+import { inboundWsSchema } from './schemas.js'
+import { getTopCachedSymbols, getCachedCandles, updateCachedCandle } from '../services/candles/candle-cache.js'
+import { getAllTickers, getTickers, getTicker, setTickersFromRedis } from '../services/aggregator/index.js'
+import { INITIAL_CANDLES_TF } from '../services/candles/preload.js'
+import { compactCandles, type CompactCandle } from '../services/candles/compact.js'
+import { getRedisSub } from '../redis.js'
+import {
+  wsClientsGauge,
+  wsSubscriptionsGauge,
+  wsBufferedMaxGauge,
+  wsBufferedBytesMaxGauge,
+  wsDroppedTotal,
+  wsClientKilledTotal,
+  wsBroadcastLatency,
+  wsBatchFlushLatency,
+} from '../metrics.js'
+
+interface Client {
+  ws: WebSocket
+  user: JwtPayload | null
+  subscriptions: Set<string>
+  tickerSymbols: Set<string>
+  /** Sorted join of tickerSymbols, rebuilt ONLY on (un)subscribe. Recomputing
+   *  it per broadcast cost an array copy + sort per client per frame (25-50Hz). */
+  tickerSig: string
+  alive: boolean
+  buffered: number
+  lastBackpressureNotify: number
+  totalDropped: number
+}
+
+const clients = new Map<WebSocket, Client>()
+const MAX_BUFFERED = 50
+const BACKPRESSURE_HARD_LIMIT = MAX_BUFFERED * 2
+const BACKPRESSURE_NOTIFY_INTERVAL = 5000
+
+// --- DIAGNOSTICS: outbound frame drops --------------------------------
+// Counts frames that never reached the wire because a client was lagging
+// (buffered >= MAX_BUFFERED). Distinguishes candle/trade/price/ticker lanes
+// so a burst loss on the candle lane is visible. Console log is throttled to
+// ~1 per lane per 5s to avoid flooding. Exposed via /api/debug/ws-stats.
+const dropDiag = {
+  candle: 0,
+  trade: 0,
+  price: 0,
+  ticker: 0,
+  other: 0,
+}
+const dropDiagPrintedAt: Record<string, number> = {}
+
+export function classifyChannel(channel: string): keyof typeof dropDiag {
+  if (channel.startsWith('candle:')) return 'candle'
+  if (channel.startsWith('trade:')) return 'trade'
+  if (channel.startsWith('price:')) return 'price'
+  if (channel.startsWith('ticker')) return 'ticker'
+  return 'other'
+}
+
+function recordDroppedMsg(channel: string) {
+  const kind = classifyChannel(channel)
+  dropDiag[kind]++
+  const now = Date.now()
+  if (now - (dropDiagPrintedAt[kind] || 0) >= 5000) {
+    dropDiagPrintedAt[kind] = now
+    console.warn(`[Diag][Hub] WS frame dropped (lane=${kind}) channel=${channel} totals=${JSON.stringify(dropDiag)}`)
+  }
+}
+
+export function getHubDropDiag() {
+  return { ...dropDiag }
+}
+
+export function getChannelSubscriberCount(channel: string): number {
+  let n = 0
+  for (const client of clients.values()) {
+    if (client.subscriptions.has(channel)) n++
+  }
+  return n
+}
+
+const CLIENT_PING_INTERVAL = 30_000
+let clientPingTimer: ReturnType<typeof setInterval> | null = null
+
+let candleManager: {
+  subscribeCandle: (exchange: string, symbol: string, tf: string) => void
+  unsubscribeCandle: (exchange: string, symbol: string, tf: string) => void
+  subscribeDepth: (symbol: string) => void
+  unsubscribeDepth: (symbol: string) => void
+} | null = null
+
+export function setCandleManager(cm: typeof candleManager) {
+  candleManager = cm
+}
+
+const wsBatchBuffer = new Map<string, unknown>()
+
+// Outbound WS frames are deflate-raw compressed binary (same approach as
+// scalpboard) instead of plain JSON text — the browser decompresses via
+// DecompressionStream('deflate-raw'). Ticker snapshots shrink ~10x;
+// perMessageDeflate is disabled on the server to avoid double-compressing.
+//
+// Small frames (ticker deltas, candle/trade/price updates) go out as plain
+// JSON text instead: DecompressionStream is async, so compressing a 1-3KB
+// delta costs more latency than it saves — the client parses text frames
+// synchronously (no decompression, no extra microtask chain behind big
+// frames). Only frames above PLAIN_FRAME_MAX_BYTES get deflated.
+const PLAIN_FRAME_MAX_BYTES = 4096
+
+export function encodePayload(data: unknown): Buffer | string {
+  const json = JSON.stringify(data)
+  if (json.length <= PLAIN_FRAME_MAX_BYTES) return json
+  return deflateRawSync(json)
+}
+
+// --- Ticker snapshot frame cache ------------------------------------------
+// The full ~1200-ticker snapshot is the largest regular outbound frame
+// (hundreds of KB as JSON). Two hot paths kept compressing it synchronously:
+// every SNAPSHOT_INTERVAL broadcast and every new client connection (initial
+// tickers) — deflateRawSync at that size froze the event loop for tens of
+// milliseconds, stalling every exchange parser and coalescing-lane timer
+// behind it (the periodic "chart hiccup every few seconds"). The frame is
+// now built ONCE per snapshot with async zlib on the threadpool, cached, and
+// reused for new connections within SNAPSHOT_FRAME_TTL_MS. Deltas (small,
+// plain JSON) stay on the sync path.
+interface TickerSnapshotCache {
+  frame: Buffer | string
+  ts: number
+}
+let tickerSnapshotCache: TickerSnapshotCache | null = null
+const SNAPSHOT_FRAME_TTL_MS = 5000
+
+function encodeTickerSnapshot(data: UnifiedTicker[], ts?: number): Promise<Buffer | string> {
+  const payload: Record<string, unknown> = { type: 'ticker', data, snapshot: true }
+  if (ts !== undefined) payload.ts = ts
+  const json = JSON.stringify(payload)
+  if (json.length <= PLAIN_FRAME_MAX_BYTES) return Promise.resolve(json)
+  return new Promise((resolve, reject) => {
+    deflateRaw(Buffer.from(json), (err, buf) => (err ? reject(err) : resolve(buf)))
+  })
+}
+
+/** Fan out one already-encoded ticker snapshot: the raw frame to global
+ *  subscribers, per-signature filtered re-encodes for filtered ones. */
+function deliverTickerSnapshot(frame: Buffer | string, source: UnifiedTicker[], ts: number | undefined): void {
+  const sigCache = new Map<string, Buffer | string>()
+  for (const client of clients.values()) {
+    if (client.ws.readyState !== WebSocket.OPEN) continue
+    if (client.buffered >= MAX_BUFFERED) {
+      recordDroppedMsg('ticker')
+      handleBackpressure(client)
+      continue
+    }
+    if (client.tickerSymbols.size === 0) {
+      client.ws.send(frame, (err) => { if (err) client.buffered++ })
+      continue
+    }
+    const sig = client.tickerSig
+    let cached = sigCache.get(sig)
+    if (cached === undefined) {
+      const filtered = source.filter(t => client.tickerSymbols.has(t.symbol))
+      if (filtered.length > 0) {
+        cached = encodePayload({ type: 'ticker', data: filtered, snapshot: true, ts })
+        sigCache.set(sig, cached)
+      }
+    }
+    if (cached) client.ws.send(cached, (err) => { if (err) client.buffered++ })
+  }
+}
+
+function handleBackpressure(client: Client): boolean {
+  client.totalDropped++
+  wsDroppedTotal.inc()
+  if (client.buffered >= BACKPRESSURE_HARD_LIMIT) {
+    console.warn(`[Hub] Client dropped (backpressure), buffered=${client.buffered}, totalDropped=${client.totalDropped}`)
+    wsClientKilledTotal.inc()
+    client.ws.close(1008, 'backpressure')
+    cleanupClient(client)
+    clients.delete(client.ws)
+    return true // removed
+  }
+  if (Date.now() - client.lastBackpressureNotify > BACKPRESSURE_NOTIFY_INTERVAL) {
+    if (client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(encodePayload({ type: 'backpressure', dropped: true }))
+    }
+    client.lastBackpressureNotify = Date.now()
+  }
+  return false // still connected
+}
+
+function flushBatchBuffer() {
+  if (wsBatchBuffer.size === 0) return
+  const endTimer = wsBatchFlushLatency.startTimer()
+  try {
+    for (const [channel, data] of wsBatchBuffer) {
+const msg: WsMessage = { type: channel, channel, data }
+      let raw: Buffer | string | null = null
+      for (const client of clients.values()) {
+        if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
+          if (client.buffered >= MAX_BUFFERED) {
+            recordDroppedMsg(channel)
+            handleBackpressure(client)
+            continue
+          }
+          if (raw === null) raw = encodePayload(msg)
+          client.ws.send(raw, (err) => { if (err) client.buffered++ })
+        }
+      }
+    }
+    wsBatchBuffer.clear()
+  } finally {
+    endTimer()
+  }
+}
+
+// Channel batches (depth/trades) flush every WS_BATCH_INTERVAL_MS — the
+// immediate per-symbol channels (candles, trades for subscribed charts) are
+// not affected by this timer.
+const WS_BATCH_INTERVAL_MS = parseInt(process.env.WS_BATCH_INTERVAL_MS || '40', 10)
+let batchTimer: ReturnType<typeof setInterval> | null = setInterval(flushBatchBuffer, WS_BATCH_INTERVAL_MS)
+
+export function stopWsHub() {
+  if (batchTimer) { clearInterval(batchTimer); batchTimer = null }
+  if (clientPingTimer) { clearInterval(clientPingTimer); clientPingTimer = null }
+}
+
+function parseCandleChannel(channel: string): { exchange: string; symbol: string; tf: string } | null {
+  const match = channel.match(/^candle:([^:]+):([^:]+):(.+)$/)
+  if (!match) return null
+  return { exchange: match[1], symbol: match[2], tf: match[3] }
+}
+
+function parseDepthChannel(channel: string): string | null {
+  const match = channel.match(/^depth:(.+)$/)
+  if (!match) return null
+  return match[1]
+}
+
+// 300 candles matches the grid's initial load (GRID_CANDLE_LIMIT on the
+// client), so the first screen can render entirely from this push without
+// falling back to REST. Compact tuples keep the payload small (+ ws
+// perMessageDeflate is enabled).
+const INITIAL_CANDLES_LIMIT = 300
+
+function buildInitialCandlesData(): Record<string, CompactCandle[]> {
+  let topSymbols = getTopCachedSymbols(INITIAL_CANDLES_TF, 9)
+  if (topSymbols.length < 9) {
+    const tickers = getTickers()
+    const tickerTop = tickers
+      .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+      .slice(0, 9)
+      .map(t => t.symbol)
+    const combined = [...topSymbols]
+    for (const s of tickerTop) {
+      if (!combined.includes(s) && combined.length < 9) combined.push(s)
+    }
+    topSymbols = combined
+  }
+
+  const result: Record<string, CompactCandle[]> = {}
+  for (const symbol of topSymbols) {
+    const exchange = getTicker(symbol)?.exchange
+    const cached = getCachedCandles(symbol, INITIAL_CANDLES_TF, exchange)
+    if (cached && cached.length > 0) {
+      // Key with exchange so it matches the client cache's
+      // `${exchange}:${symbol}:${tf}` lookup (storeBulk). Entries without a
+      // known exchange are skipped — the client could never read them back.
+      const ex = exchange || cached[0]?.exchange
+      if (!ex) continue
+      const payloadKey = `${ex}:${symbol}:${INITIAL_CANDLES_TF}`
+      result[payloadKey] = compactCandles(cached.slice(-INITIAL_CANDLES_LIMIT))
+    }
+  }
+  return result
+}
+
+function cleanupClient(client: Client) {
+  if (candleManager) {
+    for (const channel of client.subscriptions) {
+      const candleInfo = parseCandleChannel(channel)
+      if (candleInfo) candleManager.unsubscribeCandle(candleInfo.exchange, candleInfo.symbol, candleInfo.tf)
+      const depthSymbol = parseDepthChannel(channel)
+      if (depthSymbol) candleManager.unsubscribeDepth(depthSymbol)
+    }
+  }
+}
+
+export function setupWsHub(wss: WebSocketServer) {
+  wss.on('connection', (ws, req) => {
+    let user: JwtPayload | null = null
+
+    const url = new URL(req.url || '', `http://${req.headers.host}`)
+    let token = url.searchParams.get('token')
+    // Fallback: read token from cookie (for cookie-based auth)
+    if (!token && req.headers.cookie) {
+      const match = req.headers.cookie.match(/(?:^|;\s*)token=([^;]+)/)
+      if (match) token = match[1]
+    }
+    const client: Client = {
+      ws, user,
+      subscriptions: new Set(),
+      tickerSymbols: new Set(),
+      tickerSig: '',
+      alive: true,
+      buffered: 0,
+      lastBackpressureNotify: 0,
+      totalDropped: 0,
+    }
+    clients.set(ws, client)
+
+    if (token) {
+      // Token must belong to a Telegram-verified user — unverified accounts
+      // are locked out of the app entirely.
+      verifyTokenWithTelegram(token).then(verified => {
+        if (verified) {
+          client.user = verified
+        } else {
+          try {
+            ws.send(encodePayload({ type: 'auth-error', error: 'TELEGRAM_NOT_VERIFIED' }))
+            ws.close(4403, 'Telegram not verified')
+          } catch { /* socket already gone */ }
+        }
+      })
+    }
+
+    ws.on('pong', () => { client.alive = true; client.buffered = 0 })
+
+    try {
+      const initialCandles = buildInitialCandlesData()
+      if (Object.keys(initialCandles).length > 0) {
+        ws.send(encodePayload({ type: 'initial-candles', format: 'compact', data: initialCandles }))
+      }
+    } catch (err) {
+      console.warn('[Hub] Failed to send initial-candles', err)
+    }
+
+    try {
+      const tickers = getAllTickers()
+      if (tickers.length > 0) {
+        // Reuse the cached snapshot frame when fresh — previously every
+        // connection re-serialized + re-compressed the full ticker array on
+        // the event loop.
+        const cached = tickerSnapshotCache && Date.now() - tickerSnapshotCache.ts < SNAPSHOT_FRAME_TTL_MS
+          ? tickerSnapshotCache.frame
+          : null
+        if (cached && ws.readyState === WebSocket.OPEN) {
+          ws.send(cached)
+        } else {
+          encodeTickerSnapshot(tickers)
+            .then(frame => {
+              tickerSnapshotCache = { frame, ts: Date.now() }
+              if (ws.readyState === WebSocket.OPEN) ws.send(frame)
+            })
+            .catch(() => {
+              // Deflate failure: re-fetch (the array may be a reused buffer)
+              // and fall back to the synchronous encode so the client still
+              // gets its initial tickers.
+              try {
+                const fresh = getAllTickers()
+                if (ws.readyState === WebSocket.OPEN) ws.send(encodePayload({ type: 'ticker', data: fresh }))
+              } catch { /* socket gone */ }
+            })
+        }
+        console.log(`[Hub] Sent initial tickers to new client: ${tickers.length} tickers${cached ? ' (cached frame)' : ''}`)
+      }
+    } catch (err) {
+      console.warn('[Hub] Failed to send initial-tickers', err)
+    }
+
+    ws.on('message', (raw) => {
+      try {
+        const parsed = JSON.parse(raw.toString())
+        const result = inboundWsSchema.safeParse(parsed)
+        if (!result.success) {
+          console.warn('[Hub] Rejected malformed WS message:', result.error.message)
+          return
+        }
+        const msg = result.data
+
+        // Support auth via first WS message (avoids token in URL which gets logged)
+        if (msg.type === 'auth' && msg.token && !client.user) {
+          verifyTokenWithTelegram(msg.token).then(verified => {
+            if (verified) {
+              client.user = verified
+            } else {
+              try {
+                ws.send(encodePayload({ type: 'auth-error', error: 'TELEGRAM_NOT_VERIFIED' }))
+                ws.close(4403, 'Telegram not verified')
+              } catch { /* socket already gone */ }
+            }
+          })
+          return
+        }
+
+        if (msg.type === 'subscribe' && msg.channel) {
+          const isNew = !client.subscriptions.has(msg.channel)
+          client.subscriptions.add(msg.channel)
+
+          if (msg.channel.startsWith('ticker:')) {
+            const symbol = msg.channel.slice(7)
+            client.tickerSymbols.add(symbol)
+            client.tickerSig = [...client.tickerSymbols].sort().join(',')
+          }
+
+          if (isNew) {
+            const candleInfo = parseCandleChannel(msg.channel)
+            if (candleInfo && candleManager) {
+              candleManager.subscribeCandle(candleInfo.exchange, candleInfo.symbol, candleInfo.tf)
+            }
+
+            const depthSymbol = parseDepthChannel(msg.channel)
+            if (depthSymbol && candleManager) {
+              candleManager.subscribeDepth(depthSymbol)
+            }
+          }
+        } else if (msg.type === 'unsubscribe' && msg.channel) {
+          client.subscriptions.delete(msg.channel)
+
+          if (msg.channel.startsWith('ticker:')) {
+            client.tickerSymbols.delete(msg.channel.slice(7))
+            client.tickerSig = [...client.tickerSymbols].sort().join(',')
+          }
+
+          const candleInfo = parseCandleChannel(msg.channel)
+          if (candleInfo && candleManager) {
+            candleManager.unsubscribeCandle(candleInfo.exchange, candleInfo.symbol, candleInfo.tf)
+          }
+
+          const depthSymbol = parseDepthChannel(msg.channel)
+          if (depthSymbol && candleManager) {
+            candleManager.unsubscribeDepth(depthSymbol)
+          }
+        }
+      } catch (e) {
+        console.warn('[Hub] message handler error:', e instanceof Error ? e.message : e)
+      }
+    })
+
+    ws.on('close', () => {
+      cleanupClient(client)
+      clients.delete(ws)
+    })
+  })
+
+  if (!clientPingTimer) {
+    clientPingTimer = setInterval(() => {
+      for (const [ws, client] of clients) {
+        if (!client.alive) {
+          ws.terminate()
+          cleanupClient(client)
+          clients.delete(ws)
+          continue
+        }
+        client.alive = false
+        ws.ping()
+      }
+    }, CLIENT_PING_INTERVAL)
+  }
+}
+
+export function broadcast(msg: WsMessage) {
+  const endTimer = wsBroadcastLatency.startTimer()
+  try {
+    const channel = msg.channel || msg.type
+    const isGlobal = msg.type === 'alert' || msg.type === 'listing'
+
+    if (msg.type === 'ticker') {
+      const tickers = msg.data as UnifiedTicker[]
+      const fullTickers = msg.full as UnifiedTicker[] | undefined
+      const isSnapshot = !!(msg as { snapshot?: boolean }).snapshot
+
+      // Global subscribers get compact DELTA frames every broadcast and a
+      // full SNAPSHOT every SNAPSHOT_INTERVAL (the aggregator stamps
+      // msg.snapshot). The full array of all exchanges is ~1200 tickers;
+      // shipping it at 25Hz would drown clients in bytes even deflated.
+      // Clients merge deltas in place and replace state on snapshots.
+      // Per-client filtered subscribers get the same delta/snapshot semantics.
+      const globalPayload = isSnapshot ? (fullTickers || tickers) : tickers
+
+      if (isSnapshot) {
+        if (globalPayload.length === 0) return
+        // The full snapshot is the one frame big enough that SYNCHRONOUS
+        // deflate visibly stalled the event loop (every 5s + once per new
+        // client). Compress it asynchronously on the libuv threadpool, cache
+        // the frame, and fan out when ready. Deltas keep flowing while the
+        // frame compresses; a snapshot landing a few ms late at worst
+        // reverts milliseconds of deltas until the next delta frame (≤40ms)
+        // — self-healing by design.
+        encodeTickerSnapshot(globalPayload, msg.ts)
+          .then(frame => {
+            tickerSnapshotCache = { frame, ts: Date.now() }
+            deliverTickerSnapshot(frame, globalPayload, msg.ts)
+          })
+          .catch(() => {
+            // Threadpool/deflate failure — fall back to the sync encode so a
+            // snapshot is never silently lost.
+            deliverTickerSnapshot(
+              encodePayload({ type: 'ticker', data: globalPayload, snapshot: true, ts: msg.ts }),
+              globalPayload,
+              msg.ts,
+            )
+          })
+        return
+      }
+
+      const filterSource = tickers
+      const sigCache = new Map<string, Buffer | string>()
+      let deltaRaw: Buffer | string | null = null
+
+      for (const client of clients.values()) {
+        if (client.ws.readyState !== WebSocket.OPEN) continue
+        if (client.buffered >= MAX_BUFFERED) {
+          recordDroppedMsg(msg.channel || 'ticker')
+          handleBackpressure(client)
+          continue
+        }
+
+        if (client.tickerSymbols.size === 0) {
+          // Subscribed to all tickers
+          if (!globalPayload || globalPayload.length === 0) continue
+          if (deltaRaw === null) {
+            deltaRaw = encodePayload({ type: 'ticker', data: globalPayload, delta: true, ts: msg.ts })
+          }
+          client.ws.send(deltaRaw, (err) => { if (err) client.buffered++ })
+        } else {
+          // Per-client filtered tickers — filter from the frame, cache by
+          // the client's precomputed signature string.
+          const sig = client.tickerSig
+          let cached = sigCache.get(sig)
+          if (cached === undefined) {
+            const filtered = filterSource.filter(t => client.tickerSymbols.has(t.symbol))
+            if (filtered.length > 0) {
+              cached = encodePayload({ type: 'ticker', data: filtered, delta: true, ts: msg.ts })
+              sigCache.set(sig, cached)
+            }
+          }
+          if (cached) {
+            client.ws.send(cached, (err) => { if (err) client.buffered++ })
+          }
+        }
+      }
+      return
+    }
+
+    const raw = encodePayload(msg)
+    for (const client of clients.values()) {
+      if (client.ws.readyState !== WebSocket.OPEN) continue
+      if (client.buffered >= MAX_BUFFERED) {
+        recordDroppedMsg(channel)
+        handleBackpressure(client)
+        continue
+      }
+      if (isGlobal || client.subscriptions.has(channel)) {
+        client.ws.send(raw, (err) => { if (err) client.buffered++ })
+      }
+    }
+  } finally {
+    endTimer()
+  }
+}
+
+export function broadcastToChannel(channel: string, data: unknown, immediate = false) {
+  if (immediate) {
+    const msg: WsMessage = { type: channel, channel, data }
+    const raw = encodePayload(msg)
+    for (const client of clients.values()) {
+      if (!client.subscriptions.has(channel) || client.ws.readyState !== WebSocket.OPEN) continue
+      if (client.buffered >= MAX_BUFFERED) {
+        recordDroppedMsg(channel)
+        handleBackpressure(client)
+        continue
+      }
+      client.ws.send(raw, (err) => { if (err) client.buffered++ })
+    }
+  } else {
+    wsBatchBuffer.set(channel, data)
+  }
+}
+
+export function startRedisListener() {
+  try {
+    const sub = getRedisSub()
+
+    sub.on('message', (channel, message) => {
+      try {
+        if (channel === 'tickers') {
+          // Ingestion nodes publish the full array; new payloads also carry
+          // the delta + snapshot flag so broadcast nodes forward the same
+          // compact frames their all-in-one cousins send. Plain arrays (old
+          // payloads) are treated as a full snapshot.
+          const parsed = JSON.parse(message)
+          const isObject = !Array.isArray(parsed)
+          const tickers = (isObject ? parsed.full : parsed) as UnifiedTicker[]
+          const delta = (isObject && Array.isArray(parsed.delta) ? parsed.delta : tickers) as UnifiedTicker[]
+          const snapshot = isObject ? !!parsed.snapshot : true
+          setTickersFromRedis(tickers)
+          broadcast({ type: 'ticker', data: delta, full: tickers, snapshot })
+        } else if (channel === 'candles') {
+          const candle = JSON.parse(message) as UnifiedCandle
+          // Keep the local cache warm so initial-candles pushes and REST
+          // fallbacks work even though this node never touches the exchanges.
+          updateCachedCandle(candle)
+          broadcastToChannel(`candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`, candle, true)
+        } else if (channel === 'depth') {
+          // Intentionally not relayed to a WS channel: no client subscribes to
+          // `depth:*` (density is what they consume). Kept as an explicit
+          // no-op branch so the Redis payload isn't mistaken for unhandled.
+        } else if (channel === 'density') {
+          // Global density (orderbook walls) snapshot — broadcast nodes relay
+          // it to every client subscribed to the 'density' channel.
+          broadcastToChannel('density', JSON.parse(message), true)
+        } else if (channel === 'trades') {
+          const trade = JSON.parse(message)
+          broadcastToChannel(`trade:${trade.exchange}:${trade.symbol}`, trade)
+        } else if (channel === 'alerts') {
+          broadcast({ type: 'alert', data: JSON.parse(message) })
+        } else if (channel === 'price') {
+          // Fast-lane price updates (bookTicker mid for focused symbols) —
+          // forwarded immediately, same as candle/trade channels.
+          const p = JSON.parse(message)
+          if (p?.symbol && typeof p.price === 'number' && isFinite(p.price)) {
+            broadcastToChannel(`price:${p.symbol}`, p, true)
+          }
+        }
+      } catch (e) {
+        console.warn('[Hub] Redis message parse error:', e instanceof Error ? e.message : e)
+      }
+    })
+
+    console.log('[Hub] Redis listener started')
+  } catch (e) {
+    console.warn('[Hub] Redis unavailable, running in single-process mode')
+  }
+}
+
+// On an ingestion-only node there are no WS clients, so client candle/depth
+// subscriptions arrive from broadcast nodes as Redis 'sub-req' messages.
+// Drive the local candle manager, which subscribes the exchange streams and
+// publishes the resulting data back to Redis for the broadcast nodes.
+export function startIngestionRedisListener() {
+  try {
+    const sub = getRedisSub()
+    sub.on('message', (channel, message) => {
+      if (channel !== 'sub-req') return
+      try {
+        const req = JSON.parse(message)
+        if (req?.type === 'subscribe' && candleManager) {
+          candleManager.subscribeCandle(req.exchange, req.symbol, req.tf)
+        } else if (req?.type === 'unsubscribe' && candleManager) {
+          candleManager.unsubscribeCandle(req.exchange, req.symbol, req.tf)
+        } else if (req?.type === 'depth-sub' && candleManager) {
+          candleManager.subscribeDepth(req.symbol)
+        } else if (req?.type === 'depth-unsub' && candleManager) {
+          candleManager.unsubscribeDepth(req.symbol)
+        }
+      } catch (e) {
+        console.warn('[Hub] sub-req parse error:', e instanceof Error ? e.message : e)
+      }
+    })
+    console.log('[Hub] Ingestion Redis listener started (sub-req)')
+  } catch (e) {
+    console.warn('[Hub] Redis unavailable, ingestion sub-req listener disabled')
+  }
+}
+
+export function getHubStats() {
+  let totalClients = 0
+  let totalSubscriptions = 0
+  let maxBuffered = 0
+  let totalDropped = 0
+  let maxBufferedBytes = 0
+  for (const c of clients.values()) {
+    totalClients++
+    totalSubscriptions += c.subscriptions.size
+    if (c.buffered > maxBuffered) maxBuffered = c.buffered
+    totalDropped += c.totalDropped
+    try {
+      const bytes = (c.ws as unknown as { bufferedAmount?: number }).bufferedAmount ?? 0
+      if (bytes > maxBufferedBytes) maxBufferedBytes = bytes
+    } catch {}
+  }
+  return { totalClients, totalSubscriptions, maxBuffered, totalDropped, maxBufferedBytes, dropDiag }
+}
+
+let lastDroppedSnapshot = 0
+
+export function refreshMetrics() {
+  const stats = getHubStats()
+  wsClientsGauge.set(stats.totalClients)
+  wsSubscriptionsGauge.set(stats.totalSubscriptions)
+  wsBufferedMaxGauge.set(stats.maxBuffered)
+  wsBufferedBytesMaxGauge.set(stats.maxBufferedBytes)
+  // Delta for the counter that was incremented per-event in handleBackpressure
+  // totalDropped in stats includes historical drops from dead clients,
+  // but the wsDroppedTotal counter already tracks live increments.
+  lastDroppedSnapshot = stats.totalDropped
+}

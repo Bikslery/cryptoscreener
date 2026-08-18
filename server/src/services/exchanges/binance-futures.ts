@@ -1,0 +1,957 @@
+import WebSocket from 'ws'
+import type { Agent } from 'http'
+import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } from './types.js'
+import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
+import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
+import { fetchWithTimeout } from '../../utils/fetch.js'
+import { BinanceRateLimiter } from './rate-limiter.js'
+import { RateLimitError, ExchangeRequestError } from './errors.js'
+import { WsStreamPool } from './ws-pool.js'
+import { BinanceDepthBook, type DiffDepthEvent } from './binance-depth-book.js'
+import { withDepthSnapshotSlot } from './depth-snapshot-limiter.js'
+import { getWsAgent, getFetchDispatcher } from './proxy.js'
+import { FUTURES_WS_BASE } from './endpoints.js'
+import type { ProxyAgent } from 'undici'
+
+const WS_SILENCE_TIMEOUT = 30_000
+const MAX_KLINES_LIMIT = 1000
+
+// --- DIAGNOSTICS: candle REST-fallback --------------------------------
+// Counts fallback lifecycle + poll outcomes. A rising `bucketMisses` means
+// the fallback is dropping whole periods (2-candle poll span > 2 buckets) —
+// a direct source of "missing candles". Exposed via /api/debug/candle-stats.
+export interface CandleFallbackDiagStats {
+  starts: number
+  stops: number
+  polls: number
+  skippedThrottled: number
+  fetchFailures: number
+  symbolsPolled: number
+  bucketMisses: number
+  periodDrifts: number
+}
+
+const candleFallbackDiag = {
+  starts: 0,
+  stops: 0,
+  polls: 0,
+  skippedThrottled: 0,
+  fetchFailures: 0,
+  symbolsPolled: 0,
+  bucketMisses: 0,
+  periodDrifts: 0,
+}
+
+export function getCandleFallbackDiagStats(): CandleFallbackDiagStats {
+  return { ...candleFallbackDiag }
+}
+
+const TF_MAP: Record<string, string> = {
+  '1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '4h', '1d': '1d', '1w': '1w',
+}
+
+const TF_SECONDS: Record<string, number> = {
+  '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
+}
+
+const CANDLE_WS_SILENCE_TIMEOUT = 10_000
+const CANDLE_POLL_INTERVAL = 1_500
+
+const STABLECOIN_BASES = new Set([
+  'USDC', 'USD1', 'FDUSD', 'TUSD', 'DAI', 'BUSD', 'USDP', 'EUR', 'AEUR', 'EURI', 'USDSB', 'PYUSD',
+])
+
+interface BinanceTickerRaw {
+  // WS miniTicker format
+  s?: string
+  c?: string
+  o?: string
+  h?: string
+  l?: string
+  v?: string
+  n?: string
+  q?: string
+  // REST 24hr format
+  symbol?: string
+  lastPrice?: string
+  openPrice?: string
+  highPrice?: string
+  lowPrice?: string
+  volume?: string
+  count?: number
+  quoteVolume?: string
+}
+
+interface BinanceKline {
+  s?: string
+  i?: string
+  t?: number
+  o?: string
+  h?: string
+  l?: string
+  c?: string
+  v?: string
+  x?: boolean
+}
+
+interface BinanceCandleMsg {
+  k?: BinanceKline
+  data?: { k?: BinanceKline }
+}
+
+type BinanceLevel = [string, string]
+
+interface BinanceDepthDiffRaw {
+  data?: BinanceDepthDiffRaw
+  s?: string
+  symbol?: string
+  U?: number
+  u?: number
+  b?: BinanceLevel[]
+  a?: BinanceLevel[]
+}
+
+// Resolved centrally (see endpoints.ts): this lane and the aggTrade lane MUST
+// agree on the host, otherwise a regional block silently downgrades only one
+// of them to REST polling.
+const WS_BASE = FUTURES_WS_BASE
+const TICKER_WS_URL = `${WS_BASE}/ws/!miniTicker@arr`
+const TICKER_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/24hr'
+const TICKER_PRICE_REST_URL = 'https://fapi.binance.com/fapi/v1/ticker/price'
+const TICKER_PRICE_POLL_INTERVAL = 1_000
+const TICKER_STATS_POLL_INTERVAL = 60_000
+const TICKER_WS_PING_INTERVAL = 20_000
+const TICKER_WS_RECONNECT_BASE = 1000
+const TICKER_WS_RECONNECT_MAX = 60_000
+const STATS_FIRST_RETRY_MS = 2_000
+// Depth snapshots are emitted to subscribers at most this often per symbol
+// (the book is cumulative, latest-wins loses nothing). Env-tunable so the
+// density map freshness can be raised without a rebuild.
+const DEPTH_EMIT_INTERVAL_MS = parseInt(process.env.DEPTH_EMIT_INTERVAL_MS || '200', 10)
+
+export class BinanceFuturesAdapter implements ExchangeAdapter {
+  name = 'Binance Futures'
+  type: 'spot' | 'futures' = 'futures'
+  exchange: Exchange = 'binance-futures'
+
+  private tickerWs: WebSocket | null = null
+  private tickerWsPingTimer: ReturnType<typeof setInterval> | null = null
+  private tickerWsReconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private tickerWsReconnectDelay = TICKER_WS_RECONNECT_BASE
+  private tickerWsIntentionalClose = false
+  private tickerWsSilenceTimer: ReturnType<typeof setTimeout> | null = null
+  private tickerWsReceivedData = false
+  private statsTimer: ReturnType<typeof setInterval> | null = null
+  private statsFirstRetryTimer: ReturnType<typeof setTimeout> | null = null
+  private statsPollStarting = false
+  private priceTimer: ReturnType<typeof setInterval> | null = null
+  private usingRestFallback = false
+  /** True after the first successful REST 24hr stats poll — the authoritative
+   *  source for the 24h volume fields (the WS miniTicker can report wildly
+   *  inflated volumes, so they are only trusted once REST has confirmed). */
+  private hasRestStats = false
+  private lastFullTickers = new Map<string, UnifiedTicker>()
+  private candleSubs = new Map<string, CandleCallback>()
+  private depthSubs = new Map<string, Set<DepthCallback>>()
+  private depthBooks = new Map<string, BinanceDepthBook>()
+  private depthStreams = new Set<string>()
+  private depthBookLoading = new Set<string>()
+  /** per-symbol reseed backoff (ms); doubles on each failed retry, caps at 2 min */
+  private depthRetryDelay = new Map<string, number>()
+  private lastDepthEmitAt = new Map<string, number>()
+  private tickerCbs: TickerCallback[] = []
+  private candleCbs: CandleCallback[] = []
+  private depthCbs: DepthCallback[] = []
+  private candleMsgCount = 0
+  private lastCandleMsgAt = 0
+  private candleFallbackActive = false
+  private candleFallbackTimer: ReturnType<typeof setInterval> | null = null
+  private candleSilenceTimer: ReturnType<typeof setInterval> | null = null
+  private candleSubInfo = new Map<string, { symbol: string, tf: string }>()
+  private precisionMap = new Map<string, number>()
+  private cryptoSymbols = new Set<string>()
+  private exchangeInfoLoaded = false
+  private rateLimiter = new BinanceRateLimiter('futures')
+  private wsAgent: Agent | undefined
+  private fetchDispatcher: ProxyAgent | undefined
+
+  private candlePool: WsStreamPool
+  private depthPool: WsStreamPool
+  private bookTickerPool: WsStreamPool
+
+  private bookTickerSubs = new Set<string>()
+  private bookTickerCbs: Array<(symbol: string, midPrice: number) => void> = []
+
+  constructor() {
+    this.wsAgent = getWsAgent()
+    this.fetchDispatcher = getFetchDispatcher()
+
+    this.candlePool = new WsStreamPool(
+      `${WS_BASE}/stream`,
+      'Binance Futures Candle',
+      (msg) => {
+        try {
+          const candle = this.parseCandle(msg)
+          if (candle) {
+            this.candleMsgCount++
+            this.lastCandleMsgAt = Date.now()
+            if (this.candleFallbackActive) {
+              this.stopCandleFallback()
+              console.log(`[${this.name}] Candle WS recovered → stop REST poll`)
+            }
+            if (this.candleMsgCount <= 3 || this.candleMsgCount % 200 === 0) {
+              console.log(`[BinanceFutures] kline #${this.candleMsgCount}: ${candle.symbol} ${candle.timeframe} close=${candle.close}`)
+            }
+            for (const cb of this.candleCbs) cb(candle)
+            const subCb = this.candleSubs.get(msg.stream)
+            if (subCb) subCb(candle)
+          }
+        } catch (e) {
+          console.error('[Binance Futures] Candle parse error:', e)
+        }
+      },
+      undefined,
+      true
+    )
+
+    this.depthPool = new WsStreamPool(
+      `${WS_BASE}/stream`,
+      'Binance Futures Depth',
+      (msg) => {
+        try {
+          const depth = this.handleDepthMsg(msg)
+          if (depth) {
+            for (const cb of this.depthCbs) cb(depth)
+            const subs = this.depthSubs.get(depth.symbol)
+            if (subs) for (const cb of subs) cb(depth)
+          }
+        } catch {}
+      },
+      undefined,
+      true  // supportsIncrementalSub
+    )
+
+    // Best bid/ask feed. `!miniTicker@arr` is a batched snapshot pushed only
+    // ~1x/sec; bookTicker fires on EVERY book change (orders placed/cancelled
+    // at the top level) — for liquid pairs that's dozens of updates/sec, which
+    // is what makes the price feel truly "live". Only top-N symbols are
+    // subscribed (per-symbol @bookTicker streams) because the all-market
+    // !bookTicker@arr stream is very heavy.
+    this.bookTickerPool = new WsStreamPool(
+      `${WS_BASE}/stream`,
+      'Binance Futures BookTicker',
+      (msg) => {
+        try {
+          const d = msg.data || msg
+          const symbol = d.s
+          if (!symbol || d.b === undefined || d.a === undefined) return
+          const bid = parseFloat(d.b)
+          const ask = parseFloat(d.a)
+          if (!isFinite(bid) || !isFinite(ask) || bid <= 0 || ask <= 0) return
+          const mid = (bid + ask) / 2
+          for (const cb of this.bookTickerCbs) cb(symbol.toUpperCase(), mid)
+        } catch {}
+      },
+      undefined,
+      true  // supportsIncrementalSub
+    )
+  }
+
+  onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
+  onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
+  onDepth(cb: DepthCallback) { this.depthCbs.push(cb) }
+  onBookTicker(cb: (symbol: string, midPrice: number) => void) { this.bookTickerCbs.push(cb) }
+  getRateLimiter() { return this.rateLimiter }
+
+  subscribeBookTicker(symbol: string) {
+    const stream = `${symbol.toLowerCase()}@bookTicker`
+    if (this.bookTickerSubs.has(stream)) return
+    this.bookTickerSubs.add(stream)
+    this.bookTickerPool.addStream(stream)
+  }
+
+  unsubscribeBookTicker(symbol: string) {
+    const stream = `${symbol.toLowerCase()}@bookTicker`
+    if (!this.bookTickerSubs.delete(stream)) return
+    this.bookTickerPool.removeStream(stream)
+  }
+
+  connect() {
+    // The ticker WS is safe to open BEFORE exchangeInfo lands (WS messages
+    // are filtered by cryptoSymbols only once exchangeInfoLoaded). The old
+    // strictly-sequential probe → exchangeInfo → WS chain cost two extra
+    // round-trips (~1-2s) before the first ticker byte arrived.
+    this.connectTickerWs()
+    this.rateLimiter.probeWeight(this.fetchDispatcher)
+      .then(() => this.fetchExchangeInfo())
+      .catch(() => {})
+    console.log(`[${this.name}] Connected (WebSocket !miniTicker@arr)`)
+  }
+
+  private async fetchExchangeInfo() {
+    await this.rateLimiter.waitIfThrottled()
+    try {
+      const res = await fetchWithTimeout('https://fapi.binance.com/fapi/v1/exchangeInfo', 10000, this.fetchDispatcher)
+      this.rateLimiter.updateFromHeaders(res.headers)
+      if (res.status === 429) { this.rateLimiter.handle429(res.headers); return }
+      if (res.status === 418) { this.rateLimiter.handle418(res.headers); return }
+      if (!res.ok) { this.rateLimiter.recordError(); return }
+      const data = await res.json()
+      if (!data.symbols || !Array.isArray(data.symbols)) { this.rateLimiter.recordError(); return }
+      let filtered = 0
+      for (const s of data.symbols) {
+        if (!s.symbol.endsWith('USDT')) continue
+        if (s.underlyingType === 'INDEX') { filtered++; continue }
+        if (s.contractType !== 'PERPETUAL') { filtered++; continue }
+        // Skip contracts that are NOT actively trading (SETTLING/delisting,
+        // PAUSED, etc.). The WS !miniTicker@arr still broadcasts their stale
+        // stats (e.g. FXSUSDT showed a fake 34B quote volume), which pushed
+        // them into the top of the screener with an empty flat-line chart.
+        if (s.status && s.status !== 'TRADING') { filtered++; continue }
+        if (STABLECOIN_BASES.has(s.symbol.slice(0, -4))) { filtered++; continue }
+        this.cryptoSymbols.add(s.symbol)
+        for (const f of s.filters || []) {
+          if (f.filterType === 'PRICE_FILTER' && f.tickSize) {
+            this.precisionMap.set(s.symbol, precisionFromTickSize(f.tickSize))
+            break
+          }
+        }
+      }
+      this.exchangeInfoLoaded = true
+      this.rateLimiter.recordSuccess()
+      console.log(`[${this.name}] Loaded ${this.cryptoSymbols.size} crypto symbols (filtered ${filtered} index/non-perp entries)`)
+    } catch (e) {
+      this.rateLimiter.recordError()
+      console.error(`[${this.name}] Failed to fetch exchangeInfo:`, e)
+    }
+  }
+
+  private wsOpts(): WebSocket.ClientOptions | undefined {
+    return this.wsAgent ? { agent: this.wsAgent } : undefined
+  }
+
+  private connectTickerWs() {
+    this.tickerWsIntentionalClose = false
+    if (this.tickerWs && this.tickerWs.readyState !== WebSocket.CLOSED && this.tickerWs.readyState !== WebSocket.CLOSING) {
+      this.tickerWsIntentionalClose = true
+      try { this.tickerWs.close() } catch {}
+    }
+
+    console.log(`[${this.name}] Ticker WS connecting...`)
+    this.tickerWsReceivedData = false
+    this.tickerWs = new WebSocket(TICKER_WS_URL, this.wsOpts())
+
+    this.tickerWs.on('open', () => {
+      console.log(`[${this.name}] Ticker WS connected (!miniTicker@arr)`)
+      this.tickerWsReconnectDelay = TICKER_WS_RECONNECT_BASE
+      if (this.usingRestFallback) {
+        this.usingRestFallback = false
+        // Price comes back from the WS stream; the 24h STATS poll keeps
+        // running (REST is the only trustworthy volume source).
+        if (this.priceTimer) { clearInterval(this.priceTimer); this.priceTimer = null }
+        console.log(`[${this.name}] Switched from REST fallback back to WS`)
+      }
+      // Keep polling REST 24hr stats even in WS mode: the WS miniTicker's
+      // volume fields are unreliable (fstream can report inflated 24h
+      // volumes), so the REST stats are the authoritative volume source.
+      this.ensureStatsPoll()
+      this.tickerWsPingTimer = setInterval(() => {
+        if (this.tickerWs?.readyState === WebSocket.OPEN) {
+          this.tickerWs.ping()
+        }
+      }, TICKER_WS_PING_INTERVAL)
+
+      this.tickerWsSilenceTimer = setTimeout(() => {
+        if (!this.tickerWsReceivedData) {
+          console.warn(`[${this.name}] WS silent for ${WS_SILENCE_TIMEOUT / 1000}s — likely blocked in this region, switching to REST polling`)
+          this.tickerWsIntentionalClose = true
+          this.tickerWs?.close()
+          this.tickerWs = null
+          this.startRestFallback()
+        }
+      }, WS_SILENCE_TIMEOUT)
+    })
+
+    this.tickerWs.on('message', (raw) => {
+      this.tickerWsReceivedData = true
+      if (this.tickerWsSilenceTimer) { clearTimeout(this.tickerWsSilenceTimer); this.tickerWsSilenceTimer = null }
+      try {
+        const arr = JSON.parse(raw.toString())
+        if (!Array.isArray(arr)) return
+        this.processTickerArray(arr, true)
+      } catch (e) {
+        console.error(`[${this.name}] Ticker WS parse error:`, e instanceof Error ? e.message : e)
+      }
+    })
+
+    this.tickerWs.on('pong', () => {})
+
+    this.tickerWs.on('error', (err) => {
+      console.error(`[${this.name}] Ticker WS error:`, err.message || err)
+    })
+
+    this.tickerWs.on('close', () => {
+      if (this.tickerWsPingTimer) { clearInterval(this.tickerWsPingTimer); this.tickerWsPingTimer = null }
+      if (this.tickerWsSilenceTimer) { clearTimeout(this.tickerWsSilenceTimer); this.tickerWsSilenceTimer = null }
+      if (this.tickerWsIntentionalClose) {
+        this.tickerWsIntentionalClose = false
+        return
+      }
+      console.warn(`[${this.name}] Ticker WS closed unexpectedly, falling back to REST, WS reconnect in ${this.tickerWsReconnectDelay}ms`)
+      this.startRestFallback()
+      this.tickerWsReconnectTimer = setTimeout(() => {
+        this.tickerWsReconnectTimer = null
+        this.tickerWsReconnectDelay = Math.min(this.tickerWsReconnectDelay * 2, TICKER_WS_RECONNECT_MAX)
+        this.connectTickerWs()
+      }, this.tickerWsReconnectDelay)
+    })
+  }
+
+  /** Run the REST 24hr stats poll immediately and on an interval (once the
+   *  first poll SUCCEEDS). The volumes it produces are the authoritative 24h
+   *  numbers — used both in fallback mode and to guard the WS miniTicker's
+   *  volume fields. Until the first success every volume is forced to zero,
+   *  so a failed first poll must retry within seconds (not after the full
+   *  60s interval) — otherwise preload's top-symbol selection and the
+   *  bookTicker pool rank by volume=0 and pick garbage symbols. */
+  private ensureStatsPoll() {
+    if (this.statsTimer || this.statsPollStarting) return
+    this.statsPollStarting = true
+    this.pollTickerStats().then(() => {
+      this.statsPollStarting = false
+      if (this.hasRestStats) {
+        this.statsTimer = setInterval(() => this.pollTickerStats(), TICKER_STATS_POLL_INTERVAL)
+        return
+      }
+      if (this.statsFirstRetryTimer) return
+      this.statsFirstRetryTimer = setTimeout(() => {
+        this.statsFirstRetryTimer = null
+        this.ensureStatsPoll()
+      }, STATS_FIRST_RETRY_MS)
+    })
+  }
+
+  private startRestFallback() {
+    if (this.usingRestFallback) return
+    this.usingRestFallback = true
+    this.ensureStatsPoll()
+    this.pollTickerPrices()
+    this.priceTimer = setInterval(() => this.pollTickerPrices(), TICKER_PRICE_POLL_INTERVAL)
+  }
+
+  processTickerArray(arr: BinanceTickerRaw[], fromWs = false) {
+    for (const t of arr) {
+      const symbol = t.s || t.symbol
+      if (!symbol?.endsWith('USDT')) continue
+      if (this.exchangeInfoLoaded && !this.cryptoSymbols.has(symbol)) continue
+      const ticker = this.parseTicker(t)
+      if (fromWs) {
+        // WS miniTicker is a PRICE snapshot — its 24h volume fields are not
+        // trustworthy (fstream can inflate them by an order of magnitude).
+        // Keep the last REST-confirmed 24h stats; before the first REST poll
+        // lands, zero the volumes so bogus numbers never reach the screen.
+        const prev = this.lastFullTickers.get(ticker.symbol)
+        if (this.hasRestStats && prev) {
+          ticker.volume24h = prev.volume24h
+          ticker.quoteVolume24h = prev.quoteVolume24h
+          ticker.trades24h = prev.trades24h
+        } else {
+          ticker.volume24h = 0
+          ticker.quoteVolume24h = 0
+          ticker.trades24h = 0
+        }
+      }
+      // Remember the last full ticker so the fast REST price poll can merge
+      // its fresh price into the last-known 24h stats without another heavy call.
+      this.lastFullTickers.set(ticker.symbol, ticker)
+      for (const cb of this.tickerCbs) cb(ticker)
+    }
+  }
+
+  private async pollTickerStats() {
+    if (this.rateLimiter.isThrottled()) return
+    if (this.rateLimiter.isOverThreshold()) {
+      console.warn(`[${this.name}] Skipping ticker poll — weight at ${this.rateLimiter.getWeight()}/${this.rateLimiter.getLimit()}`)
+      return
+    }
+    try {
+      const res = await fetchWithTimeout(TICKER_REST_URL, 10000, this.fetchDispatcher)
+      this.rateLimiter.updateFromHeaders(res.headers)
+      if (res.status === 429) { this.rateLimiter.handle429(res.headers); return }
+      if (res.status === 418) { this.rateLimiter.handle418(res.headers); return }
+      if (!res.ok) { this.rateLimiter.recordError(); return }
+      const arr = await res.json()
+      if (!Array.isArray(arr)) {
+        console.warn(`[${this.name}] Ticker REST response not an array:`, JSON.stringify(arr).slice(0, 200))
+        this.rateLimiter.recordError()
+        return
+      }
+      this.rateLimiter.recordSuccess()
+      this.hasRestStats = true
+      this.processTickerArray(arr)
+    } catch (e) {
+      this.rateLimiter.recordError()
+      console.error(`[${this.name}] Ticker stats poll error:`, e instanceof Error ? e.message : e)
+    }
+  }
+
+  /**
+   * Fast fallback price source: /fapi/v1/ticker/price costs ~2 weight per
+   * request (vs 40 for ticker/24hr), so we can poll every second and merge the
+   * fresh price into the last-known full ticker. Keeps futures prices ~1s fresh
+   * even when the WebSocket (or the SOCKS5 proxy it needs) is down.
+   */
+  private async pollTickerPrices() {
+    if (this.rateLimiter.isThrottled()) return
+    if (this.rateLimiter.isOverThreshold()) return
+    try {
+      const res = await fetchWithTimeout(TICKER_PRICE_REST_URL, 10000, this.fetchDispatcher)
+      this.rateLimiter.updateFromHeaders(res.headers)
+      if (res.status === 429) { this.rateLimiter.handle429(res.headers); return }
+      if (res.status === 418) { this.rateLimiter.handle418(res.headers); return }
+      if (!res.ok) { this.rateLimiter.recordError(); return }
+      const arr = await res.json()
+      if (!Array.isArray(arr)) {
+        console.warn(`[${this.name}] Ticker price REST response not an array`)
+        this.rateLimiter.recordError()
+        return
+      }
+      this.rateLimiter.recordSuccess()
+      const now = Date.now()
+      let changed = 0
+      for (const p of arr) {
+        const symbol = p?.symbol
+        if (!symbol?.endsWith('USDT')) continue
+        if (this.exchangeInfoLoaded && !this.cryptoSymbols.has(symbol)) continue
+        const price = parseFloat(p.price)
+        if (!isFinite(price) || price <= 0) continue
+        const prev = this.lastFullTickers.get(symbol)
+        // No stored stats yet — the stats poll or the WS will populate them.
+        if (!prev) continue
+        if (prev.price === price) continue
+        const ticker: UnifiedTicker = {
+          ...prev,
+          price,
+          change24h: prev.openPrice24h > 0 ? ((price - prev.openPrice24h) / prev.openPrice24h) * 100 : prev.change24h,
+          timestamp: now,
+        }
+        this.lastFullTickers.set(symbol, ticker)
+        changed++
+        for (const cb of this.tickerCbs) cb(ticker)
+      }
+      if (changed > 0) {
+        console.log(`[${this.name}] Fast price poll: ${changed} symbols updated`)
+      }
+    } catch (e) {
+      this.rateLimiter.recordError()
+      console.error(`[${this.name}] Ticker price poll error:`, e instanceof Error ? e.message : e)
+    }
+  }
+
+  parseTicker(t: BinanceTickerRaw): UnifiedTicker {
+    const isWs = !!t.s
+    const symbol = (isWs ? t.s : t.symbol) ?? ''
+    const price = parseFloat((isWs ? t.c : t.lastPrice) ?? '')
+    const open = parseFloat((isWs ? t.o : t.openPrice) ?? '')
+    const pricePrecision = this.precisionMap.get(symbol) ?? fallbackPrecision(price)
+    return {
+      symbol,
+      exchange: this.exchange,
+      price,
+      openPrice24h: open,
+      change24h: open > 0 ? ((price - open) / open) * 100 : 0,
+      high24h: parseFloat((isWs ? t.h : t.highPrice) ?? ''),
+      low24h: parseFloat((isWs ? t.l : t.lowPrice) ?? ''),
+      volume24h: parseFloat((isWs ? t.v : t.volume) ?? ''),
+      trades24h: parseInt(isWs ? (t.n ?? '0') : String(t.count ?? 0), 10),
+      quoteVolume24h: parseFloat((isWs ? t.q : t.quoteVolume) ?? ''),
+      range1m: 0,
+      natr5m: 0,
+      corrBtc: null,
+      tradesSpike: null,
+      volumeSpike: null,
+      pricePrecision,
+      timestamp: Date.now(),
+    }
+  }
+
+  disconnect() {
+    this.tickerWsIntentionalClose = true
+    this.tickerWs?.close()
+    if (this.tickerWsPingTimer) clearInterval(this.tickerWsPingTimer)
+    if (this.tickerWsReconnectTimer) clearTimeout(this.tickerWsReconnectTimer)
+    if (this.tickerWsSilenceTimer) clearTimeout(this.tickerWsSilenceTimer)
+    this.candlePool.close()
+    this.depthPool.close()
+    this.bookTickerPool.close()
+    if (this.statsTimer) clearInterval(this.statsTimer)
+    if (this.statsFirstRetryTimer) clearTimeout(this.statsFirstRetryTimer)
+    if (this.priceTimer) clearInterval(this.priceTimer)
+    this.stopCandleSilenceChecker()
+    this.stopCandleFallback()
+  }
+
+  subscribeCandle(symbol: string, tf: string, cb: CandleCallback) {
+    const interval = TF_MAP[tf]
+    // Unknown timeframe (e.g. 1s): futures has no second klines — refusing
+    // beats silently subscribing to a 1m stream under a 1s label.
+    if (!interval) return
+    const stream = `${symbol.toLowerCase()}@kline_${interval}`
+    this.candleSubs.set(stream, cb)
+    this.candleSubInfo.set(stream, { symbol, tf })
+    this.candlePool.addStream(stream)
+    console.log(`[BinanceFutures] subscribeCandle: ${stream} (pool streams=${this.candlePool.size})`)
+    if (this.candleSubs.size === 1) {
+      this.lastCandleMsgAt = Date.now()
+      this.startCandleSilenceChecker()
+      this.startCandleFallback()
+    }
+  }
+
+  unsubscribeCandle(symbol: string, tf: string) {
+    const interval = TF_MAP[tf]
+    if (!interval) return
+    const stream = `${symbol.toLowerCase()}@kline_${interval}`
+    this.candleSubs.delete(stream)
+    this.candleSubInfo.delete(stream)
+    this.candlePool.removeStream(stream)
+    if (this.candleSubs.size === 0) {
+      this.stopCandleSilenceChecker()
+      this.stopCandleFallback()
+    }
+  }
+
+  subscribeDepth(symbol: string, cb: DepthCallback) {
+    let set = this.depthSubs.get(symbol)
+    if (!set) {
+      set = new Set()
+      this.depthSubs.set(symbol, set)
+    }
+    set.add(cb)
+
+    const stream = `${symbol.toLowerCase()}@depth@100ms`
+    if (!this.depthStreams.has(stream)) {
+      this.depthStreams.add(stream)
+      this.depthPool.addStream(stream)
+    }
+    if (!this.depthBooks.has(symbol)) this.initDepthBook(symbol)
+  }
+
+  unsubscribeDepth(symbol: string, cb?: DepthCallback) {
+    const set = this.depthSubs.get(symbol)
+    if (set && cb) set.delete(cb)
+    if (!set || set.size === 0) {
+      this.depthSubs.delete(symbol)
+      const stream = `${symbol.toLowerCase()}@depth@100ms`
+      if (this.depthStreams.delete(stream)) this.depthPool.removeStream(stream)
+      this.depthBooks.delete(symbol)
+      this.depthBookLoading.delete(symbol)
+      this.lastDepthEmitAt.delete(symbol)
+    }
+  }
+
+  /** Diff-depth assembly: seed the local book with a REST snapshot, then
+   *  replay buffered diff events (Binance's standard snapshot+delta dance).
+   *  A 100-level seed is enough — WS diffs grow the book from there. */
+  private depthSeedDiag = { attempts: 0, seeded: 0, empty: 0, httpErr: 0, lastLog: 0 }
+
+  private async initDepthBook(symbol: string) {
+    if (this.depthBookLoading.has(symbol)) return
+    this.depthBookLoading.add(symbol)
+    this.depthSeedDiag.attempts++
+    // Create the book BEFORE the fetch: diff events arriving during the
+    // snapshot window must BUFFER into it. Creating it after the fetch
+    // drops those events, so the first post-snapshot event shows a gap
+    // (U > lastUpdateId + 1) → instant resync → permanent reseed loop.
+    const book = this.depthBooks.get(symbol) ?? new BinanceDepthBook()
+    this.depthBooks.set(symbol, book)
+    try {
+      const snap = await this.fetchDepth(symbol, 100)
+      if (snap.bids.length > 0 && typeof snap.lastUpdateId === 'number') {
+        book.setSnapshot(snap.bids, snap.asks, snap.lastUpdateId)
+        this.depthSeedDiag.seeded++
+      } else {
+        this.depthSeedDiag.empty++
+      }
+    } catch {
+      this.depthSeedDiag.httpErr++
+    } finally {
+      this.depthBookLoading.delete(symbol)
+      this.scheduleDepthBookRetry(symbol)
+      const now = Date.now()
+      if (now - this.depthSeedDiag.lastLog > 60_000) {
+        this.depthSeedDiag.lastLog = now
+        let synced = 0
+        for (const b of this.depthBooks.values()) if (b.synced) synced++
+        console.log(
+          `[BinanceFutures] depthSeed attempts=${this.depthSeedDiag.attempts} seeded=${this.depthSeedDiag.seeded} ` +
+          `empty=${this.depthSeedDiag.empty} httpErr=${this.depthSeedDiag.httpErr} ` +
+          `syncedBooks=${synced} throttled=${this.rateLimiter.isThrottled()} weight=${this.rateLimiter.getWeight()}`,
+        )
+      }
+    }
+  }
+
+  /** Budget-gated snapshots can be skipped for a long time under heavy
+   *  history churn; keep re-seeding until the book syncs (stops on its own
+   *  once synced or unsubscribed). Backoff doubles per failure so a starved
+   *  rate limiter isn't hammered by hundreds of retries every 15s. */
+  private scheduleDepthBookRetry(symbol: string) {
+    const book = this.depthBooks.get(symbol)
+    if (!book || book.synced) {
+      this.depthRetryDelay.delete(symbol)
+      return
+    }
+    const delay = Math.min(120_000, (this.depthRetryDelay.get(symbol) ?? 7_500) * 2)
+    this.depthRetryDelay.set(symbol, delay)
+    setTimeout(() => {
+      const cur = this.depthBooks.get(symbol)
+      if (this.depthSubs.has(symbol) && cur && !cur.synced) this.initDepthBook(symbol)
+    }, delay)
+  }
+
+  private depthMsgDiag = {
+    applied: 0, buffered: 0, resync: 0, emitted: 0, noBook: 0, badShape: 0, lastLog: 0,
+    noBookSamples: new Set<string>(), bufferedSamples: new Set<string>(),
+  }
+
+  private handleDepthMsg(msg: BinanceDepthDiffRaw): UnifiedDepth | null {
+    const now = Date.now()
+    if (now - this.depthMsgDiag.lastLog > 60_000) {
+      this.depthMsgDiag.lastLog = now
+      console.log(
+        `[BinanceFutures] depthMsg applied=${this.depthMsgDiag.applied} buffered=${this.depthMsgDiag.buffered} ` +
+        `resync=${this.depthMsgDiag.resync} emitted=${this.depthMsgDiag.emitted} ` +
+        `noBook=${this.depthMsgDiag.noBook} badShape=${this.depthMsgDiag.badShape} ` +
+        `noBookSym=[${Array.from(this.depthMsgDiag.noBookSamples).slice(0, 10).join(',')}] ` +
+        `bufferedSym=[${Array.from(this.depthMsgDiag.bufferedSamples).slice(0, 5).join(',')}]`,
+      )
+      this.depthMsgDiag.noBookSamples.clear()
+      this.depthMsgDiag.bufferedSamples.clear()
+    }
+    const d = msg.data || msg
+    const symbol = d.s || d.symbol || ''
+    if (!symbol || d.U === undefined || d.u === undefined) {
+      this.depthMsgDiag.badShape++
+      return null
+    }
+    const book = this.depthBooks.get(symbol)
+    if (!book) {
+      this.depthMsgDiag.noBook++
+      if (this.depthMsgDiag.noBookSamples.size < 10) this.depthMsgDiag.noBookSamples.add(symbol)
+      return null
+    }
+
+    const ev: DiffDepthEvent = { U: d.U, u: d.u, b: d.b ?? [], a: d.a ?? [] }
+    const result = book.applyDiff(ev)
+    if (result === 'resync') {
+      this.depthMsgDiag.resync++
+      // NOT a direct reseed: a flapping book can desync many times per
+      // minute, and an immediate REST fetch per desync burns the exchange
+      // budget (candle history starves). The backoff scheduler re-seeds
+      // soon enough — meanwhile events keep buffering in the book.
+      this.scheduleDepthBookRetry(symbol)
+      return null
+    }
+    if (result === 'buffered') {
+      this.depthMsgDiag.buffered++
+      if (this.depthMsgDiag.bufferedSamples.size < 5) this.depthMsgDiag.bufferedSamples.add(symbol)
+      return null
+    }
+    this.depthMsgDiag.applied++
+
+    // Emit full snapshots at most every DEPTH_EMIT_INTERVAL_MS per symbol — the
+    // book is cumulative, so latest-wins loses nothing and bounds per-symbol cost.
+    const last = this.lastDepthEmitAt.get(symbol) ?? 0
+    if (now - last < DEPTH_EMIT_INTERVAL_MS) return null
+    this.lastDepthEmitAt.set(symbol, now)
+    this.depthMsgDiag.emitted++
+    return book.toDepth(symbol, this.exchange)
+  }
+
+  private startCandleSilenceChecker() {
+    if (this.candleSilenceTimer) return
+    this.candleSilenceTimer = setInterval(() => {
+      if (this.candleSubs.size === 0 || this.candleFallbackActive) return
+      if (Date.now() - this.lastCandleMsgAt > CANDLE_WS_SILENCE_TIMEOUT) {
+        console.warn(`[${this.name}] Candle WS silent for ${CANDLE_WS_SILENCE_TIMEOUT / 1000}s → REST-poll fallback`)
+        this.startCandleFallback()
+      }
+    }, 2_000)
+  }
+
+  private stopCandleSilenceChecker() {
+    if (this.candleSilenceTimer) { clearInterval(this.candleSilenceTimer); this.candleSilenceTimer = null }
+  }
+
+  private startCandleFallback() {
+    if (this.candleFallbackActive) return
+    this.candleFallbackActive = true
+    candleFallbackDiag.starts++
+    this.pollCandleFallback()
+    this.candleFallbackTimer = setInterval(() => this.pollCandleFallback(), CANDLE_POLL_INTERVAL)
+  }
+
+  private stopCandleFallback() {
+    this.candleFallbackActive = false
+    if (this.candleFallbackTimer) { clearInterval(this.candleFallbackTimer); this.candleFallbackTimer = null }
+    candleFallbackDiag.stops++
+  }
+
+  /**
+   * Max streams polled per fallback tick. The fallback covers every subscribed
+   * stream (preload warms ~100 symbols across several timeframes), and polling
+   * ALL of them in parallel every 1.5s would burn ~77 req/s ≈ 9k+ weight/min
+   * against the 2400/min limit — instant 429s and the throttle/deadlock cycle.
+   * A bounded round-robin keeps every stream fresh (just on a longer cycle)
+   * while staying well inside the weight budget.
+   */
+  private static readonly MAX_FALLBACK_PER_TICK = 20
+  private fallbackCursor = 0
+
+  private async pollCandleFallback() {
+    if (this.rateLimiter.isThrottled()) return
+    if (this.rateLimiter.isOverThreshold()) return
+    const entries = Array.from(this.candleSubInfo.entries())
+    if (entries.length === 0) return
+    candleFallbackDiag.polls++
+
+    // Round-robin window: take the next MAX_FALLBACK_PER_TICK streams.
+    const window: [string, { symbol: string; tf: string }][] = []
+    const n = entries.length
+    for (let i = 0; i < BinanceFuturesAdapter.MAX_FALLBACK_PER_TICK && window.length < n; i++) {
+      const entry = entries[this.fallbackCursor % n]
+      window.push(entry)
+      this.fallbackCursor++
+    }
+
+    const nowSec = Date.now() / 1000
+    const results = await Promise.allSettled(window.map(async ([stream, { symbol, tf }]) => {
+      const tfSec = TF_SECONDS[tf] || 60
+      try {
+        const candles = await this.fetchCandles(symbol, tf, 2)
+        candleFallbackDiag.symbolsPolled++
+        // A 2-candle poll should span at most 2 buckets (forming + previous).
+        // If the oldest fetched candle is more than one bucket behind the
+        // forming one, the fallback permanently skipped whole periods.
+        if (candles.length >= 2) {
+          const span = candles[candles.length - 1].time - candles[0].time
+          if (span > tfSec * 2) candleFallbackDiag.bucketMisses++
+        }
+        let driftCounted = false
+        for (const c of candles) {
+          const subCb = this.candleSubs.get(stream)
+          const candle: UnifiedCandle = {
+            ...c,
+            isFinal: c.time + tfSec <= nowSec,
+          }
+          if (subCb) subCb(candle)
+          for (const cb of this.candleCbs) cb(candle)
+          if (!driftCounted && subCb && c.time + tfSec * 2 < nowSec) {
+            // The polled "latest" candle is already fully closed — the client
+            // has been cut off for at least one full period since this message.
+            driftCounted = true
+            candleFallbackDiag.periodDrifts++
+          }
+        }
+      } catch {
+        candleFallbackDiag.fetchFailures++
+      }
+    }))
+    const failed = results.filter(r => r.status === 'rejected').length
+    if (failed > 0) {
+      console.warn(`[${this.name}] Candle REST-poll: ${failed}/${window.length} failed`)
+    }
+  }
+
+  parseCandle(msg: BinanceCandleMsg): UnifiedCandle | null {
+    const k = msg.k || msg.data?.k
+    if (!k) return null
+    return {
+      symbol: k.s ?? '',
+      exchange: this.exchange,
+      timeframe: k.i ?? '',
+      time: (k.t ?? 0) / 1000,
+      open: parseFloat(k.o ?? ''),
+      high: parseFloat(k.h ?? ''),
+      low: parseFloat(k.l ?? ''),
+      close: parseFloat(k.c ?? ''),
+      volume: parseFloat(k.v ?? ''),
+      isFinal: !!k.x,
+    }
+  }
+
+  async fetchCandles(symbol: string, tf: string, limit: number, startTime?: number, endTime?: number, options?: import('./types.js').FetchCandlesOptions): Promise<UnifiedCandle[]> {
+    const interval = TF_MAP[tf]
+    if (!interval) return []
+    const safeLimit = Math.max(1, Math.min(limit, MAX_KLINES_LIMIT))
+    const params = new URLSearchParams({ symbol, interval, limit: String(safeLimit) })
+    if (startTime !== undefined) params.set('startTime', String(startTime))
+    if (endTime !== undefined) params.set('endTime', String(endTime))
+    const url = `https://fapi.binance.com/fapi/v1/klines?${params.toString()}`
+    await this.rateLimiter.waitIfThrottled()
+    try {
+      const res = await fetchWithTimeout(url, 10000, options?.dispatcher ?? this.fetchDispatcher)
+      this.rateLimiter.updateFromHeaders(res.headers)
+      // Throttling must NOT masquerade as end-of-history: an empty array read
+      // "no older data" downstream and silently emptied chart pages. Throw a
+      // typed error so the history layer retries/fails properly.
+      if (res.status === 429) { this.rateLimiter.handle429(res.headers); throw new RateLimitError(`fapi 429 (${symbol} ${tf})`) }
+      if (res.status === 418) { this.rateLimiter.handle418(res.headers); throw new RateLimitError(`fapi 418 IP ban (${symbol} ${tf})`) }
+      if (!res.ok) { this.rateLimiter.recordError(); throw new ExchangeRequestError(`fapi ${res.status} (${symbol} ${tf})`) }
+      const data = await res.json()
+      if (!Array.isArray(data)) { this.rateLimiter.recordError(); throw new ExchangeRequestError(`fapi invalid body (${symbol} ${tf})`) }
+      this.rateLimiter.recordSuccess()
+      return data.map((k: unknown[]) => ({
+        symbol,
+        exchange: this.exchange,
+        timeframe: tf,
+        time: Number(k[0]) / 1000,
+        open: parseFloat(String(k[1])),
+        high: parseFloat(String(k[2])),
+        low: parseFloat(String(k[3])),
+        close: parseFloat(String(k[4])),
+        volume: parseFloat(String(k[5])),
+      }))
+    } catch (e) {
+      this.rateLimiter.recordError()
+      throw e
+    }
+  }
+
+  async fetchDepth(symbol: string, limit: number): Promise<UnifiedDepth> {
+    // Snapshots yield to candle history (charts): skip when throttled or
+    // when the exchange is nearly at its limit (95%) — but otherwise proceed,
+    // so depth seeding can't be starved by history churn.
+    if (this.rateLimiter.isThrottled() || this.rateLimiter.isOverRatio(0.95)) {
+      return { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() }
+    }
+    const empty = { symbol, exchange: this.exchange, bids: [], asks: [], timestamp: Date.now() } as UnifiedDepth
+    return withDepthSnapshotSlot(async () => {
+      await this.rateLimiter.waitIfThrottled()
+      if (this.rateLimiter.isOverRatio(0.95)) return empty
+      const url = `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol}&limit=${limit}`
+      try {
+        const res = await fetchWithTimeout(url, 10000, this.fetchDispatcher)
+        this.rateLimiter.updateFromHeaders(res.headers)
+        if (res.status === 429) { this.rateLimiter.handle429(res.headers); return empty }
+        if (res.status === 418) { this.rateLimiter.handle418(res.headers); return empty }
+        if (!res.ok) { this.rateLimiter.recordError(); return empty }
+        const data = await res.json()
+        if (!data.bids || !data.asks) { this.rateLimiter.recordError(); return empty }
+        this.rateLimiter.recordSuccess()
+        return {
+          symbol,
+          exchange: this.exchange,
+          bids: data.bids.map((b: string[]) => [parseFloat(b[0]), parseFloat(b[1])]),
+          asks: data.asks.map((a: string[]) => [parseFloat(a[0]), parseFloat(a[1])]),
+          timestamp: Date.now(),
+          lastUpdateId: typeof data.lastUpdateId === 'number' ? data.lastUpdateId : undefined,
+        }
+      } catch (e) {
+        this.rateLimiter.recordError()
+        throw e
+      }
+    })
+  }
+}

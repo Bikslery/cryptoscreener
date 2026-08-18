@@ -1,0 +1,40 @@
+Всё изучено. Вот план VPS-деплоя:
+План: VPS-деплой crypto-screener
+Что нужно:
+1. VPS в EU/US (Hetzner ~4EUR/мес, DigitalOcean 6$/мес, Timeweb 200₽/мес)
+2. Домен (опционально, можно по IP)
+Шаги:
+1. Создать Dockerfile для server
+server/Dockerfile — multi-stage build: tsc → node dist/index.js
+2. Создать Dockerfile для client
+client/Dockerfile — vite build → nginx раздача статики + проксирование /api и /ws на server
+3. Создать nginx.conf
+Проксирование:
+- / → статики клиента
+- /api/* → http://server:3001
+- /ws → ws://server:3001 (WS upgrade)
+4. Обновить docker-compose.yml
+- Убрать SQLite, переключить Prisma на PostgreSQL (уже есть в compose)
+- Добавить client + nginx сервисы
+- Убрать BINANCE_PROXY (на VPS не нужен)
+5. Обновить .env для production
+- DATABASE_URL=postgresql://...
+- REDIS_URL=redis://redis:6379
+- JWT_SECRET — сгенерировать реальный
+- Убрать BINANCE_PROXY
+6. Вернуть !ticker@arr вместо !miniTicker@arr
+На VPS нет блокировок — можно использовать полный ticker stream
+7. Деплой
+- git push → VPS
+- docker compose up -d
+- Готово — клиент подключается через wss://твой-vps/ws + https://твой-vps/api/*
+Итого файлы для создания/изменения:
+- server/Dockerfile (новый)
+- client/Dockerfile (новый)  
+- client/nginx.conf (новый)
+- docker-compose.yml (обновить — добавить client, nginx, переключить на PostgreSQL)
+- server/prisma/schema.prisma (switch sqlite → postgresql)
+- server/.env (обновить)
+- server/src/services/exchanges/binance-spot.ts (вернуть !ticker@arr)
+- server/src/services/exchanges/binance-futures.ts (вернуть !ticker@arr, убрать REST fallback)
+Начинаю реализацию?

@@ -1,0 +1,142 @@
+name: crypto-screener
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: cryptoscreener
+      POSTGRES_USER: screener
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U screener -d cryptoscreener"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"] 
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    command: ["/bin/sh", "/etc/prometheus/entrypoint.sh"]
+    environment:
+      METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN must be set for monitoring to scrape /metrics}
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus:ro
+      - promdata:/prometheus
+    depends_on:
+      server:
+        condition: service_started
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:12.4.3
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: crypto-screener-server:local
+    environment:
+      DATABASE_URL: postgresql://screener:${POSTGRES_PASSWORD}@postgres:5432/cryptoscreener
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      RESET_JWT_SECRET: ${RESET_JWT_SECRET:?RESET_JWT_SECRET must be set}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      BINANCE_PROXY: ${BINANCE_PROXY:-}
+      BOOKTICKER_TOP_N: ${BOOKTICKER_TOP_N:-500}
+      DENSITY_TOP_N: ${DENSITY_TOP_N:-300}
+      DENSITY_STANDOUT: ${DENSITY_STANDOUT:-5}
+      DENSITY_BRP_FLOOR: ${DENSITY_BRP_FLOOR:-50000}
+      DENSITY_WINDOW_PCT: ${DENSITY_WINDOW_PCT:-5}
+      DENSITY_SPREAD_EXCL_PCT: ${DENSITY_SPREAD_EXCL_PCT:-0.1}
+      DENSITY_WALL_GRACE_MS: ${DENSITY_WALL_GRACE_MS:-15000}
+      DENSITY_MATCH_TOL: ${DENSITY_MATCH_TOL:-0.1}
+      DENSITY_TICK_MS: ${DENSITY_TICK_MS:-250}
+      TICKER_SNAPSHOT_INTERVAL_MS: ${TICKER_SNAPSHOT_INTERVAL_MS:-5000}
+      TICKER_BROADCAST_INTERVAL_FAST_MS: ${TICKER_BROADCAST_INTERVAL_FAST_MS:-20}
+      TICKER_ADAPTIVE_THRESHOLD_TPS: ${TICKER_ADAPTIVE_THRESHOLD_TPS:-500}
+      PORT: 3001
+      ROLE: all
+      NODE_ENV: production
+      DIAG_LOG: ${DIAG_LOG:-0}
+    expose:
+      - "3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "node -e \"fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    image: crypto-screener-client:local
+    ports:
+      - "80:80"
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  pgdata:
+  redisdata:
+  promdata:
+  grafanadata:
+
+networks:
+  default:
+    name: crypto-screener

@@ -1,0 +1,138 @@
+import { describe, it, expect, vi } from 'vitest'
+import { render, fireEvent } from '@testing-library/react'
+import type { UnifiedTicker } from '../../../types'
+import { Row } from '../CoinList'
+import { VOLUME_HIGH_THRESHOLD } from '../../../constants/volume'
+import { NATR_HIGH_THRESHOLD } from '../../../constants/natr'
+import { resolveIndicators, COLUMN_META } from '../../../services/indicators'
+
+const DEFAULT_COLS = resolveIndicators(undefined).coinList.map(key => ({ key, ...COLUMN_META[key] }))
+
+function makeCoin(quoteVolume24h: number): UnifiedTicker {
+  return {
+    symbol: 'BTCUSDT',
+    exchange: 'binance-futures',
+    price: 100,
+    change24h: 1.2,
+    high24h: 110,
+    low24h: 90,
+    volume24h: 1000,
+    trades24h: 500,
+    quoteVolume24h,
+    range1m: 0.5,
+    natr5m: 0.3,
+    corrBtc: null,
+    tradesSpike: null,
+    volumeSpike: null,
+    pricePrecision: 2,
+    timestamp: 0,
+  }
+}
+
+function renderRow(quoteVolume24h: number) {
+  const { getByTestId } = render(
+    <Row
+      coin={makeCoin(quoteVolume24h)}
+      cols={DEFAULT_COLS}
+      isSelected={false}
+      isOnPage={false}
+      isWatched={false}
+      onClick={vi.fn()}
+      onPrefetch={vi.fn()}
+      onToggleWatch={vi.fn()}
+    />,
+  )
+  return getByTestId('vol-cell')
+}
+
+function renderBaseRow(overrides: Partial<Parameters<typeof Row>[0]> = {}) {
+  const props = {
+    coin: makeCoin(1000),
+    cols: DEFAULT_COLS,
+    isSelected: false,
+    isOnPage: false,
+    isWatched: false,
+    onClick: vi.fn(),
+    onPrefetch: vi.fn(),
+    onToggleWatch: vi.fn(),
+    ...overrides,
+  }
+  return { ...render(<Row {...props} />), props }
+}
+
+describe('CoinList Row — watchlist flag', () => {
+  it('toggles the watch on click without selecting the row', () => {
+    const onClick = vi.fn()
+    const onToggleWatch = vi.fn()
+    const { getByTestId } = renderBaseRow({ onClick, onToggleWatch })
+    fireEvent.click(getByTestId('watch-toggle'))
+    expect(onToggleWatch).toHaveBeenCalledWith('BTCUSDT')
+    expect(onClick).not.toHaveBeenCalled() // flag must not open the chart
+  })
+
+  it('renders the flag filled when watched', () => {
+    const { getByTestId } = renderBaseRow({ isWatched: true })
+    expect(getByTestId('watch-toggle').className).toContain('text-[#f5c518]')
+  })
+
+  it('renders the flag dim when not watched', () => {
+    const { getByTestId } = renderBaseRow({ isWatched: false })
+    expect(getByTestId('watch-toggle').className).not.toContain('text-[#f5c518]')
+  })
+})
+
+function renderNatrRow(natr5m: number) {
+  const { getByTestId } = render(
+    <Row
+      coin={{ ...makeCoin(1000), natr5m }}
+      cols={DEFAULT_COLS}
+      isSelected={false}
+      isOnPage={false}
+      isWatched={false}
+      onClick={vi.fn()}
+      onPrefetch={vi.fn()}
+      onToggleWatch={vi.fn()}
+    />,
+  )
+  return getByTestId('natr-cell')
+}
+
+describe('CoinList Row — volume highlight', () => {
+  it('renders high volume (>= threshold) in bright white', () => {
+    const cell = renderRow(VOLUME_HIGH_THRESHOLD)
+    expect(cell.className).toContain('text-[#fff]')
+    expect(cell.className).toContain('font-medium')
+    expect(cell.className).not.toContain('text-[#a0a0a0]')
+  })
+
+  it('renders volume above threshold in bright white', () => {
+    const cell = renderRow(VOLUME_HIGH_THRESHOLD + 1)
+    expect(cell.className).toContain('text-[#fff]')
+  })
+
+  it('renders low volume (< threshold) in grey', () => {
+    const cell = renderRow(VOLUME_HIGH_THRESHOLD - 1)
+    expect(cell.className).toContain('text-[#a0a0a0]')
+    expect(cell.className).not.toContain('text-[#fff]')
+  })
+})
+
+describe('CoinList Row — NATR highlight', () => {
+  it('renders NATR at threshold (>= 1.5) in bright white', () => {
+    const cell = renderNatrRow(NATR_HIGH_THRESHOLD)
+    expect(cell.className).toContain('text-[#fff]')
+    expect(cell.className).toContain('font-medium')
+    expect(cell.className).not.toContain('text-[#a0a0a0]')
+  })
+
+  it('renders NATR above threshold in bright white', () => {
+    const cell = renderNatrRow(NATR_HIGH_THRESHOLD + 0.1)
+    expect(cell.className).toContain('text-[#fff]')
+  })
+
+  it('renders NATR below threshold in grey', () => {
+    const cell = renderNatrRow(NATR_HIGH_THRESHOLD - 0.1)
+    expect(cell.className).toContain('text-[#a0a0a0]')
+    expect(cell.className).not.toContain('text-[#fff]')
+  })
+})
