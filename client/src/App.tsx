@@ -181,7 +181,21 @@ function App() {
         return
       }
 
-      if (s.expandedSymbol) return
+      if (s.expandedSymbol) {
+        // Развёрнутый график: Пробел переключает на СЛЕДУЮЩИЙ тикер в списке
+        // (зеркало поведения мини-сетки — на последнем останавливается).
+        e.preventDefault()
+        if (e.repeat) return // один график на одно нажатие, без авто-повтора
+        const idx = s.sortedCoins.findIndex(c => c.symbol === s.expandedSymbol)
+        if (idx === -1 || idx >= s.sortedCoins.length - 1) return // последний тикер — стоп
+        const next = s.sortedCoins[idx + 1]
+        // Подтягиваем страницу мини-сетки к тикеру, чтобы после закрытия
+        // графика он был виден в сетке/списке.
+        const nextPage = Math.min(Math.floor((idx + 1) / 9), s.pageCount - 1)
+        if (nextPage !== s.pageIndex) s.setPageIndex(nextPage)
+        s.expandChart(next.symbol)
+        return
+      }
 
       // Фокус не на интерактивном элементе — Пробел листает сетку: гасим прокрутку страницы.
       e.preventDefault()

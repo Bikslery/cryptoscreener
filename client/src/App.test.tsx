@@ -41,8 +41,14 @@ vi.mock('./store', () => {
     pageIndex: 0,
     pageCount: 5,
     activeTimeframe: '1m',
+    sortedCoins: [
+      { symbol: 'AAAUSDT' },
+      { symbol: 'BBBUSDT' },
+      { symbol: 'CCCUSDT' },
+    ],
     setPageIndex: (idx: number) => coinListStore.setState({ pageIndex: idx }),
     setTimeframe: (tf: string) => coinListStore.setState({ activeTimeframe: tf }),
+    expandChart: (symbol: string | null) => coinListStore.setState({ expandedSymbol: symbol }),
     init: () => vi.fn(),
   })
 
@@ -242,5 +248,23 @@ describe('App keyboard handler', () => {
     const event = fireKeyDown({ code: 'Space', key: ' ' })
     expect(event.defaultPrevented).toBe(true)
     expect(useCoinListStore.getState().pageIndex).toBe(1)
+  })
+
+  it('opens the next chart on Space when a chart is expanded', () => {
+    resetStores()
+    useCoinListStore.setState({ expandedSymbol: 'AAAUSDT', pageIndex: 0 })
+    render(<App />)
+    const event = fireKeyDown({ code: 'Space', key: ' ' })
+    expect(event.defaultPrevented).toBe(true)
+    expect(useCoinListStore.getState().expandedSymbol).toBe('BBBUSDT')
+  })
+
+  it('stops at the last chart on Space (no wrap-around)', () => {
+    resetStores()
+    useCoinListStore.setState({ expandedSymbol: 'CCCUSDT', pageIndex: 0 })
+    render(<App />)
+    const event = fireKeyDown({ code: 'Space', key: ' ' })
+    expect(event.defaultPrevented).toBe(true)
+    expect(useCoinListStore.getState().expandedSymbol).toBe('CCCUSDT')
   })
 })
