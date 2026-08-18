@@ -16,14 +16,24 @@ interface ColumnDef {
 }
 
 /**
+ * Fixed-width leading column that hosts ONLY the watchlist (favorite) toggle.
+ * It sits to the LEFT of every data column and never moves or re-flows with
+ * the ticker text — a dedicated cell instead of a flag glued to the symbol.
+ */
+const WATCH_COL_WIDTH = '28px'
+
+/**
  * The flag that always sat next to the ticker name. It is the watchlist
  * toggle: click pins the coin to the top of the list (gold when pinned).
+ * Lives in its own fixed-width left column (see WATCH_COL_WIDTH); the button
+ * fills the cell so the click target is the whole 28px strip, not just the
+ * 11px icon.
  */
 function WatchFlag({ watched, onClick }: { watched: boolean; onClick: (e: React.MouseEvent<HTMLButtonElement>) => void }) {
   return (
     <button
       data-testid="watch-toggle"
-      className={`shrink-0 mr-[5px] flex items-center justify-center cursor-pointer transition-colors ${watched ? 'text-[#f5c518]' : 'text-[#3a3a3a] hover:text-[#777]'}`}
+      className={`w-full h-full flex items-center justify-center shrink-0 cursor-pointer transition-colors ${watched ? 'text-[#f5c518]' : 'text-[#3a3a3a] hover:text-[#777]'}`}
       title={watched ? 'Remove from favorites' : 'Add to favorites'}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={onClick}
@@ -65,15 +75,19 @@ export const Row = memo(function Row({ coin, cols, isSelected, isOnPage, isWatch
   return (
     <div
       className={`grid cursor-pointer transition-colors duration-100 ${bg} ${borderL}`}
-      style={{ gridTemplateColumns: rowCols, height: '32px' }}
+      style={{ gridTemplateColumns: `${WATCH_COL_WIDTH} ${rowCols}`, height: '32px' }}
       onMouseDown={() => onPrefetch(coin.symbol)}
       onClick={() => onClick(coin.symbol)}
     >
+      {/* Dedicated left column: the favorite toggle, independent of the
+          ticker text and every configurable data column. */}
+      <div key="watch" className="flex items-center justify-center shrink-0 overflow-hidden">
+        <WatchFlag watched={isWatched} onClick={(e) => { e.stopPropagation(); onToggleWatch(coin.symbol) }} />
+      </div>
       {cols.map((col) => {
         if (col.key === 'symbol') {
           return (
             <div key={col.key} className={`flex items-center justify-center px-2 text-[12px] font-medium ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
-              <WatchFlag watched={isWatched} onClick={(e) => { e.stopPropagation(); onToggleWatch(coin.symbol) }} />
               {formatVal('symbol', coin)}
             </div>
           )
@@ -169,8 +183,11 @@ export function CoinList() {
     <div className="w-full h-full flex flex-col bg-[#0a0a0a]">
       <div
         className="grid border-b border-[#1f1f1f] bg-[#0e0e0e] text-[11px] select-none flex-shrink-0"
-        style={{ gridTemplateColumns: rowCols }}
+        style={{ gridTemplateColumns: `${WATCH_COL_WIDTH} ${rowCols}` }}
       >
+        {/* Watchlist column header — intentionally blank; the data columns
+            start after the fixed flag strip. */}
+        <div className="flex items-center justify-center border-r border-[#1f1f1f]" style={{ height: '40px' }} />
         {cols.map((col, i) => (
           <div
             key={col.key}
