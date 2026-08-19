@@ -495,6 +495,18 @@ export function useLivePrice(symbol: string): number | undefined {
   )
 }
 
+/** Exchange-scoped live price (symbol + exchange). Unlike `useLivePrice`, the
+ *  value never leaks a foreign exchange's price into a row/header scoped to
+ *  one venue (e.g. a bybit row must never show a binance trade print). */
+export function useLivePriceEx(symbol: string, exchange: string): number | undefined {
+  const key = liveExKey(symbol, exchange)
+  return useSyncExternalStore(
+    (cb) => subscribeLivePriceEx(symbol, exchange, cb),
+    () => livePricesEx.get(key),
+    () => livePricesEx.get(key),
+  )
+}
+
 export const useCoinListStore = create<CoinListStore>((set, get) => ({
   coins: [],
   sortedCoins: [],

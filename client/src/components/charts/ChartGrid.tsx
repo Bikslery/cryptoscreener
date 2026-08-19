@@ -542,14 +542,16 @@ function useCandlesRecent(
       if ((msg as { type?: string }).type !== 'candles-recent') return
       const data = (msg as { data?: Record<string, CompactCandle[]> }).data
       if (!data || Object.keys(data).length === 0) return
-      const expanded: Record<string, UnifiedCandle[]> = {}
       for (const [key, tuples] of Object.entries(data)) {
         const parts = key.split(':')
         if (parts.length !== 3) continue
         const [ex, sym, t] = parts
-        expanded[key] = expandCompactCandles(tuples as CompactCandle[], sym, ex as Exchange, t)
+        const expanded = expandCompactCandles(tuples as CompactCandle[], sym, ex as Exchange, t)
+        // setCandles MERGES with what's already cached (initial-candles, REST) —
+        // never storeBulk, which REPLACES the entry and would truncate the
+        // 300-candle initial-candles history down to this 64-candle recent tail.
+        candleCache.setCandles(ex as Exchange, sym, t, expanded)
       }
-      candleCache.storeBulk(expanded)
       bumpRecentVersion()
     })
     return unsub
@@ -608,7 +610,11 @@ function useFullHistory(
     if (!exchange) return
     const cancelled = { value: false }
     const sameKeyReload = forceServer && lastPaintedKeyRef.current === `${exchange}:${symbol}:${tf}`
-    if (!sameKeyReload) setIsInitialLoading(true)
+    // Already painted this key? A recentVersion re-run (candles-recent landed
+    // after the full history) must NOT re-show the loading spinner over the
+    // visible chart — only a first paint or a symbol/TF switch should.
+    const alreadyPaintedThisKey = lastPaintedKeyRef.current === `${exchange}:${symbol}:${tf}`
+    if (!sameKeyReload && !alreadyPaintedThisKey) setIsInitialLoading(true)
     partialPaintedRef.current = false
 
     const renderCandles = (candles: UnifiedCandle[], opts?: { fit?: boolean }) => {

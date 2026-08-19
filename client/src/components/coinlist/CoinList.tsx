@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useRef, useEffect } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
-import { useCoinListStore, useAuthStore, useLivePrice } from '../../store'
+import { useCoinListStore, useAuthStore, useLivePriceEx } from '../../store'
 import type { UnifiedTicker, CoinListColKey } from '../../types'
 import { extractBaseAsset, formatPrice, snapToTick } from '../../utils/format'
 import { getOrFetchHistory } from '../../services/candle-prefetch'
@@ -64,7 +64,9 @@ interface RowProps {
 
 export const Row = memo(function Row({ coin, cols, isSelected, isOnPage, isWatched, onClick, onPrefetch, onToggleWatch }: RowProps) {
   const isUp = coin.change24h >= 0
-  const livePrice = useLivePrice(coin.symbol)
+  // Exchange-scoped live price: the row is scoped to chartExchange (coin.exchange),
+  // so a foreign venue's trade must never leak into this cell.
+  const livePrice = useLivePriceEx(coin.symbol, coin.exchange)
   const bg = isSelected
     ? 'bg-white/[0.10]'
     : isOnPage
