@@ -33,7 +33,7 @@ function WatchFlag({ watched, onClick }: { watched: boolean; onClick: (e: React.
   return (
     <button
       data-testid="watch-toggle"
-      className={`w-full h-full flex items-center justify-center shrink-0 cursor-pointer transition-colors ${watched ? 'text-[#f5c518]' : 'text-[#3a3a3a] hover:text-[#777]'}`}
+      className={`w-full h-full flex items-center justify-center shrink-0 cursor-pointer transition-colors ${watched ? 'text-[#fff]' : 'text-[#3a3a3a] hover:text-[#777]'}`}
       title={watched ? 'Remove from favorites' : 'Add to favorites'}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={onClick}

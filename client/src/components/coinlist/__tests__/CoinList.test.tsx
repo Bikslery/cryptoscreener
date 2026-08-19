@@ -72,12 +72,12 @@ describe('CoinList Row — watchlist flag', () => {
 
   it('renders the flag filled when watched', () => {
     const { getByTestId } = renderBaseRow({ isWatched: true })
-    expect(getByTestId('watch-toggle').className).toContain('text-[#f5c518]')
+    expect(getByTestId('watch-toggle').className).toContain('text-[#fff]')
   })
 
   it('renders the flag dim when not watched', () => {
     const { getByTestId } = renderBaseRow({ isWatched: false })
-    expect(getByTestId('watch-toggle').className).not.toContain('text-[#f5c518]')
+    expect(getByTestId('watch-toggle').className).not.toContain('text-[#fff]')
   })
 })
 
