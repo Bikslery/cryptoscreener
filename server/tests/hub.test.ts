@@ -29,7 +29,7 @@ vi.mock('../src/services/candles/preload.js', () => ({
 
 vi.mock('../src/services/trades/aggTrade.js', () => ({}))
 
-import { encodePayload, classifyChannel, stopWsHub } from '../src/ws/hub.js'
+import { encodePayload, classifyChannel, stopWsHub, shouldRelayAlert } from '../src/ws/hub.js'
 
 afterAll(() => {
   stopWsHub()
@@ -84,5 +84,22 @@ describe('classifyChannel', () => {
   it('falls back to the other lane for unrecognized channels', () => {
     expect(classifyChannel('depth:BTCUSDT')).toBe('other')
     expect(classifyChannel('density')).toBe('other')
+  })
+})
+
+describe('shouldRelayAlert — Redis alert-relay dedup', () => {
+  it('passes the first delivery of an alert id', () => {
+    expect(shouldRelayAlert('al-dedup-1')).toBe(true)
+  })
+
+  it('drops a re-delivery of the same id within the window (double-broadcast guard)', () => {
+    expect(shouldRelayAlert('al-dedup-2')).toBe(true)
+    expect(shouldRelayAlert('al-dedup-2')).toBe(false)
+  })
+
+  it('passes alerts without an id (nothing to dedupe on)', () => {
+    expect(shouldRelayAlert(undefined)).toBe(true)
+    expect(shouldRelayAlert(null)).toBe(true)
+    expect(shouldRelayAlert('')).toBe(true)
   })
 })

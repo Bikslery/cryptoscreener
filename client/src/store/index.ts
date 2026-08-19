@@ -11,6 +11,49 @@ import { VOLUME_HIGH_THRESHOLD, VOLUME_FILTER_DEFAULT } from '../constants/volum
 
 export type ChartExchange = 'binance-spot' | 'binance-futures' | 'bybit-futures'
 
+// ---------------------------------------------------------------------------
+// Fired-alert notification dedup (anti-spam).
+// ---------------------------------------------------------------------------
+// An impulse can be delivered more than once: the server broadcasts directly
+// AND relays its own Redis publish (all-in-one deployment), and a single
+// market move can trigger several alerts on the same coin. Guard both:
+//   - exact alert-id window: the SAME fired alert never re-notifies;
+//   - impulse per-symbol window: several impulse alerts on one coin within a
+//     short burst are ONE move — notify once.
+// The alerts LIST still updates for every event (idempotent); only the sound +
+// toast + native notification are suppressed.
+const ALERT_NOTIFY_DEDUP_MS = 10_000
+const recentAlertNotify = new Map<string, number>() // alertId -> ts
+const recentImpulseNotify = new Map<string, number>() // symbol -> ts
+
+// Exported for unit tests only.
+export function shouldNotifyAlert(alert: AlertType): boolean {
+  const now = Date.now()
+  const lastById = recentAlertNotify.get(alert.id)
+  if (lastById !== undefined && now - lastById < ALERT_NOTIFY_DEDUP_MS) return false
+  if (alert.type === 'impulse') {
+    const lastBySymbol = recentImpulseNotify.get(alert.symbol)
+    if (lastBySymbol !== undefined && now - lastBySymbol < ALERT_NOTIFY_DEDUP_MS) return false
+    recentImpulseNotify.set(alert.symbol, now)
+  }
+  recentAlertNotify.set(alert.id, now)
+  if (recentAlertNotify.size > 500 || recentImpulseNotify.size > 500) {
+    for (const [k, ts] of recentAlertNotify) {
+      if (now - ts > ALERT_NOTIFY_DEDUP_MS) recentAlertNotify.delete(k)
+    }
+    for (const [k, ts] of recentImpulseNotify) {
+      if (now - ts > ALERT_NOTIFY_DEDUP_MS) recentImpulseNotify.delete(k)
+    }
+  }
+  return true
+}
+
+/** Test-only: clear the module-level dedup maps between cases. */
+export function __resetAlertNotifyDedup(): void {
+  recentAlertNotify.clear()
+  recentImpulseNotify.clear()
+}
+
 const CHART_EXCHANGE_STORAGE_KEY = 'serotonin.chartExchange'
 const VALID_CHART_EXCHANGES: ChartExchange[] = ['binance-spot', 'binance-futures', 'bybit-futures']
 const DEFAULT_CHART_EXCHANGE: ChartExchange = 'binance-futures'
@@ -712,7 +755,10 @@ export const useAlertStore = create<AlertStore>((set) => ({
         // Cap at 100 to prevent unbounded growth
         return { alerts: next.slice(0, 100) }
       })
-      // Sound + native browser notification for every fired alert.
+      // Sound + native browser notification for every fired alert — unless
+      // it's a duplicate delivery or a repeat impulse on the same coin (the
+      // list above still gets updated, just no spam).
+      if (!shouldNotifyAlert(alert)) return
       const settings = useAuthStore.getState().settings
       notifyNewAlert(alert, {
         sound: settings?.notifySound !== false,

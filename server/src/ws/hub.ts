@@ -83,6 +83,31 @@ export function getChannelSubscriberCount(channel: string): number {
   return n
 }
 
+// --- Alert-relay dedup ------------------------------------------------------
+// In all-in-one (ROLE=all) deployments the server BOTH publishes fired alerts
+// to Redis AND subscribes to the same 'alerts' channel to relay them to
+// broadcast-only nodes. Without a guard the local process receives its own
+// publish and re-broadcasts every alert a second time — clients saw each
+// impulse twice ("notification spam"). Remember alert ids for a short window
+// and drop relays that were already forwarded.
+const ALERT_RELAY_DEDUP_MS = 10_000
+const relayedAlertIds = new Map<string, number>()
+
+// Exported for unit tests only.
+export function shouldRelayAlert(id: unknown): boolean {
+  if (typeof id !== 'string' || id.length === 0) return true
+  const now = Date.now()
+  const last = relayedAlertIds.get(id)
+  if (last !== undefined && now - last < ALERT_RELAY_DEDUP_MS) return false
+  if (relayedAlertIds.size > 500) {
+    for (const [k, ts] of relayedAlertIds) {
+      if (now - ts > ALERT_RELAY_DEDUP_MS) relayedAlertIds.delete(k)
+    }
+  }
+  relayedAlertIds.set(id, now)
+  return true
+}
+
 const CLIENT_PING_INTERVAL = 30_000
 let clientPingTimer: ReturnType<typeof setInterval> | null = null
 
@@ -617,7 +642,10 @@ export function startRedisListener() {
           const trade = JSON.parse(message)
           broadcastToChannel(`trade:${trade.exchange}:${trade.symbol}`, trade)
         } else if (channel === 'alerts') {
-          broadcast({ type: 'alert', data: JSON.parse(message) })
+          const data = JSON.parse(message)
+          // Drop our own Redis publish coming back to us (ROLE=all) — the
+          // alert was already broadcast locally by fireAlert.
+          if (shouldRelayAlert(data?.id)) broadcast({ type: 'alert', data })
         } else if (channel === 'price') {
           // Fast-lane price updates (bookTicker mid for focused symbols) —
           // forwarded immediately, same as candle/trade channels.

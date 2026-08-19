@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { useAlertStore } from '../index'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { useAlertStore, shouldNotifyAlert, __resetAlertNotifyDedup } from '../index'
 import { onAlertRemoved } from '../../services/alert-drawing-sync'
 import type { Alert } from '../../types'
 
@@ -83,5 +83,46 @@ describe('useAlertStore — updateAlert', () => {
   it('is a no-op when the alert is not in the list', () => {
     useAlertStore.getState().updateAlert(makeAlert('ghost'))
     expect(useAlertStore.getState().alerts).toHaveLength(0)
+  })
+})
+
+describe('shouldNotifyAlert — notification anti-spam', () => {
+  beforeEach(() => {
+    __resetAlertNotifyDedup()
+  })
+
+  it('suppresses a duplicate delivery of the same alert id (double-broadcast guard)', () => {
+    const a = makeAlert('imp-x1', { type: 'impulse', symbol: 'BTCUSDT' })
+    expect(shouldNotifyAlert(a)).toBe(true)
+    expect(shouldNotifyAlert(a)).toBe(false)
+  })
+
+  it('suppresses a second impulse on the same symbol within the burst window', () => {
+    const a1 = makeAlert('imp-x2', { type: 'impulse', symbol: 'BTCUSDT' })
+    const a2 = makeAlert('imp-x3', { type: 'impulse', symbol: 'BTCUSDT' })
+    expect(shouldNotifyAlert(a1)).toBe(true)
+    expect(shouldNotifyAlert(a2)).toBe(false)
+  })
+
+  it('notifies an impulse on a different symbol', () => {
+    expect(shouldNotifyAlert(makeAlert('imp-x4', { type: 'impulse', symbol: 'BTCUSDT' }))).toBe(true)
+    expect(shouldNotifyAlert(makeAlert('imp-x5', { type: 'impulse', symbol: 'ETHUSDT' }))).toBe(true)
+  })
+
+  it('does not coalesce price alerts by symbol (only impulses)', () => {
+    expect(shouldNotifyAlert(makeAlert('prc-x1', { type: 'price', symbol: 'BTCUSDT' }))).toBe(true)
+    expect(shouldNotifyAlert(makeAlert('prc-x2', { type: 'price', symbol: 'BTCUSDT' }))).toBe(true)
+  })
+
+  it('re-notifies the same alert id after the dedup window expires', () => {
+    vi.useFakeTimers()
+    try {
+      const a = makeAlert('imp-x6', { type: 'impulse', symbol: 'BTCUSDT' })
+      expect(shouldNotifyAlert(a)).toBe(true)
+      vi.advanceTimersByTime(11_000)
+      expect(shouldNotifyAlert(a)).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
