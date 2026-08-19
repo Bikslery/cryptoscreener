@@ -27,7 +27,7 @@ export function At(name: string, fallback: string): string {
 }
 
 const WINDOW_SECONDS: Record<string, number> = {
-  '1s': 1, '5s': 5, '15s': 15, '1m': 60, '5m': 300, '15m': 900,
+  '1m': 60, '5m': 300, '15m': 900,
   '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800, '1M': 2592e3,
 }
 

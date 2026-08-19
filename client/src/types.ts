@@ -254,7 +254,7 @@ export interface UserSettings {
   indicators?: { coinList: CoinListColKey[]; chartHeader: IndicatorKey[] }
 }
 
-export type Timeframe = '1s' | '5s' | '15s' | '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
+export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
 
 export interface WsMessage {
   type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'density' | 'alert' | 'listing' | 'initial-candles' | 'open'

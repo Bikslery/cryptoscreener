@@ -9,9 +9,6 @@ import './TopBar.css'
 const SCANNER_URL = (import.meta.env.VITE_SCANNER_URL as string | undefined) ?? 'https://redscalp.ru/screener'
 
 const TF_OPTIONS: { value: Timeframe; label: string }[] = [
-  { value: '1s', label: '1s' },
-  { value: '5s', label: '5s' },
-  { value: '15s', label: '15s' },
   { value: '1m', label: '1m' },
   { value: '5m', label: '5m' },
   { value: '15m', label: '15m' },

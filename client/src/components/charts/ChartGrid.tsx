@@ -16,7 +16,6 @@ import * as candleCache from '../../services/candle-cache'
 import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT, EXPANDED_CANDLE_LIMIT } from '../../services/candle-prefetch'
 import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
 import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatch, type TickPayload } from '../../services/candle-events'
-import { createSecondCandleAggregator, type SecondCandleAggregator } from '../../services/second-candle-aggregator'
 import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
 import { isFiniteOHLCV, validateCandle } from '../../services/candle-utils'
 import { recordDiag } from '../../services/candle-diag'
@@ -32,14 +31,10 @@ import {
 
 
 const TF_SECONDS: Record<string, number> = {
-  '1s': 1, '5s': 5, '15s': 15,
   '1m': 60, '5m': 300, '15m': 900,
   '1h': 3600, '4h': 14400, '1d': 86400, '1w': 604800,
 }
 function getTfSeconds(tf: Timeframe): number { return TF_SECONDS[tf] || 60 }
-
-const SECOND_TIMEFRAMES = new Set<Timeframe>(['1s', '5s', '15s'])
-function isSecondTimeframe(tf: Timeframe): boolean { return SECOND_TIMEFRAMES.has(tf) }
 
 /**
  * "Dumb renderer" (scalpboard.io parity).
@@ -276,11 +271,11 @@ function isFormingBar(bar: UnifiedCandle, candlesDataRef: React.RefObject<Unifie
 
 /**
  * Source tag for diagnostics only — identifies which lane produced the patch
- * being applied (kline stream, trade tick, bookTicker mid, second-candle
- * aggregator, or a buffered-flush replay from a history/lazy-scroll cycle).
+ * being applied (kline stream, trade tick, bookTicker mid, or a buffered-flush
+ * replay from a history/lazy-scroll cycle).
  * Never affects behavior, only what gets logged when something looks wrong.
  */
-type PatchSource = 'kline' | 'tick-trade' | 'tick-price' | 'second-agg' | 'history-flush' | 'lazy-scroll-flush'
+type PatchSource = 'kline' | 'tick-trade' | 'tick-price' | 'history-flush' | 'lazy-scroll-flush'
 
 function applyChartPatch(
   patch: ChartEventPatch,
@@ -551,7 +546,7 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  options?: { limit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServer?: boolean; wsEpoch?: number; skipHistory?: boolean },
+  options?: { limit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServer?: boolean; wsEpoch?: number },
   lastUpdateRef?: React.RefObject<number>,
   eventsRef?: React.RefObject<CandleEvents | null>,
   chartVersion?: number,
@@ -561,7 +556,6 @@ function useFullHistory(
   const wsEpoch = options?.wsEpoch ?? 0
   const fitOnOpen = options?.fitOnOpen ?? false
   const visibleBars = options?.visibleBars ?? 150
-  const skipHistory = options?.skipHistory ?? false
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const [status, setStatus] = useState<FullHistoryStatus>('loading')
   const [dataVersion, setDataVersion] = useState(0)
@@ -660,19 +654,6 @@ function useFullHistory(
     }
 
     const run = async () => {
-      // Second timeframes start live from a blank slate: the client-side
-      // aggregator fills the chart from trade prints, no server history
-      // exists (futures/bybit have no 1s klines), and painting a substituted
-      // 1m/5m interval as 1s would corrupt the axis. 'ready' (not 'empty')
-      // because live candles are expected to arrive immediately.
-      if (skipHistory) {
-        renderCandles([])
-        setIsInitialLoading(false)
-        setStatus('ready')
-        eventsRef?.current?.setBuffered(false)
-        if (lastUpdateRef) lastUpdateRef.current = Date.now()
-        return
-      }
       // Reconcile: buffer live events while the history loads.
       eventsRef?.current?.setBuffered(true)
 
@@ -790,7 +771,7 @@ function useFullHistory(
     // (pricePrecision flip) — the new chart starts empty.
     // `wsEpoch` re-paints after a WS reconnect so periods that fell through
     // the dead window are restored from the server.
-  }, [symbol, exchange, tf, chartVersion, wsEpoch, limit, forceServer, fitOnOpen, visibleBars, skipHistory,
+  }, [symbol, exchange, tf, chartVersion, wsEpoch, limit, forceServer, fitOnOpen, visibleBars,
     candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, lastUpdateRef, eventsRef])
 
   return { isInitialLoading, status, dataVersion }
@@ -1060,10 +1041,7 @@ function useWsCandle(
   lastUpdateRef?: React.RefObject<number>,
 ) {
   useEffect(() => {
-    // Second timeframes are aggregated client-side from the trade lane — no
-    // server kline stream exists for them (and adapters would silently
-    // substitute a 1m/5m interval), so the candle channel is never touched.
-    if (!exchange || isSecondTimeframe(tf)) return
+    if (!exchange) return
     const channel = `candle:${exchange}:${symbol}:${tf}`
     const unsub = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current) return
@@ -1144,15 +1122,13 @@ function useWsTrade(
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
   adjustingRef?: React.RefObject<boolean>,
   lastUpdateRef?: React.RefObject<number>,
-  aggregatorRef?: React.RefObject<SecondCandleAggregator | null>,
 ) {
   // The trade lane (aggTrade prints — the actual last trade price, what a
   // trading terminal shows) is the primary tick source. The price lane
   // (bookTicker mid) only kicks in when trades have been quiet for a second,
   // so two prices never alternate on the same forming bar (mid sits in the
   // spread and wobbles ±spread/2 on thin books — the source of the visible
-  // price flicker). Second timeframes (1s/5s/15s) are the exception: they
-  // run on the trade lane only, exactly like scalpboard's chart.
+  // price flicker).
   const lastTradeAtRef = useRef(0)
   const precision = useCoinPrecision(symbol, exchange)
 
@@ -1177,25 +1153,11 @@ function useWsTrade(
       // Defensive floor (Stage 2 item 6): the server's aggTrade payload sends
       // `data.T / 1000` — a bare division, not a floor — so `trade.time` can
       // arrive as a fractional epoch-seconds value (e.g. 1712345678.123).
-      // Bucket math elsewhere (second-candle-aggregator) already floors to
-      // its own tf-bucket boundary so fractional input is harmless there,
-      // but the raw value also feeds `applyTick`'s window guard
-      // (`tick.timeSec > cur.candle.time`) directly — flooring here once,
-      // at the ingestion boundary, keeps every downstream consumer working
-      // with whole-second times without relying on each call site to guard
-      // it independently.
+      // Flooring here once, at the ingestion boundary, keeps every downstream
+      // consumer working with whole-second times.
       const tradeTime = typeof trade.time === 'number' && isFinite(trade.time)
         ? Math.floor(trade.time)
         : Math.floor(Date.now() / 1000)
-
-      // Second timeframes: every print feeds the client-side aggregator
-      // (volume included). The mid lane is not even subscribed for these
-      // timeframes — a quote can never open or skew a forming bucket.
-      if (isSecondTimeframe(tf)) {
-        const volume = typeof trade.volume === 'number' ? trade.volume : parseFloat(String(trade.volume ?? '0'))
-        aggregatorRef?.current?.addTrade(price, isFinite(volume) && volume > 0 ? volume : 0, tradeTime)
-        return
-      }
 
       const ev = eventsRef.current
       if (!ev) return
@@ -1217,17 +1179,6 @@ function useWsTrade(
       checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'tick-trade')
     })
     wsSubscribe(tradeType)
-
-    // Second timeframes: candles come exclusively from the trade lane —
-    // scalpboard's chart explicitly skips its own 'price' feed for 1s/5s/15s.
-    // Not subscribing to the mid at all is stricter than just ignoring it:
-    // bookTicker quotes can never leak into a forming second bucket.
-    if (isSecondTimeframe(tf)) {
-      return () => {
-        unsub()
-        wsUnsubscribe(tradeType)
-      }
-    }
 
     // Fast-lane price: bookTicker mid — fallback for pairs with sparse
     // trades. Exchange filter: the channel is keyed by symbol only; only the
@@ -1280,70 +1231,9 @@ function useWsTrade(
       unsubPrice()
       wsUnsubscribe(priceChannel)
     }
-  }, [symbol, exchange, tf, precision, adjustingRef, aggregatorRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
+  }, [symbol, exchange, tf, precision, adjustingRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
 }
 
-
-function useSecondCandleAggregator(
-  symbol: string,
-  exchange: Exchange | undefined,
-  tf: Timeframe,
-  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
-  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
-  eventsRef: React.RefObject<CandleEvents | null>,
-  destroyedRef: React.RefObject<boolean>,
-  candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  adjustingRef?: React.RefObject<boolean>,
-  lastUpdateRef?: React.RefObject<number>,
-): React.RefObject<SecondCandleAggregator | null> {
-  const aggregatorRef = useRef<SecondCandleAggregator | null>(null)
-
-  useEffect(() => {
-    if (!exchange || !isSecondTimeframe(tf)) return
-    const agg = createSecondCandleAggregator({
-      symbol,
-      exchange,
-      tf,
-      tfSeconds: getTfSeconds(tf),
-      onCandle: (c) => {
-        if (destroyedRef.current || !eventsRef.current) return
-        if (lastUpdateRef) lastUpdateRef.current = Date.now()
-        const patch = eventsRef.current.applyKline(c)
-        if (adjustingRef?.current) {
-          if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
-            recordDiag('adjusting_drop_unbuffered', {
-              symbol, exchange, tf, from: c.time,
-              detail: 'second-candle-aggregator kline mutated events tail while adjustingRef was true but buffer was NOT held — event lost',
-            })
-          }
-          return
-        }
-        applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'second-agg')
-        checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'second-agg')
-      },
-    })
-    aggregatorRef.current = agg
-    return () => {
-      agg.destroy()
-      aggregatorRef.current = null
-    }
-  }, [symbol, exchange, tf, adjustingRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
-
-  // WS reconnect: the dead window must not survive inside a forming bar —
-  // drop it so the next print re-opens a clean bucket.
-  const [wsCount, setWsCount] = useState(getWsOpenCount)
-  useEffect(() => {
-    const un = wsOnType('open', () => setWsCount(getWsOpenCount()))
-    return un
-  }, [])
-  useEffect(() => {
-    if (!isSecondTimeframe(tf)) return
-    aggregatorRef.current?.reset()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsCount])
-
-  return aggregatorRef
-}
 
 function exchangeBadge(ex: string): string {
   if (ex.includes('binance') && ex.includes('futures')) return 'BI-F'
@@ -1546,7 +1436,6 @@ const MiniChart = memo(function MiniChart({
     limit: GRID_CANDLE_LIMIT,
     forceServer: wsCount > mountWsCount,
     wsEpoch: wsCount,
-    skipHistory: isSecondTimeframe(tf),
   }, lastUpdateRef, eventsRef, chartVersion)
 
   const adjustingRef = useRef(false)
@@ -1568,10 +1457,8 @@ const MiniChart = memo(function MiniChart({
   useChartOverlays(candleRef, candlesDataRef, dataVersion, chartVersion, pricePrecision)
   useDensityOverlay(candleRef, chartVersion, symbol, pricePrecision)
 
-  const aggregatorRef = useSecondCandleAggregator(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, aggregatorRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, eventsRef, shiftLogicalOffset)
 
   useEffect(() => {
@@ -1889,7 +1776,7 @@ function formatDuration(sec: number): string {
   return h % 24 ? `${d}d ${h % 24}h` : `${d}d`
 }
 
-const TF_SETTINGS: Timeframe[] = ['1s', '5s', '15s', '1m', '5m', '15m', '1h', '4h', '1d', '1w']
+const TF_SETTINGS: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w']
 
 const WM_PLACE_OPTIONS: { value: WatermarkPlace; label: string }[] = [
   { value: 'center-center', label: 'Center' },
@@ -2283,7 +2170,6 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     fitOnOpen: true,
     forceServer: wsCount > mountWsCount,
     wsEpoch: wsCount,
-    skipHistory: isSecondTimeframe(tf),
   }, lastUpdateRef, eventsRef, chartVersion)
 
   const {
@@ -2328,10 +2214,8 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
 
   const isStale = useStaleDataDetection(lastUpdateRef)
 
-  const aggregatorRef = useSecondCandleAggregator(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
-  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef, aggregatorRef)
+  useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, eventsRef, shiftLogicalOffset)
 
   useEffect(() => {

@@ -27,7 +27,7 @@ interface AggTradeStream {
 // chart visibly fell behind the real стакан. Instead, per (exchange, symbol)
 // the LATEST trade is flushed every TRADE_LANE_INTERVAL_MS — latest price +
 // latest time for the forming candle (latest-wins) and the window's SUMMED
-// base volume so the client's second-candle aggregator keeps exact totals.
+// base volume.
 interface PendingTrade {
   symbol: string
   exchange: Exchange
@@ -196,9 +196,8 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
         }
 
         // Coalesced latest-wins broadcast — the chart needs the newest price
-        // (not every print), and the client's second-candle aggregator needs
-        // the summed volume (accumulated above). This cuts the per-trade
-        // frame flood that saturated the client's parse queue.
+        // (not every print). This cuts the per-trade frame flood that
+        // saturated the client's parse queue.
         queueTrade(symbol, exchange, tradePayload)
       }
     } catch (e) {
