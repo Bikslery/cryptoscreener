@@ -17,6 +17,33 @@ const WARM_BATCH = 15
 const WARM_CANDLE_LIMIT = 40
 let warmCursor = 0
 
+// Per-user + per-symbol notification cooldown: at most ONE fired alert
+// reaches a user for a given coin within a minute, whatever the alert type.
+// A single market move must never fan out into several notifications for the
+// same coin (multiple impulse/price alerts, 'ANY' impulse scanning many
+// symbols). In-memory is fine for the normal burst case; the DB-side
+// impulse mute covers restarts for 5 minutes regardless.
+const SYMBOL_COOLDOWN_MS = 60_000
+const firedByUserSymbol = new Map<string, number>() // `${userId}:${symbol}` -> ts
+
+/**
+ * Claim the per-user+symbol cooldown slot. Returns true when a firing must be
+ * SUPPRESSED (the coin already notified within SYMBOL_COOLDOWN_MS), false when
+ * the firing may proceed (and the slot is re-armed).
+ */
+export function cooldownActive(userId: string, symbol: string, now = Date.now()): boolean {
+  const key = `${userId}:${symbol}`
+  const last = firedByUserSymbol.get(key)
+  if (last !== undefined && now - last < SYMBOL_COOLDOWN_MS) return true
+  firedByUserSymbol.set(key, now)
+  if (firedByUserSymbol.size > 1000) {
+    for (const [k, ts] of firedByUserSymbol) {
+      if (now - ts > SYMBOL_COOLDOWN_MS) firedByUserSymbol.delete(k)
+    }
+  }
+  return false
+}
+
 export function startAlertEngine() {
   checkInterval = setInterval(async () => {
     try {
@@ -214,6 +241,11 @@ interface FireOptions {
 
 async function fireAlert(alert: AlertRow, price: number, overrideSymbol?: string, pricePrecision?: number, opts: FireOptions = {}) {
   const symbol = overrideSymbol || alert.symbol
+  // Per-user + per-coin cooldown: no second notification for the same coin
+  // within a minute (multiple alerts on one symbol, 'ANY' impulse scan, or a
+  // re-fired price alert). Applied to the ACTUAL fired symbol so 'ANY'
+  // impulse alerts are keyed by the matched coin, not the literal 'ANY'.
+  if (cooldownActive(alert.userId, symbol)) return
   const condition = JSON.parse(alert.condition)
   if (opts.impulseCandleTime !== undefined) {
     condition.lastFiredCandleTime = opts.impulseCandleTime
@@ -243,7 +275,12 @@ async function fireAlert(alert: AlertRow, price: number, overrideSymbol?: string
     ...(opts.direction !== undefined ? { direction: opts.direction } : {}),
   }
 
-  broadcast({ type: 'alert', data: alertData })
+  // Delivery: in Redis-enabled deployments (ROLE=all and split ingestion/
+  // broadcast) the alert goes to clients via the hub's Redis 'alerts' relay —
+  // the SAME process would otherwise both broadcast directly AND receive its
+  // own Redis publish back, delivering every alert twice ("notification
+  // spam"). Without Redis (dev, single process) broadcast directly.
+  if (!REDIS_ENABLED) broadcast({ type: 'alert', data: alertData })
   publishAlert(alertData)
 
   const user = await prisma.user.findUnique({

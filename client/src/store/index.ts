@@ -14,35 +14,34 @@ export type ChartExchange = 'binance-spot' | 'binance-futures' | 'bybit-futures'
 // ---------------------------------------------------------------------------
 // Fired-alert notification dedup (anti-spam).
 // ---------------------------------------------------------------------------
-// An impulse can be delivered more than once: the server broadcasts directly
-// AND relays its own Redis publish (all-in-one deployment), and a single
-// market move can trigger several alerts on the same coin. Guard both:
+// An alert can be delivered more than once (double broadcast, Redis relay,
+// several alerts on the same coin). Guard both:
 //   - exact alert-id window: the SAME fired alert never re-notifies;
-//   - impulse per-symbol window: several impulse alerts on one coin within a
-//     short burst are ONE move — notify once.
+//   - per-coin cooldown: at most ONE notification per symbol within a minute,
+//     whatever the alert type — one market move must not fan out into several
+//     toasts for the same coin.
 // The alerts LIST still updates for every event (idempotent); only the sound +
 // toast + native notification are suppressed.
-const ALERT_NOTIFY_DEDUP_MS = 10_000
+const ALERT_ID_DEDUP_MS = 10_000
+const SYMBOL_COOLDOWN_MS = 60_000
 const recentAlertNotify = new Map<string, number>() // alertId -> ts
-const recentImpulseNotify = new Map<string, number>() // symbol -> ts
+const recentSymbolNotify = new Map<string, number>() // symbol -> ts
 
 // Exported for unit tests only.
 export function shouldNotifyAlert(alert: AlertType): boolean {
   const now = Date.now()
   const lastById = recentAlertNotify.get(alert.id)
-  if (lastById !== undefined && now - lastById < ALERT_NOTIFY_DEDUP_MS) return false
-  if (alert.type === 'impulse') {
-    const lastBySymbol = recentImpulseNotify.get(alert.symbol)
-    if (lastBySymbol !== undefined && now - lastBySymbol < ALERT_NOTIFY_DEDUP_MS) return false
-    recentImpulseNotify.set(alert.symbol, now)
-  }
+  if (lastById !== undefined && now - lastById < ALERT_ID_DEDUP_MS) return false
+  const lastBySymbol = recentSymbolNotify.get(alert.symbol)
+  if (lastBySymbol !== undefined && now - lastBySymbol < SYMBOL_COOLDOWN_MS) return false
   recentAlertNotify.set(alert.id, now)
-  if (recentAlertNotify.size > 500 || recentImpulseNotify.size > 500) {
+  recentSymbolNotify.set(alert.symbol, now)
+  if (recentAlertNotify.size > 500 || recentSymbolNotify.size > 500) {
     for (const [k, ts] of recentAlertNotify) {
-      if (now - ts > ALERT_NOTIFY_DEDUP_MS) recentAlertNotify.delete(k)
+      if (now - ts > ALERT_ID_DEDUP_MS) recentAlertNotify.delete(k)
     }
-    for (const [k, ts] of recentImpulseNotify) {
-      if (now - ts > ALERT_NOTIFY_DEDUP_MS) recentImpulseNotify.delete(k)
+    for (const [k, ts] of recentSymbolNotify) {
+      if (now - ts > SYMBOL_COOLDOWN_MS) recentSymbolNotify.delete(k)
     }
   }
   return true
@@ -51,7 +50,7 @@ export function shouldNotifyAlert(alert: AlertType): boolean {
 /** Test-only: clear the module-level dedup maps between cases. */
 export function __resetAlertNotifyDedup(): void {
   recentAlertNotify.clear()
-  recentImpulseNotify.clear()
+  recentSymbolNotify.clear()
 }
 
 const CHART_EXCHANGE_STORAGE_KEY = 'serotonin.chartExchange'
