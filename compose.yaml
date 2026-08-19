@@ -32,11 +32,17 @@ services:
 
   prometheus:
     image: prom/prometheus:v3.4.1
-    command: ["/bin/sh", "/etc/prometheus/entrypoint.sh"]
+    # Prometheus v3 image's ENTRYPOINT is /bin/prometheus itself, so a plain
+    # `command` would append `/bin/sh ...` to the binary. Run the render script
+    # as the entrypoint instead, and as root so it can write prometheus.yml into
+    # the (root-owned) mounted directory. The mount must be read-write for the
+    # same reason.
+    entrypoint: ["/bin/sh", "/etc/prometheus/entrypoint.sh"]
+    user: root
     environment:
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN must be set for monitoring to scrape /metrics}
     volumes:
-      - ./monitoring/prometheus:/etc/prometheus:ro
+      - ./monitoring/prometheus:/etc/prometheus
       - promdata:/prometheus
     depends_on:
       server:
