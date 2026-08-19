@@ -1,8 +1,8 @@
 import { memo, useCallback, useMemo, useRef, useEffect } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
-import { useCoinListStore, useAuthStore } from '../../store'
+import { useCoinListStore, useAuthStore, useLivePrice } from '../../store'
 import type { UnifiedTicker, CoinListColKey } from '../../types'
-import { extractBaseAsset } from '../../utils/format'
+import { extractBaseAsset, formatPrice, snapToTick } from '../../utils/format'
 import { getOrFetchHistory } from '../../services/candle-prefetch'
 import { VOLUME_HIGH_THRESHOLD } from '../../constants/volume'
 import { NATR_HIGH_THRESHOLD } from '../../constants/natr'
@@ -47,6 +47,7 @@ function WatchFlag({ watched, onClick }: { watched: boolean; onClick: (e: React.
 
 function formatVal(key: CoinListColKey, coin: UnifiedTicker): string {
   if (key === 'symbol') return extractBaseAsset(coin.symbol)
+  if (key === 'price') return formatPrice(snapToTick(coin.price, coin.pricePrecision), coin.pricePrecision)
   return formatIndicator(key, coin[key])
 }
 
@@ -63,6 +64,7 @@ interface RowProps {
 
 export const Row = memo(function Row({ coin, cols, isSelected, isOnPage, isWatched, onClick, onPrefetch, onToggleWatch }: RowProps) {
   const isUp = coin.change24h >= 0
+  const livePrice = useLivePrice(coin.symbol)
   const bg = isSelected
     ? 'bg-white/[0.10]'
     : isOnPage
@@ -89,6 +91,19 @@ export const Row = memo(function Row({ coin, cols, isSelected, isOnPage, isWatch
           return (
             <div key={col.key} className={`flex items-center justify-center px-2 text-[12px] font-medium ${isSelected ? 'text-white' : 'text-[#e5e5e5]'}`}>
               {formatVal('symbol', coin)}
+            </div>
+          )
+        }
+        if (col.key === 'price') {
+          // Live price (scalpboard's price column): shows the freshest price at
+          // the 50ms live cadence. Color vs the last closed 5m candle — price
+          // above the reference = green (bullish), below = red (bearish).
+          const p = livePrice ?? coin.price
+          const ref = coin.lastClose ?? null
+          const pUp = ref !== null ? p >= ref : isUp
+          return (
+            <div key={col.key} className={`flex items-center justify-end px-2 text-[12px] font-mono font-semibold tabular-nums ${pUp ? 'text-[#26a65b]' : 'text-[#e74c3c]'}`}>
+              {formatPrice(snapToTick(p, coin.pricePrecision), coin.pricePrecision)}
             </div>
           )
         }

@@ -24,6 +24,7 @@ function makeCoin(quoteVolume24h: number): UnifiedTicker {
     corrBtc: null,
     tradesSpike: null,
     volumeSpike: null,
+    lastClose: null,
     pricePrecision: 2,
     timestamp: 0,
   }

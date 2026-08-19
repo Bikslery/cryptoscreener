@@ -150,7 +150,8 @@ export function mergeTickerBatch(
     const u = updateMap.get(key)
     if (!u) return c
     if (u.price === c.price && u.change24h === c.change24h && u.quoteVolume24h === c.quoteVolume24h
-      && u.corrBtc === c.corrBtc && u.tradesSpike === c.tradesSpike && u.volumeSpike === c.volumeSpike) return c
+      && u.corrBtc === c.corrBtc && u.tradesSpike === c.tradesSpike && u.volumeSpike === c.volumeSpike
+      && u.lastClose === c.lastClose) return c
     dirty = true
     return u
   })

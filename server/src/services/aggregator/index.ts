@@ -150,7 +150,8 @@ export function computeTickerDelta(
     seen.add(key)
     const p = prev.get(key)
     if (!p || p.price !== t.price || p.change24h !== t.change24h || p.quoteVolume24h !== t.quoteVolume24h
-      || p.corrBtc !== t.corrBtc || p.tradesSpike !== t.tradesSpike || p.volumeSpike !== t.volumeSpike) {
+      || p.corrBtc !== t.corrBtc || p.tradesSpike !== t.tradesSpike || p.volumeSpike !== t.volumeSpike
+      || p.lastClose !== t.lastClose) {
       delta.push(t)
     }
     if (p) {
@@ -160,6 +161,7 @@ export function computeTickerDelta(
       p.corrBtc = t.corrBtc
       p.tradesSpike = t.tradesSpike
       p.volumeSpike = t.volumeSpike
+      p.lastClose = t.lastClose
     } else {
       prev.set(key, {
         symbol: t.symbol,
@@ -170,6 +172,7 @@ export function computeTickerDelta(
         corrBtc: t.corrBtc,
         tradesSpike: t.tradesSpike,
         volumeSpike: t.volumeSpike,
+        lastClose: t.lastClose,
       })
     }
   }
@@ -250,6 +253,13 @@ const BINANCE_EXCHANGES = new Set(['binance-spot', 'binance-futures'])
 // metricsMap/range1m/natr5m.
 const indicatorMap = new Map<string, { corrBtc: number | null; volumeSpike: number | null; tradesSpike: number | null }>()
 
+// Close of the last closed 5m candle per symbol:exchange — scalpboard's
+// price_5m_1. Fed event-driven (each final 5m kline) and seeded periodically
+// for the top-N coins from the candle cache. The client shows the LIVE price
+// against this reference to color the price column (price above last close =
+// bullish candle).
+const lastCloseMap = new Map<string, number>()
+
 function setIndicator(symbol: string, field: 'corrBtc' | 'volumeSpike' | 'tradesSpike', value: number | null): void {
   const cur = indicatorMap.get(symbol) || { corrBtc: null, volumeSpike: null, tradesSpike: null }
   cur[field] = value
@@ -261,10 +271,13 @@ function setIndicator(symbol: string, field: 'corrBtc' | 'volumeSpike' | 'trades
 
 function applyIndicatorsToTicker(ticker: UnifiedTicker): void {
   const ind = indicatorMap.get(ticker.symbol)
-  if (!ind) return
-  ticker.corrBtc = ind.corrBtc
-  ticker.volumeSpike = ind.volumeSpike
-  ticker.tradesSpike = BINANCE_EXCHANGES.has(ticker.exchange) ? ind.tradesSpike : null
+  if (ind) {
+    ticker.corrBtc = ind.corrBtc
+    ticker.volumeSpike = ind.volumeSpike
+    ticker.tradesSpike = BINANCE_EXCHANGES.has(ticker.exchange) ? ind.tradesSpike : null
+  }
+  const lc = lastCloseMap.get(`${ticker.symbol}:${ticker.exchange}`)
+  if (lc !== undefined) ticker.lastClose = lc
 }
 
 export function recordTradeBucket(symbol: string, timeMs: number): void {
@@ -387,6 +400,9 @@ export function startAggregator() {
 
     adapter.onCandle((candle) => {
       updateCachedCandle(candle)
+      if (candle.timeframe === '5m' && candle.isFinal) {
+        lastCloseMap.set(`${candle.symbol}:${candle.exchange}`, candle.close)
+      }
       if (isIngestion && REDIS_ENABLED) {
         try {
           const redis = getRedisPub()
@@ -588,6 +604,16 @@ async function computeMetrics() {
             const natr5m = coin.price > 0 ? (atr / coin.price) * 100 : 0
             metricsMap.set(coin.symbol, { ...(metricsMap.get(coin.symbol) || { range1m: 0 }), natr5m })
           }
+          // Last closed 5m candle close (scalpboard's price_5m_1) — seed the
+          // reference price for coins whose 5m stream isn't actively charted.
+          if (candles5m.length > 0) {
+            let lastClose: number | null = null
+            for (let i = candles5m.length - 1; i >= 0; i--) {
+              if (candles5m[i].isFinal) { lastClose = candles5m[i].close; break }
+            }
+            if (lastClose === null) lastClose = candles5m[candles5m.length - 1].close
+            lastCloseMap.set(`${coin.symbol}:${coin.exchange}`, lastClose)
+          }
           // Volume spike: forming 5m candle vs the average of the 30 completed
           // before it. Cheap (cache-first) so it refreshes with every 30s pass.
           const spike = computeVolumeSpike(candles5m)
@@ -768,6 +794,7 @@ export function setTickersFromRedis(tickers: UnifiedTicker[]) {
     if (t.corrBtc === undefined) t.corrBtc = null
     if (t.tradesSpike === undefined) t.tradesSpike = null
     if (t.volumeSpike === undefined) t.volumeSpike = null
+    if (t.lastClose === undefined) t.lastClose = null
     applyIndicatorsToTicker(t)
     tickerMap.set(`${t.symbol}:${t.exchange}`, t)
   }

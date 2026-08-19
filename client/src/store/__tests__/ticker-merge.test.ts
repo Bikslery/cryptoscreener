@@ -18,6 +18,7 @@ function t(symbol: string, exchange: Exchange, price: number, quoteVolume24h = 1
     corrBtc: null,
     tradesSpike: null,
     volumeSpike: null,
+    lastClose: null,
     pricePrecision: 2,
     timestamp: 0,
   }

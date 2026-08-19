@@ -2,7 +2,7 @@ import { deflateRaw, deflateRawSync } from 'zlib'
 import { WebSocket, WebSocketServer } from 'ws'
 import { verifyTokenWithTelegram, type JwtPayload } from '../middleware/auth.js'
 import type { WsMessage } from '../types.js'
-import type { UnifiedTicker, UnifiedCandle } from '../types.js'
+import type { UnifiedTicker, UnifiedCandle, Exchange } from '../types.js'
 import { inboundWsSchema } from './schemas.js'
 import { getTopCachedSymbols, getCachedCandles, updateCachedCandle } from '../services/candles/candle-cache.js'
 import { getAllTickers, getTickers, getTicker, setTickersFromRedis } from '../services/aggregator/index.js'
@@ -271,6 +271,14 @@ function parseDepthChannel(channel: string): string | null {
 // perMessageDeflate is enabled).
 const INITIAL_CANDLES_LIMIT = 300
 
+// Per-chart recent-candles push (scalpboard's subscribe-klines parity): the
+// instant a client subscribes to a candle channel it gets the last N candles
+// straight from the server's cache so the chart paints from the socket instead
+// of waiting on the REST history round-trip. The cache is warmed by the
+// exchange kline streams (adapter.onCandle → updateCachedCandle) and by the
+// Redis 'candles' relay on broadcast nodes.
+const RECENT_CANDLES_LIMIT = 64
+
 function buildInitialCandlesData(): Record<string, CompactCandle[]> {
   let topSymbols = getTopCachedSymbols(INITIAL_CANDLES_TF, 9)
   if (topSymbols.length < 9) {
@@ -435,6 +443,32 @@ export function setupWsHub(wss: WebSocketServer) {
             const candleInfo = parseCandleChannel(msg.channel)
             if (candleInfo && candleManager) {
               candleManager.subscribeCandle(candleInfo.exchange, candleInfo.symbol, candleInfo.tf)
+
+              // scalpboard parity: push the recent candles immediately so the
+              // chart paints from the socket. Empty cache → signal that REST
+              // history is on its way (client keeps its spinner).
+              try {
+                const recent = getCachedCandles(candleInfo.symbol, candleInfo.tf, candleInfo.exchange as Exchange)
+                if (recent && recent.length > 0) {
+                  const key = `${candleInfo.exchange}:${candleInfo.symbol}:${candleInfo.tf}`
+                  ws.send(encodePayload({
+                    type: 'candles-recent',
+                    channel: msg.channel,
+                    format: 'compact',
+                    data: { [key]: compactCandles(recent.slice(-RECENT_CANDLES_LIMIT)) },
+                  }))
+                } else {
+                  ws.send(encodePayload({
+                    type: 'candles-recent',
+                    channel: msg.channel,
+                    format: 'compact',
+                    data: {},
+                    fetching: true,
+                  }))
+                }
+              } catch {
+                // Cache read must never break the subscribe path.
+              }
             }
 
             const depthSymbol = parseDepthChannel(msg.channel)

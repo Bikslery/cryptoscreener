@@ -15,6 +15,9 @@ export interface UnifiedTicker {
   corrBtc: number | null
   tradesSpike: number | null
   volumeSpike: number | null
+  /** Close of the last closed 5m candle (scalpboard's price_5m_1) — the
+   *  stable reference price shown in the coin list. Computed server-side. */
+  lastClose?: number | null
   pricePrecision: number
   timestamp: number
 }
@@ -25,9 +28,14 @@ export interface UnifiedTicker {
  */
 export type IndicatorKey = 'change24h' | 'range1m' | 'natr5m' | 'quoteVolume24h' | 'corrBtc' | 'tradesSpike' | 'volumeSpike'
 
-export type CoinListColKey = 'symbol' | IndicatorKey
+/** Coin list columns: pinned `symbol` + optional `price` (scalpboard price_5m_1)
+ *  + the configurable indicator columns. `price` is NOT an IndicatorKey — it is
+ *  not a valid chart-header field (the chart header already shows live price). */
+export type CoinListColKey = 'symbol' | 'price' | IndicatorKey
 
 export const ALL_INDICATOR_KEYS: readonly IndicatorKey[] = ['change24h', 'range1m', 'natr5m', 'quoteVolume24h', 'corrBtc', 'tradesSpike', 'volumeSpike']
+
+export const VALID_COIN_LIST_KEYS: readonly CoinListColKey[] = ['symbol', 'price', ...ALL_INDICATOR_KEYS]
 
 export interface UnifiedCandle {
   symbol: string
@@ -257,7 +265,7 @@ export interface UserSettings {
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
 
 export interface WsMessage {
-  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'density' | 'alert' | 'listing' | 'initial-candles' | 'open'
+  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'density' | 'alert' | 'listing' | 'initial-candles' | 'candles-recent' | 'open'
   channel?: string
   data?: unknown
   delta?: boolean // ticker message carries only changed entries (merge in place)

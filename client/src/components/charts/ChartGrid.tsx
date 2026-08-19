@@ -1,4 +1,4 @@
-import { useEffect, useRef, memo, useState, useMemo } from 'react'
+import { useEffect, useRef, memo, useState, useMemo, useCallback } from 'react'
 import { createChart, CandlestickSeries, BarSeries, LineSeries, HistogramSeries, PriceScaleMode } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time, SeriesType, DeepPartial, CandlestickSeriesOptions, BarSeriesOptions, LineSeriesOptions } from 'lightweight-charts'
 import { useCoinListStore, setLivePrice, setLivePriceEx, useAuthStore } from '../../store'
@@ -521,6 +521,41 @@ function useInitialCandlesPush() {
   }, [])
 }
 
+/**
+ * Per-chart recent-candles push (scalpboard's subscribe-klines parity): the
+ * server answers a candle subscription with the last N candles immediately
+ * (see hub.ts). Storing them into the shared candle cache lets useFullHistory's
+ * SWR partial-paint path draw the chart from the socket — no REST round-trip.
+ * `bumpRecentVersion` re-runs the history loader so it re-checks the cache the
+ * moment the recent candles land.
+ */
+function useCandlesRecent(
+  symbol: string,
+  exchange: Exchange | undefined,
+  tf: Timeframe,
+  bumpRecentVersion: () => void,
+) {
+  useEffect(() => {
+    if (!exchange) return
+    const channel = `candle:${exchange}:${symbol}:${tf}`
+    const unsub = wsOnChannel(channel, (msg) => {
+      if ((msg as { type?: string }).type !== 'candles-recent') return
+      const data = (msg as { data?: Record<string, CompactCandle[]> }).data
+      if (!data || Object.keys(data).length === 0) return
+      const expanded: Record<string, UnifiedCandle[]> = {}
+      for (const [key, tuples] of Object.entries(data)) {
+        const parts = key.split(':')
+        if (parts.length !== 3) continue
+        const [ex, sym, t] = parts
+        expanded[key] = expandCompactCandles(tuples as CompactCandle[], sym, ex as Exchange, t)
+      }
+      candleCache.storeBulk(expanded)
+      bumpRecentVersion()
+    })
+    return unsub
+  }, [symbol, exchange, tf, bumpRecentVersion])
+}
+
 type FullHistoryStatus = 'loading' | 'ready' | 'empty' | 'error' | 'retrying'
 
 /** Hard wall-clock deadline for the initial history load: after this the
@@ -546,7 +581,7 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  options?: { limit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServer?: boolean; wsEpoch?: number },
+  options?: { limit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServer?: boolean; wsEpoch?: number; recentVersion?: number },
   lastUpdateRef?: React.RefObject<number>,
   eventsRef?: React.RefObject<CandleEvents | null>,
   chartVersion?: number,
@@ -556,6 +591,7 @@ function useFullHistory(
   const wsEpoch = options?.wsEpoch ?? 0
   const fitOnOpen = options?.fitOnOpen ?? false
   const visibleBars = options?.visibleBars ?? 150
+  const recentVersion = options?.recentVersion ?? 0
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const [status, setStatus] = useState<FullHistoryStatus>('loading')
   const [dataVersion, setDataVersion] = useState(0)
@@ -662,8 +698,12 @@ function useFullHistory(
       // visible at once, live WS events replay on top), then the fetch below
       // tops up to the full requested depth in the background. Previously a
       // cache with fewer than `limit` candles was discarded entirely, forcing
-      // a full network wait on every return to a chart.
-      if (cached && cached.length >= minPartialCandles(limit)) {
+      // a full network wait on every return to a chart. When a candles-recent
+      // push landed (recentVersion > 0), even a handful of candles is enough
+      // for the first paint — the server answered the subscription from its
+      // cache, so the chart draws from the socket instead of the REST round-trip.
+      const minPartial = recentVersion > 0 ? 1 : minPartialCandles(limit)
+      if (cached && cached.length >= minPartial) {
         if (!cancelled.value && !destroyedRef.current) {
           renderCandles(cached)
           partialPaintedRef.current = cached.length < limit
@@ -771,7 +811,7 @@ function useFullHistory(
     // (pricePrecision flip) — the new chart starts empty.
     // `wsEpoch` re-paints after a WS reconnect so periods that fell through
     // the dead window are restored from the server.
-  }, [symbol, exchange, tf, chartVersion, wsEpoch, limit, forceServer, fitOnOpen, visibleBars,
+  }, [symbol, exchange, tf, chartVersion, wsEpoch, limit, forceServer, fitOnOpen, visibleBars, recentVersion,
     candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, lastUpdateRef, eventsRef])
 
   return { isInitialLoading, status, dataVersion }
@@ -1045,6 +1085,9 @@ function useWsCandle(
     const channel = `candle:${exchange}:${symbol}:${tf}`
     const unsub = wsOnChannel(channel, (msg) => {
       if (destroyedRef.current) return
+      // Skip non-candle frames on this channel (candles-recent pushes carry the
+      // same channel but a different type).
+      if ((msg as { type?: string }).type !== channel) return
 
       const c = msg.data as UnifiedCandle
       if (!c) return
@@ -1432,10 +1475,14 @@ const MiniChart = memo(function MiniChart({
     return un
   }, [])
 
+  const [recentVersion, setRecentVersion] = useState(0)
+  const bumpRecentVersion = useCallback(() => setRecentVersion(v => v + 1), [])
+
   const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
     limit: GRID_CANDLE_LIMIT,
     forceServer: wsCount > mountWsCount,
     wsEpoch: wsCount,
+    recentVersion,
   }, lastUpdateRef, eventsRef, chartVersion)
 
   const adjustingRef = useRef(false)
@@ -1459,6 +1506,7 @@ const MiniChart = memo(function MiniChart({
 
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useCandlesRecent(symbol, exchange, tf, bumpRecentVersion)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, undefined, eventsRef, shiftLogicalOffset)
 
   useEffect(() => {
@@ -2165,11 +2213,15 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     return un
   }, [])
 
+  const [recentVersion, setRecentVersion] = useState(0)
+  const bumpRecentVersion = useCallback(() => setRecentVersion(v => v + 1), [])
+
   const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
     limit: EXPANDED_CANDLE_LIMIT,
     fitOnOpen: true,
     forceServer: wsCount > mountWsCount,
     wsEpoch: wsCount,
+    recentVersion,
   }, lastUpdateRef, eventsRef, chartVersion)
 
   const {
@@ -2216,6 +2268,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
 
   useWsCandle(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
   useWsTrade(symbol, exchange, tf, candleRef, volumeRef, eventsRef, destroyedRef, candlesDataRef, adjustingRef, lastUpdateRef)
+  useCandlesRecent(symbol, exchange, tf, bumpRecentVersion)
   useLazyScroll(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, isInitialLoading, adjustingRef, setIsLoadingMore, eventsRef, shiftLogicalOffset)
 
   useEffect(() => {

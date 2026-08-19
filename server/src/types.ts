@@ -16,6 +16,9 @@ export interface UnifiedTicker {
   corrBtc: number | null
   tradesSpike: number | null
   volumeSpike: number | null
+  /** Close of the last closed 5m candle (scalpboard's price_5m_1) — the
+   *  stable reference price shown in the coin list. Computed server-side. */
+  lastClose?: number | null
   pricePrecision: number
   timestamp: number
 }
@@ -132,7 +135,7 @@ export interface UserSettings {
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'
 
 export interface WsMessage {
-  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'density' | 'alert' | 'listing' | 'initial-candles' | 'auth' | (string & {})
+  type: 'subscribe' | 'unsubscribe' | 'ticker' | 'candle' | 'depth' | 'density' | 'alert' | 'listing' | 'initial-candles' | 'candles-recent' | 'auth' | (string & {})
   channel?: string
   data?: unknown
   full?: unknown // full array for ticker delta broadcasts

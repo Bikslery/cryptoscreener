@@ -1,7 +1,8 @@
 import type { IndicatorKey, CoinListColKey, UserSettings } from '../types'
+import { VALID_COIN_LIST_KEYS } from '../types'
 import { formatCompact } from '../utils/format'
 
-export const DEFAULT_COIN_LIST: readonly CoinListColKey[] = ['symbol', 'change24h', 'range1m', 'natr5m', 'quoteVolume24h']
+export const DEFAULT_COIN_LIST: readonly CoinListColKey[] = ['symbol', 'price', 'change24h', 'range1m', 'natr5m', 'quoteVolume24h']
 export const DEFAULT_CHART_HEADER: readonly IndicatorKey[] = ['change24h', 'natr5m', 'range1m', 'quoteVolume24h']
 
 export const VALID_INDICATOR_KEYS: readonly IndicatorKey[] = ['change24h', 'range1m', 'natr5m', 'quoteVolume24h', 'corrBtc', 'tradesSpike', 'volumeSpike']
@@ -25,6 +26,7 @@ export interface ColumnMeta {
 
 export const COLUMN_META: Record<CoinListColKey, { header: string; subheader: string; width: string }> = {
   symbol: { header: 'TICKER', subheader: '', width: '1.1fr' },
+  price: { header: 'PRICE', subheader: '5m', width: '1.1fr' },
   change24h: { header: 'CHG', subheader: '24h', width: '1fr' },
   range1m: { header: 'RANGE', subheader: '1m/5', width: '1fr' },
   natr5m: { header: 'NATR', subheader: '5m/14', width: '1fr' },
@@ -49,7 +51,7 @@ export function resolveIndicators(raw?: UserSettings['indicators'] | null): Reso
 
   const coinList: CoinListColKey[] = ['symbol']
   for (const k of raw?.coinList ?? DEFAULT_COIN_LIST) {
-    if (k === 'symbol' || !VALID_INDICATOR_KEYS.includes(k as IndicatorKey) || coinList.includes(k)) continue
+    if (k === 'symbol' || !VALID_COIN_LIST_KEYS.includes(k) || coinList.includes(k)) continue
     coinList.push(k)
   }
   if (coinList.length === 1) coinList.push(...DEFAULT_COIN_LIST.slice(1))
