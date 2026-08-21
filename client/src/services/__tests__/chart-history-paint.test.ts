@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import type { IChartApi } from 'lightweight-charts'
 import {
   canPaintPartialHistory,
+  replaceDataPreservingPriceScale,
   resolveHistoryViewportAction,
 } from '../chart-history-paint'
 
@@ -30,5 +32,61 @@ describe('chart history background paint policy', () => {
     expect(canPaintPartialHistory(64)).toBe(true)
     expect(canPaintPartialHistory(1)).toBe(true)
     expect(canPaintPartialHistory(0)).toBe(false)
+  })
+
+  it('locks the visible price range while deeper history replaces the series', () => {
+    const state = {
+      autoScale: true,
+      range: { from: 95, to: 105 },
+    }
+    const scheduled: FrameRequestCallback[] = []
+    const priceScale = {
+      options: () => ({ autoScale: state.autoScale }),
+      getVisibleRange: () => state.range,
+      setAutoScale: vi.fn((on: boolean) => { state.autoScale = on }),
+      setVisibleRange: vi.fn((range: { from: number; to: number }) => { state.range = range }),
+    }
+    const chart = { priceScale: () => priceScale } as unknown as IChartApi
+    let autoScaleDuringReplace = true
+
+    replaceDataPreservingPriceScale(
+      chart,
+      () => {
+        autoScaleDuringReplace = state.autoScale
+        // This is the lightweight-charts jump we are guarding against:
+        // setData auto-fits the newly enlarged data set while autoscale is on.
+        if (state.autoScale) state.range = { from: 1, to: 1_000 }
+      },
+      callback => {
+        scheduled.push(callback)
+        return scheduled.length
+      },
+    )
+
+    expect(autoScaleDuringReplace).toBe(false)
+    expect(state.range).toEqual({ from: 95, to: 105 })
+    expect(state.autoScale).toBe(false)
+    expect(scheduled).toHaveLength(1)
+
+    scheduled[0](0)
+    expect(state.autoScale).toBe(true)
+  })
+
+  it('keeps a manually fixed price scale fixed after history replacement', () => {
+    const state = { autoScale: false, range: { from: 95, to: 105 } }
+    const priceScale = {
+      options: () => ({ autoScale: state.autoScale }),
+      getVisibleRange: () => state.range,
+      setAutoScale: vi.fn((on: boolean) => { state.autoScale = on }),
+      setVisibleRange: vi.fn((range: { from: number; to: number }) => { state.range = range }),
+    }
+    const chart = { priceScale: () => priceScale } as unknown as IChartApi
+    const schedule = vi.fn()
+
+    replaceDataPreservingPriceScale(chart, () => {}, schedule)
+
+    expect(state.autoScale).toBe(false)
+    expect(state.range).toEqual({ from: 95, to: 105 })
+    expect(schedule).not.toHaveBeenCalled()
   })
 })
