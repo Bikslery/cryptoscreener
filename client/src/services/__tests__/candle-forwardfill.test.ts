@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { createCandleEvents } from '../candle-events'
-import { forwardFillGap, isFlatFiller, MAX_FORWARD_FILL_PERIODS } from '../candle-utils'
+import { forwardFillGap, isFlatFiller, MAX_FORWARD_FILL_PERIODS, contiguify } from '../candle-utils'
 import type { UnifiedCandle, Exchange } from '../../types'
 
 const EX: Exchange = 'binance-futures'
@@ -88,5 +88,48 @@ describe('candle-events.forwardFill â€” tail bookkeeping without patches', () =>
     ev.destroy()
     expect(() => ev.forwardFill([candle(360, 100, 0)])).not.toThrow()
     expect(ev.peekTail()).toHaveLength(0)
+  })
+})
+
+describe('contiguify — history normalization before setData', () => {
+  function bar(time: number, close: number): UnifiedCandle {
+    return { symbol: SYM, exchange: EX, timeframe: TF, time, open: close - 1, high: close + 1, low: close - 2, close, volume: 7 }
+  }
+
+  it('returns the input by reference when already contiguous', () => {
+    const input = [bar(0, 10), bar(60, 11), bar(120, 12)]
+    expect(contiguify(input, 60)).toBe(input)
+  })
+
+  it('bridges holes between history neighbors with flat bars', () => {
+    const out = contiguify([bar(0, 100), bar(240, 110), bar(300, 111)], 60)
+    expect(out.map(c => c.time)).toEqual([0, 60, 120, 180, 240, 300])
+    const filler = out[1]
+    expect(filler.close).toBe(100)
+    expect(filler.volume).toBe(0)
+    expect(isFlatFiller(filler)).toBe(true)
+    // Real rows keep identity and values.
+    expect(out[4].close).toBe(110)
+    expect(isFlatFiller(out[4])).toBe(false)
+  })
+
+  it('caps each gap at MAX_FORWARD_FILL_PERIODS', () => {
+    const huge = 60 * (MAX_FORWARD_FILL_PERIODS + 300)
+    const out = contiguify([bar(0, 5), bar(huge, 6)], 60)
+    expect(out).toHaveLength(MAX_FORWARD_FILL_PERIODS + 2)
+  })
+
+  it('handles multiple gaps and respects the total budget', () => {
+    // 3 gaps ? 150 missing periods > per-gap cap kicks in; total budget is
+    // MAX_FORWARD_FILL_PERIODS * 4 = 480.
+    const t = (n: number) => n * 60
+    const input = [bar(t(0), 1), bar(t(151), 2), bar(t(302), 3), bar(t(453), 4)]
+    const out = contiguify(input, 60)
+    const fillers = out.filter(isFlatFiller)
+    expect(fillers.length).toBeLessThanOrEqual(MAX_FORWARD_FILL_PERIODS * 4)
+    // Times stay strictly ascending and unique.
+    for (let i = 1; i < out.length; i++) {
+      expect(out[i].time).toBeGreaterThan(out[i - 1].time)
+    }
   })
 })

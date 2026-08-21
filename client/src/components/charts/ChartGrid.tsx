@@ -18,7 +18,7 @@ import { expandCompactCandles, type CompactCandle } from '../../services/candle-
 import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatch, type TickPayload } from '../../services/candle-events'
 import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
 import { canPaintPartialHistory, replaceDataPreservingPriceScale, resolveHistoryViewportAction } from '../../services/chart-history-paint'
-import { isFiniteOHLCV, validateCandle, MAX_FORWARD_FILL_PERIODS, forwardFillGap, isFlatFiller } from '../../services/candle-utils'
+import { isFiniteOHLCV, validateCandle, MAX_FORWARD_FILL_PERIODS, forwardFillGap, isFlatFiller, contiguify } from '../../services/candle-utils'
 import { resolveHistoryLoadPlan } from '../../services/history-load-plan'
 import { recordDiag } from '../../services/candle-diag'
 import { useDrawings } from './useDrawings'
@@ -298,6 +298,7 @@ function backfillJumpWindow(
   symbol: string,
   tf: Timeframe,
   exchange?: Exchange,
+  onInsufficient?: () => void,
 ): void {
   const key = `${exchange ?? 'auto'}:${symbol}:${tf}`
   const now = Date.now()
@@ -321,13 +322,17 @@ function backfillJumpWindow(
 
       // Scan the tail region where fillers live (they were just appended).
       let checked = 0
+      let fillersSeen = 0
+      let replaced = 0
       for (let i = arr.length - 1; i >= 0 && checked <= MAX_FORWARD_FILL_PERIODS + 2; i--, checked++) {
         const cur = arr[i]
         if (!isFlatFiller(cur)) continue
+        fillersSeen++
         const real = realByTime.get(cur.time)
         if (!real || !validateCandle(real)) continue
         if (real.close === cur.close && real.open === cur.open && real.high === cur.high && real.low === cur.low && real.volume === cur.volume) continue
         arr[i] = { ...real }
+        replaced++
         try {
           series.update({
             time: toChartTime(real.time) as Time,
@@ -336,8 +341,50 @@ function backfillJumpWindow(
           volumeRef.current?.update({ time: toChartTime(real.time) as Time, value: real.volume }, true)
         } catch { /* series recreated mid-backfill — next history load covers */ }
       }
+      // The server cache could not cover ANY of the bridge window — point
+      // repaints are useless here; escalate to a full history reload so real
+      // rows replace the bridges within one round-trip.
+      if (fillersSeen > 0 && replaced === 0) onInsufficient?.()
     })
     .catch(() => { /* transient — the next jump or history load retries */ })
+}
+
+// --- Full-history reload trigger ---------------------------------------------
+// A jump larger than the bridge cap (or a backfill the server cache cannot
+// cover yet) needs REAL history, not more fillers. The owning component
+// registers a one-shot bump callback; useFullHistory sees the tick change and
+// force-reloads from the server exactly once per change (throttled per channel).
+const RELOAD_THROTTLE_MS = 30_000
+const reloadTriggers = new WeakMap<React.RefObject<UnifiedCandle[]>, () => void>()
+const reloadAt = new Map<string, number>()
+
+function registerHistoryReload(
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  trigger: () => void,
+): void {
+  reloadTriggers.set(candlesDataRef, trigger)
+}
+
+function requestHistoryReload(
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  symbol: string,
+  tf: Timeframe,
+  exchange?: Exchange,
+): void {
+  const key = `${exchange ?? 'auto'}:${symbol}:${tf}`
+  const now = Date.now()
+  if (now - (reloadAt.get(key) ?? 0) < RELOAD_THROTTLE_MS) return
+  reloadAt.set(key, now)
+  if (reloadAt.size > 200) {
+    for (const [k, ts] of reloadAt) {
+      if (now - ts > RELOAD_THROTTLE_MS) reloadAt.delete(k)
+    }
+  }
+  recordDiag('history_reload_requested', {
+    symbol, exchange, tf,
+    detail: 'escalated from jump/backfill — flat bridges pending real rows',
+  })
+  reloadTriggers.get(candlesDataRef)?.()
 }
 
 /**
@@ -376,7 +423,11 @@ function applyChartPatch(
     if (lastArrBar && lastArrBar.time > 0 && bar.time > lastArrBar.time) {
       const tfSec = getTfSeconds(tf)
       const gapPeriods = Math.round((bar.time - lastArrBar.time) / tfSec)
-      if (gapPeriods > 1 && gapPeriods <= MAX_FORWARD_FILL_PERIODS + 1) {
+      if (gapPeriods > 1) {
+        // Jumps larger than the bridge cap are filled UP TO the cap as well —
+        // whitespace must never render — and then escalated to a full history
+        // reload so real rows replace the bridges within one round-trip.
+        const capped = gapPeriods > MAX_FORWARD_FILL_PERIODS + 1
         const fillers = forwardFillGap(lastArrBar, bar.time, tfSec)
         try {
           // Same handoff rule as a normal new-period paint: snap the old
@@ -402,20 +453,13 @@ function applyChartPatch(
             detail: `source=${source} error=${err instanceof Error ? err.message : String(err)}`,
           })
         }
-        recordDiag('period_jump_filled', {
+        recordDiag(capped ? 'period_jump_filled_capped' : 'period_jump_filled', {
           symbol, exchange, tf,
           from: lastArrBar.time, to: bar.time,
-          detail: `gap=${gapPeriods - 1}p filled=${fillers.length} source=${source}`,
+          detail: `gap=${gapPeriods - 1}p filled=${fillers.length}${capped ? ` (cap=${MAX_FORWARD_FILL_PERIODS})` : ''} source=${source}`,
         })
-        backfillJumpWindow(candleRef, volumeRef, candlesDataRef, symbol, tf, exchange)
-      } else if (gapPeriods > MAX_FORWARD_FILL_PERIODS + 1) {
-        // Absurd jump (clock skew / bad data): do NOT synthesize hundreds of
-        // bars — log it; the next history load repaints truthfully.
-        recordDiag('period_jump_skipped', {
-          symbol, exchange, tf,
-          from: lastArrBar.time, to: bar.time,
-          detail: `gap=${gapPeriods - 1}p exceeds cap ${MAX_FORWARD_FILL_PERIODS}, source=${source}`,
-        })
+        backfillJumpWindow(candleRef, volumeRef, candlesDataRef, symbol, tf, exchange, () => requestHistoryReload(candlesDataRef, symbol, tf, exchange))
+        if (capped) requestHistoryReload(candlesDataRef, symbol, tf, exchange)
       }
     }
 
@@ -720,7 +764,7 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  options?: { limit?: number; initialLimit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServerToken?: number; wsEpoch?: number; recentVersion?: number },
+  options?: { limit?: number; initialLimit?: number; visibleBars?: number; fitOnOpen?: boolean; wsEpoch?: number; historyReloadTick?: number; recentVersion?: number },
   lastUpdateRef?: React.RefObject<number>,
   eventsRef?: React.RefObject<CandleEvents | null>,
   chartVersion?: number,
@@ -730,13 +774,16 @@ function useFullHistory(
   const fitOnOpen = options?.fitOnOpen ?? false
   const visibleBars = options?.visibleBars ?? 150
   const recentVersion = options?.recentVersion ?? 0
-  // Force-server token semantics: the WS-open counter. A run triggered by a
-  // token CHANGE (a fresh reconnect) bypasses the client cache ONCE so periods
-  // lost during the dead window are healed from the server. Every later run
-  // (symbol/TF switch, candles-recent bump, top-up) uses the cache again — the
-  // old boolean stayed true forever after the first reconnect and made ALL
-  // history loads ignore the cache until a page reload.
-  const forceServerToken = options?.wsEpoch ?? 0
+  // Force-server tokens, each forcing ONE server round-trip on CHANGE:
+  //  - wsEpoch: the WS-open counter — a fresh reconnect heals periods lost in
+  //    the dead window from the server;
+  //  - historyReloadTick: escalated by jump/backfill when flat bridges need
+  //    real rows the client cache does not have.
+  // Every later run (symbol/TF switch, candles-recent bump, top-up) uses the
+  // cache again — a sticky boolean once made ALL history loads ignore the
+  // cache until a page reload. First run (prev === null) is never forced.
+  const wsEpochToken = options?.wsEpoch ?? 0
+  const reloadTick = options?.historyReloadTick ?? 0
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const [status, setStatus] = useState<FullHistoryStatus>('loading')
   const [dataVersion, setDataVersion] = useState(0)
@@ -744,17 +791,20 @@ function useFullHistory(
   // Key of the last painted series — used to save the viewport we are about
   // to leave and to know whether a reload is a same-key refresh.
   const lastPaintedKeyRef = useRef<string | null>(null)
-  const prevForceTokenRef = useRef<number | null>(null)
+  const prevWsEpochRef = useRef<number | null>(null)
+  const prevReloadTickRef = useRef<number | null>(null)
   useEffect(() => {
     if (!exchange) return
     const cancelled = { value: false }
-    // Forced server round-trip only on a FRESH reconnect epoch (see the token
-    // doc above). First run (prev === null) is never forced — the cache/SWR
-    // path owns the first paint.
-    const forceServer = forceServerToken > 0
-      && prevForceTokenRef.current !== null
-      && prevForceTokenRef.current !== forceServerToken
-    prevForceTokenRef.current = forceServerToken
+    const wsEpochForced = wsEpochToken > 0
+      && prevWsEpochRef.current !== null
+      && prevWsEpochRef.current !== wsEpochToken
+    const reloadForced = reloadTick > 0
+      && prevReloadTickRef.current !== null
+      && prevReloadTickRef.current !== reloadTick
+    prevWsEpochRef.current = wsEpochToken
+    prevReloadTickRef.current = reloadTick
+    const forceServer = wsEpochForced || reloadForced
     const sameKeyReload = forceServer && lastPaintedKeyRef.current === `${exchange}:${symbol}:${tf}`
     // Already painted this key? A recentVersion re-run (candles-recent landed
     // after the full history) must NOT re-show the loading spinner over the
@@ -778,7 +828,11 @@ function useFullHistory(
         saveViewport(prevKey, captureViewport(chartRef.current))
       }
 
-      const valid = candles.filter(validateCandle)
+      // Contiguity normalization: server cache can still contain holes (the
+      // repair watchdog heals them within minutes) — painting them raw makes
+      // lightweight-charts insert whitespace INSIDE history. Bridge bars keep
+      // the series continuous until real rows arrive.
+      const valid = contiguify(candles.filter(validateCandle), getTfSeconds(tf))
       candlesDataRef.current = valid
       const lineMode = useChartSettings.getState().candlesType === 'line'
       const candleData = lineMode
@@ -985,7 +1039,7 @@ function useFullHistory(
     // (pricePrecision flip) — the new chart starts empty.
     // `wsEpoch` (the force-server token) re-paints after a WS reconnect so
     // periods that fell through the dead window are restored from the server.
-  }, [symbol, exchange, tf, chartVersion, forceServerToken, limit, initialLimit, fitOnOpen, visibleBars, recentVersion,
+  }, [symbol, exchange, tf, chartVersion, wsEpochToken, reloadTick, limit, initialLimit, fitOnOpen, visibleBars, recentVersion,
     candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, lastUpdateRef, eventsRef])
 
   return { isInitialLoading, status, dataVersion }
@@ -1061,8 +1115,11 @@ function useLazyScroll(
         }
         // Capture BEFORE setData — prepending shifts every logical index.
         const prevLogical = ts.getVisibleLogicalRange()
+        // Same contiguity rule as the initial paint: older pages can bridge
+        // exchange-side holes; whitespace must never render inside history.
+        const contiguous = contiguify(merged, getTfSeconds(curTf))
         const prevLen = candlesDataRef.current.length
-        const added = merged.length - prevLen
+        const added = contiguous.length - prevLen
 
         if (added <= 0) {
           const flush = eventsRef?.current?.setBuffered(false)
@@ -1075,17 +1132,17 @@ function useLazyScroll(
 
         adjustingRef.current = true
         try {
-          candlesDataRef.current = merged
+          candlesDataRef.current = contiguous
           // Prepend replaces everything — stop any pending forming-candle
           // glide so it can't paint stale interpolated values.
           stopFormingGlide(candleRef)
           const lineMode = useChartSettings.getState().candlesType === 'line'
           const candleData = lineMode
-            ? merged.map(c => ({ time: toChartTime(c.time) as Time, value: c.close }))
-            : merged.map(c => ({
+            ? contiguous.map(c => ({ time: toChartTime(c.time) as Time, value: c.close }))
+            : contiguous.map(c => ({
                 time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close,
               }))
-          const volumeData = merged.map(c => ({
+          const volumeData = contiguous.map(c => ({
             time: toChartTime(c.time) as Time, value: c.volume,
           }))
           onLogicalShiftRef.current?.(added)
@@ -1626,9 +1683,17 @@ const MiniChart = memo(function MiniChart({
   const [recentVersion, setRecentVersion] = useState(0)
   const bumpRecentVersion = useCallback(() => setRecentVersion(v => v + 1), [])
 
+  // Escalation target for period jumps the bridge cap / backfill cannot cover:
+  // one full history reload per tick change (throttled in requestHistoryReload).
+  const [reloadTick, setReloadTick] = useState(0)
+  useEffect(() => {
+    registerHistoryReload(candlesDataRef, () => setReloadTick(v => v + 1))
+  }, [candlesDataRef])
+
   const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
     limit: GRID_CANDLE_LIMIT,
     wsEpoch: wsCount,
+    historyReloadTick: reloadTick,
     recentVersion,
   }, lastUpdateRef, eventsRef, chartVersion)
 
@@ -2362,11 +2427,19 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   const [recentVersion, setRecentVersion] = useState(0)
   const bumpRecentVersion = useCallback(() => setRecentVersion(v => v + 1), [])
 
+  // Escalation target for period jumps the bridge cap / backfill cannot cover
+  // (see the identical block in MiniChart).
+  const [reloadTick, setReloadTick] = useState(0)
+  useEffect(() => {
+    registerHistoryReload(candlesDataRef, () => setReloadTick(v => v + 1))
+  }, [candlesDataRef])
+
   const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
     limit: EXPANDED_CANDLE_LIMIT,
     initialLimit: GRID_CANDLE_LIMIT,
     fitOnOpen: true,
     wsEpoch: wsCount,
+    historyReloadTick: reloadTick,
     recentVersion,
   }, lastUpdateRef, eventsRef, chartVersion)
 

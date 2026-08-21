@@ -62,3 +62,44 @@ export function forwardFillGap(
 export function isFlatFiller(c: UnifiedCandle): boolean {
   return c.volume === 0 && c.open === c.high && c.high === c.low && c.low === c.close
 }
+
+/** Total bridge-bar budget for one array pass — a pathological input cannot
+ *  balloon into thousands of synthetic rows. */
+const CONTIGUIFY_TOTAL_BUDGET = MAX_FORWARD_FILL_PERIODS * 4
+
+/**
+ * Normalize ANY candle array into a time-contiguous series: wherever neighbors
+ * skip periods, insert flat bridge bars (forwardFillGap semantics). Applied
+ * before every setData() so history holes — un-repaired server cache, bulk
+ * pushes, reconnect tails — never render as lightweight-charts whitespace.
+ * Returns the input by reference when already contiguous.
+ */
+export function contiguify(candles: UnifiedCandle[], tfSec: number): UnifiedCandle[] {
+  if (!Number.isFinite(tfSec) || tfSec <= 0 || candles.length < 2) return candles
+  let output: UnifiedCandle[] | null = null
+  let filledTotal = 0
+  for (let i = 1; i < candles.length; i++) {
+    const prev = candles[i - 1]
+    const cur = candles[i]
+    const gapPeriods = Math.round((cur.time - prev.time) / tfSec)
+    const missing = gapPeriods > 1 ? Math.min(gapPeriods - 1, MAX_FORWARD_FILL_PERIODS) : 0
+    if (missing > 0 && filledTotal < CONTIGUIFY_TOTAL_BUDGET) {
+      if (!output) output = candles.slice(0, i)
+      for (let k = 1; k <= missing && filledTotal < CONTIGUIFY_TOTAL_BUDGET; k++) {
+        output.push({
+          ...prev,
+          time: prev.time + k * tfSec,
+          open: prev.close,
+          high: prev.close,
+          low: prev.close,
+          close: prev.close,
+          volume: 0,
+          isFinal: true,
+        })
+        filledTotal++
+      }
+    }
+    if (output) output.push(cur)
+  }
+  return output || candles
+}
