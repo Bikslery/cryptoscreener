@@ -13,12 +13,14 @@ let backgroundWaitMsTotal = 0
  */
 export function beginForegroundHistory(): () => void {
   foregroundActive++
+  historyForegroundGauge.set(foregroundActive)
   lastForegroundAt = Date.now()
   let released = false
   return () => {
     if (released) return
     released = true
     foregroundActive = Math.max(0, foregroundActive - 1)
+    historyForegroundGauge.set(foregroundActive)
     lastForegroundAt = Date.now()
   }
 }
@@ -38,12 +40,14 @@ export async function waitForHistoryBackgroundSlot(options: BackgroundSlotOption
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS
   const startedAt = Date.now()
   backgroundWaiters++
+  historyBackgroundWaitersGauge.set(backgroundWaiters)
   try {
     while (foregroundActive > 0 || Date.now() - lastForegroundAt < quietPeriodMs) {
       await new Promise(resolve => setTimeout(resolve, pollMs))
     }
   } finally {
     backgroundWaiters = Math.max(0, backgroundWaiters - 1)
+    historyBackgroundWaitersGauge.set(backgroundWaiters)
     backgroundWaitMsTotal += Date.now() - startedAt
   }
 }
@@ -56,3 +60,4 @@ export function getHistoryPriorityState() {
     lastForegroundAt,
   }
 }
+import { historyBackgroundWaitersGauge, historyForegroundGauge } from '../../metrics.js'

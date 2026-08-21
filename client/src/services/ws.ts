@@ -1,5 +1,5 @@
 import type { WsMessage } from '../types.js'
-import { recordFrameLatency } from './latency.js'
+import { recordFrameLatency, recordMarketDataFreshness } from './latency.js'
 import { recordDiag } from './candle-diag.js'
 
 type WsCallback = (msg: WsMessage) => void
@@ -147,6 +147,10 @@ function connect() {
           // client-side queue, so it reflects what the user actually sees.
           if (typeof msg.ts === 'number') {
             recordFrameLatency(Date.now() - msg.ts)
+          }
+          const eventTimeMs = (msg.data as { eventTimeMs?: unknown } | undefined)?.eventTimeMs
+          if (typeof eventTimeMs === 'number') {
+            recordMarketDataFreshness(Date.now() - eventTimeMs)
           }
           dispatch(msg)
         } catch { wsDiag.parseErrors++ /* ignore malformed frame */ }

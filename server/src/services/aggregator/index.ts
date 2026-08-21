@@ -3,7 +3,7 @@ import { BinanceSpotAdapter } from '../exchanges/binance-spot.js'
 import { BinanceFuturesAdapter } from '../exchanges/binance-futures.js'
 import { BybitFuturesAdapter } from '../exchanges/bybit-futures.js'
 import type { ExchangeAdapter } from '../exchanges/types.js'
-import { RateLimitError } from '../exchanges/errors.js'
+import { ExchangeRequestError, RateLimitError } from '../exchanges/errors.js'
 import { broadcast, broadcastToChannel } from '../../ws/hub.js'
 import { updateCachedCandle, getCachedCandles } from '../candles/candle-cache.js'
 import { getRedisPub, getRedisData, REDIS_ENABLED } from '../../redis.js'
@@ -897,6 +897,7 @@ export async function fetchCandlesSeamless(
   let currentEnd = endTime
   let currentStart = startTime
   const triedExchanges = new Set<string>()
+  let lastRequestError: unknown = null
 
   for (const adapter of ordered) {
     if (remaining <= 0) break
@@ -933,8 +934,16 @@ export async function fetchCandlesSeamless(
       // history layer fails loudly instead of treating the gap as "the pair
       // has no data" (which permanently starved chart pages of depth).
       if (e instanceof RateLimitError) throw e
+      lastRequestError = e
+      if (exchange) throw e
       continue
     }
+  }
+
+  if (allCandles.length === 0 && lastRequestError) {
+    throw new ExchangeRequestError(
+      `All candle providers failed for ${symbol}:${tf}: ${lastRequestError instanceof Error ? lastRequestError.message : String(lastRequestError)}`,
+    )
   }
 
   // Deduplicate by time, keep highest-priority exchange candle for each timestamp

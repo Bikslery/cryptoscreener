@@ -124,6 +124,10 @@ export function setCandleManager(cm: typeof candleManager) {
 
 const wsBatchBuffer = new Map<string, unknown>()
 
+export function makeChannelMessage(channel: string, data: unknown, ts: number = Date.now()): WsMessage {
+  return { type: channel, channel, data, ts }
+}
+
 // Outbound WS frames are deflate-raw compressed binary (same approach as
 // scalpboard) instead of plain JSON text — the browser decompresses via
 // DecompressionStream('deflate-raw'). Ticker snapshots shrink ~10x;
@@ -222,7 +226,7 @@ function flushBatchBuffer() {
   const endTimer = wsBatchFlushLatency.startTimer()
   try {
     for (const [channel, data] of wsBatchBuffer) {
-const msg: WsMessage = { type: channel, channel, data }
+      const msg = makeChannelMessage(channel, data)
       let raw: Buffer | string | null = null
       for (const client of clients.values()) {
         if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
@@ -624,7 +628,7 @@ export function broadcast(msg: WsMessage) {
 
 export function broadcastToChannel(channel: string, data: unknown, immediate = false) {
   if (immediate) {
-    const msg: WsMessage = { type: channel, channel, data }
+    const msg = makeChannelMessage(channel, data)
     const raw = encodePayload(msg)
     for (const client of clients.values()) {
       if (!client.subscriptions.has(channel) || client.ws.readyState !== WebSocket.OPEN) continue

@@ -4,6 +4,8 @@ import { fetchCandles, fetchDepth, getAllTickers, getTickers, getTicker } from '
 import { getCachedCandles, setCachedCandlesFromRest, fillGaps } from '../services/candles/candle-cache.js'
 import { getHistory } from '../services/candles/history.js'
 import { compactCandles } from '../services/candles/compact.js'
+import { buildHistoryMeta, type HistoryMeta } from '../services/candles/history-contract.js'
+import { historyFreshnessSeconds, historyRequestDuration, historyResponsesTotal } from '../metrics.js'
 import type { Exchange } from '../types.js'
 
 const apiLimiter = rateLimit({
@@ -20,6 +22,16 @@ const router = Router()
 const SUPPORTED_TIMEFRAMES = new Set(['1m', '5m', '15m', '1h', '4h', '1d', '1w'])
 const SUPPORTED_EXCHANGES = new Set<Exchange>(['binance-spot', 'binance-futures', 'bybit-futures'])
 const MAX_CANDLE_LIMIT = 3000
+
+function observeHistory(route: 'tail' | 'older' | 'bulk', meta: HistoryMeta, tf: string, startedAt: number): void {
+  const source = meta.cached ? 'cache' : meta.degraded ? 'stale' : 'history'
+  const labels = { route, status: meta.status, source }
+  historyRequestDuration.observe(labels, (Date.now() - startedAt) / 1000)
+  historyResponsesTotal.inc(labels)
+  if (meta.source && meta.freshnessMs !== null) {
+    historyFreshnessSeconds.set({ exchange: meta.source, timeframe: tf }, meta.freshnessMs / 1000)
+  }
+}
 
 /** Route-level timeout for individual history requests. The underlying fetch
  *  keeps running in the background (it populates the cache for the next
@@ -144,6 +156,7 @@ router.get('/top-symbols', (_req, res) => {
 })
 
 router.post('/candles-bulk', async (req, res) => {
+  const startedAt = Date.now()
   const { symbols, tf } = req.body as { symbols: string[]; tf: string; limit: number; exchange?: string; compact?: boolean }
   const limit = normalizeLimit(req.body?.limit, 500)
   const exchange = normalizeExchange(req.body?.exchange)
@@ -165,6 +178,7 @@ router.post('/candles-bulk', async (req, res) => {
     return
   }
   const result: Record<string, any[]> = {}
+  const resultCached: Record<string, boolean> = {}
   const missing: string[] = []
 
   // Check server in-memory cache first (fastest path) — but only when it is
@@ -179,12 +193,14 @@ router.post('/candles-bulk', async (req, res) => {
     // through to getHistory, which also deepens the cache on write-back.
     if (cached && cached.length >= limit && isCacheFresh(cached, tf)) {
       result[symbol] = cached.slice(-limit)
+      resultCached[symbol] = true
     } else if (cached && cached.length > 0) {
       // SWR: paint what we have immediately; the background refresh deepens
       // and freshens the cache so the next request (and the client's
       // individual top-up) hits warm data. Never blocks the grid on the
       // exchange round-trip.
       result[symbol] = cached.slice(-limit)
+      resultCached[symbol] = true
       refreshCandlesInBackground(symbol, tf, limit, ex)
     } else {
       missing.push(symbol)
@@ -216,20 +232,25 @@ router.post('/candles-bulk', async (req, res) => {
         ? await Promise.race([fetchPromise, new Promise<Awaited<ReturnType<typeof getHistory>>>(resolve => setTimeout(() => resolve([]), timeLeft))])
         : []
       result[symbol] = candles
+      resultCached[symbol] = false
     })
     await Promise.all(fetches)
   }
 
   if (compact) {
     // [t,o,h,l,c,v] tuples + per-symbol exchange — ~2-3x smaller payload
-    const data: Record<string, { exchange: string | null; candles: ReturnType<typeof compactCandles> }> = {}
+    const data: Record<string, { exchange: string | null; candles: ReturnType<typeof compactCandles> } & HistoryMeta> = {}
+    let overallMeta: HistoryMeta | null = null
     for (const [symbol, candles] of Object.entries(result)) {
       const ex = candles[0]?.exchange || exchange || getTicker(symbol)?.exchange || null
       // Guarantee: never serve a hole — any missing period is bridged with a
       // flat candle here, so the client cannot paint an empty spot.
       const gapless = fillGaps(candles, symbol, ex ?? 'binance-futures', tf)
-      data[symbol] = { exchange: ex, candles: compactCandles(gapless) }
+      const meta = buildHistoryMeta(gapless, { requestedLimit: limit, cached: resultCached[symbol] ?? false, source: ex })
+      data[symbol] = { exchange: ex, candles: compactCandles(gapless), ...meta }
+      if (!overallMeta || (overallMeta.status === 'complete' && meta.status !== 'complete') || meta.status === 'no_data') overallMeta = meta
     }
+    if (overallMeta) observeHistory('bulk', overallMeta, tf, startedAt)
     res.json({ format: 'compact', data })
     return
   }
@@ -244,21 +265,33 @@ router.post('/candles-bulk', async (req, res) => {
 })
 
 router.get('/:symbol/candles', async (req, res) => {
+  const startedAt = Date.now()
   const { symbol } = req.params
   const tf = (req.query.tf as string) || '1m'
   const limit = normalizeLimit(req.query.limit, 500)
   const exchange = req.query.exchange as string | undefined
+  const normalizedExchange = normalizeExchange(exchange)
   const before = req.query.before ? parseInt(req.query.before as string) : undefined
   const compact = req.query.compact === '1' || req.query.compact === 'true'
 
-  const send = (candles: Awaited<ReturnType<typeof getHistory>>) => {
+  const send = (
+    candles: Awaited<ReturnType<typeof getHistory>>,
+    options: { cached: boolean; degraded?: boolean } = { cached: false },
+  ) => {
     // Hole guarantee: bridge missing periods with flat candles before the
     // response leaves the server, whatever the source (cache fast-path,
     // Redis chunk, exchange fetch).
-    const ex: Exchange | null = candles[0]?.exchange || exchange || getTicker(symbol)?.exchange || null
+    const ex: Exchange | null = candles[0]?.exchange || normalizedExchange || getTicker(symbol)?.exchange || null
     const gapless = fillGaps(candles, symbol, ex ?? 'binance-futures', tf)
+    const meta = buildHistoryMeta(gapless, {
+      requestedLimit: limit,
+      cached: options.cached,
+      degraded: options.degraded,
+      source: ex,
+    })
+    observeHistory(before !== undefined ? 'older' : 'tail', meta, tf, startedAt)
     if (compact) {
-      res.json({ format: 'compact', exchange: ex, candles: compactCandles(gapless) })
+      res.json({ format: 'compact', exchange: ex, candles: compactCandles(gapless), ...meta })
     } else {
       res.json(gapless)
     }
@@ -266,6 +299,10 @@ router.get('/:symbol/candles', async (req, res) => {
 
   if (!SUPPORTED_TIMEFRAMES.has(tf)) {
     res.status(400).json({ error: 'Unsupported timeframe' })
+    return
+  }
+  if (exchange && !normalizedExchange) {
+    res.status(400).json({ error: 'Unsupported exchange' })
     return
   }
 
@@ -278,24 +315,31 @@ router.get('/:symbol/candles', async (req, res) => {
   const respondTransient = (stale: Awaited<ReturnType<typeof getHistory>> | null) => {
     if (stale && stale.length > 0) {
       res.setHeader('Cache-Control', 'public, max-age=5')
-      send(stale)
+      send(stale, { cached: true, degraded: true })
       return
     }
     res.setHeader('Retry-After', '5')
-    res.status(503).json({ error: 'Exchange temporarily unavailable, retry later' })
+    res.status(503).json({
+      status: 'transient_error',
+      complete: false,
+      noData: false,
+      retryAfterMs: 5000,
+      error: 'Exchange temporarily unavailable, retry later',
+      generatedAt: Date.now(),
+    })
   }
 
   if (before !== undefined) {
     try {
-      const candles = await withTimeout(getHistory(symbol, tf, { before, limit, exchange: normalizeExchange(exchange) }), HISTORY_ROUTE_TIMEOUT_MS)
-      send(candles)
+      const candles = await withTimeout(getHistory(symbol, tf, { before, limit, exchange: normalizedExchange }), HISTORY_ROUTE_TIMEOUT_MS)
+      send(candles, { cached: false })
     } catch {
       respondTransient(null)
     }
     return
   }
 
-  const cacheExchange = normalizeExchange(exchange) || getTicker(symbol)?.exchange
+  const cacheExchange = normalizedExchange || getTicker(symbol)?.exchange
   const cached = getCachedCandles(symbol, tf, cacheExchange)
   // Serve the cache only when it can satisfy the REQUESTED depth — a shallow
   // WS-built cache served for a deep request is exactly the "almost empty
@@ -303,7 +347,7 @@ router.get('/:symbol/candles', async (req, res) => {
   // returns full depth and re-deepens the cache on write-back.
   if (cached && cached.length >= limit && isCacheFresh(cached, tf)) {
     res.setHeader('Cache-Control', 'public, max-age=5')
-    send(cached.slice(-limit))
+    send(cached.slice(-limit), { cached: true })
     return
   }
   if (cached && cached.length > 0) {
@@ -318,7 +362,7 @@ router.get('/:symbol/candles', async (req, res) => {
         const updated = getCachedCandles(symbol, tf, cacheExchange)
         if (updated && updated.length >= limit) {
           res.setHeader('Cache-Control', 'public, max-age=5')
-          send(updated.slice(-limit))
+          send(updated.slice(-limit), { cached: true })
           return
         }
       } catch {
@@ -332,17 +376,17 @@ router.get('/:symbol/candles', async (req, res) => {
     // refresh in the background — the chart paints now, the cache heals
     // without holding the response hostage to the exchange round-trip.
     res.setHeader('Cache-Control', 'public, max-age=5')
-    send(cached.slice(-limit))
+    send(cached.slice(-limit), { cached: true, degraded: !isCacheFresh(cached, tf) })
     return
   }
 
   try {
-    const candles = await withTimeout(getHistory(symbol, tf, { limit, exchange: normalizeExchange(exchange) }), HISTORY_ROUTE_TIMEOUT_MS)
+    const candles = await withTimeout(getHistory(symbol, tf, { limit, exchange: normalizedExchange }), HISTORY_ROUTE_TIMEOUT_MS)
     if (candles.length > 0) {
       // Key by the same exchange used for reads/WS updates so cache hits align.
       setCachedCandlesFromRest(symbol, tf, candles, cacheExchange || candles[0]?.exchange)
     }
-    send(candles)
+    send(candles, { cached: false })
   } catch {
     respondTransient(cached ?? null)
   }

@@ -103,4 +103,46 @@ export const candleCacheRepairsTotal = new client.Counter({
   registers: [register]
 })
 
+// --- Candle history latency / freshness -----------------------------------
+export const historyRequestDuration = new client.Histogram({
+  name: 'cs_history_request_duration_seconds',
+  help: 'User-visible candle history response duration',
+  labelNames: ['route', 'status', 'source'],
+  buckets: [0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15],
+  registers: [register],
+})
+
+export const historyResponsesTotal = new client.Counter({
+  name: 'cs_history_responses_total',
+  help: 'Candle history responses by semantic status and source',
+  labelNames: ['route', 'status', 'source'],
+  registers: [register],
+})
+
+export const historyFreshnessSeconds = new client.Gauge({
+  name: 'cs_history_freshness_seconds',
+  help: 'Age of the newest candle returned to a user',
+  labelNames: ['exchange', 'timeframe'],
+  registers: [register],
+})
+
+export const historyCacheAccessTotal = new client.Counter({
+  name: 'cs_history_cache_access_total',
+  help: 'History hot-path access by cache tier and outcome',
+  labelNames: ['tier', 'outcome'],
+  registers: [register],
+})
+
+export const historyForegroundGauge = new client.Gauge({
+  name: 'cs_history_foreground_active',
+  help: 'Currently active user-visible history operations',
+  registers: [register],
+})
+
+export const historyBackgroundWaitersGauge = new client.Gauge({
+  name: 'cs_history_background_waiters',
+  help: 'Preload/repair operations waiting for foreground history to become idle',
+  registers: [register],
+})
+
 export { register }

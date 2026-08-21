@@ -5,6 +5,7 @@ const MAX_SAMPLES = 4000
 const LOG_INTERVAL_MS = 30_000
 
 const samples: number[] = []
+const freshnessSamples: number[] = []
 let lastLogAt = 0
 let total = 0
 
@@ -25,14 +26,23 @@ export function recordFrameLatency(ms: number) {
   console.info(`[Latency] p50=${p50.toFixed(1)}ms p95=${p95.toFixed(1)}ms p99=${p99.toFixed(1)}ms n=${total}`)
 }
 
+export function recordMarketDataFreshness(ms: number) {
+  if (!Number.isFinite(ms) || ms < 0 || ms > 60_000) return
+  freshnessSamples.push(ms)
+  if (freshnessSamples.length > MAX_SAMPLES) freshnessSamples.splice(0, freshnessSamples.length - MAX_SAMPLES)
+}
+
 /** Snapshot of the current distribution (useful for debugging / future UI). */
 export function getLatencyStats() {
   if (samples.length === 0) return { count: 0 }
   const sorted = [...samples].sort((a, b) => a - b)
+  const freshness = [...freshnessSamples].sort((a, b) => a - b)
   return {
     count: samples.length,
     p50: sorted[Math.floor(sorted.length * 0.5)] ?? 0,
     p95: sorted[Math.floor(sorted.length * 0.95)] ?? 0,
     p99: sorted[Math.floor(sorted.length * 0.99)] ?? 0,
+    freshnessP50: freshness[Math.floor(freshness.length * 0.5)] ?? null,
+    freshnessP95: freshness[Math.floor(freshness.length * 0.95)] ?? null,
   }
 }

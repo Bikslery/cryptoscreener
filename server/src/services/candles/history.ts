@@ -4,6 +4,7 @@ import { pickDispatcher, addWeightToIp, getIpCount } from '../exchanges/proxy.js
 import { acquireBudget } from '../exchanges/rate-limiter.js'
 import type { Exchange, UnifiedCandle } from '../../types.js'
 import { beginForegroundHistory, waitForHistoryBackgroundSlot } from './history-priority.js'
+import { historyCacheAccessTotal } from '../../metrics.js'
 
 const CHUNK_SIZE = 1000
 
@@ -64,11 +65,16 @@ const responseCache = new Map<string, { candles: UnifiedCandle[]; ts: number }>(
 
 function getCachedResponse(key: string): UnifiedCandle[] | null {
   const entry = responseCache.get(key)
-  if (!entry) return null
-  if (Date.now() - entry.ts > RESPONSE_CACHE_TTL_MS) {
-    responseCache.delete(key)
+  if (!entry) {
+    historyCacheAccessTotal.inc({ tier: 'response', outcome: 'miss' })
     return null
   }
+  if (Date.now() - entry.ts > RESPONSE_CACHE_TTL_MS) {
+    responseCache.delete(key)
+    historyCacheAccessTotal.inc({ tier: 'response', outcome: 'stale' })
+    return null
+  }
+  historyCacheAccessTotal.inc({ tier: 'response', outcome: 'hit' })
   return entry.candles
 }
 
@@ -131,7 +137,10 @@ async function readChunksFromRedis(keys: string[], symbol: string, exchange: Exc
     const redis = getRedisData()
     const raws = await redis.mget(...keys)
     return raws.map(raw => {
-      if (!raw) return null
+      if (!raw) {
+        historyCacheAccessTotal.inc({ tier: 'redis', outcome: 'miss' })
+        return null
+      }
       try {
         const stored = JSON.parse(raw as string) as StoredHistoryChunkV2
         if (
@@ -139,8 +148,10 @@ async function readChunksFromRedis(keys: string[], symbol: string, exchange: Exc
           !Array.isArray(stored.rows) ||
           stored.rowCount !== stored.rows.length
         ) return null
+        historyCacheAccessTotal.inc({ tier: 'redis', outcome: 'hit' })
         return stored.rows.map(([t, o, h, l, c, v]) => expandCandle(t, o, h, l, c, v, symbol, exchange, tf))
       } catch {
+        historyCacheAccessTotal.inc({ tier: 'redis', outcome: 'invalid' })
         return null
       }
     })
@@ -393,14 +404,17 @@ async function getHistoryInternal(
     } else {
       const memData = readChunkFromMem(keys[i], symbol, resolvedExchange, tf)
       if (memData) {
+        historyCacheAccessTotal.inc({ tier: 'memory', outcome: 'hit' })
         allCandles.push(...memData)
       } else {
+        historyCacheAccessTotal.inc({ tier: 'memory', outcome: 'miss' })
         misses.push({ key: keys[i], csMs: chunkInfos[i].csMs, idx: i })
       }
     }
   }
 
   if (misses.length > 0) {
+    historyCacheAccessTotal.inc({ tier: 'exchange', outcome: 'fetch' }, misses.length)
     // Fetch missing chunks with a small worker pool (was: strictly sequential).
     // Each chunk is already budget-gated via acquireBudget(weight 5) + the
     // inflightChunks dedup, so 2 in flight keeps the exchange happy while
