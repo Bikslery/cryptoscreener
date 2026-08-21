@@ -29,7 +29,7 @@ vi.mock('../src/services/candles/preload.js', () => ({
 
 vi.mock('../src/services/trades/aggTrade.js', () => ({}))
 
-import { encodePayload, classifyChannel, stopWsHub, shouldRelayAlert } from '../src/ws/hub.js'
+import { encodePayload, classifyChannel, makeChannelMessage, stopWsHub, shouldRelayAlert } from '../src/ws/hub.js'
 
 afterAll(() => {
   stopWsHub()
@@ -84,6 +84,17 @@ describe('classifyChannel', () => {
   it('falls back to the other lane for unrecognized channels', () => {
     expect(classifyChannel('depth:BTCUSDT')).toBe('other')
     expect(classifyChannel('density')).toBe('other')
+  })
+})
+
+describe('makeChannelMessage', () => {
+  it('stamps channel frames with server send time for browser latency measurement', () => {
+    expect(makeChannelMessage('trade:binance-futures:BTCUSDT', { price: 50000 }, 1234)).toEqual({
+      type: 'trade:binance-futures:BTCUSDT',
+      channel: 'trade:binance-futures:BTCUSDT',
+      data: { price: 50000 },
+      ts: 1234,
+    })
   })
 })
 
