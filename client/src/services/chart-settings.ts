@@ -1,6 +1,9 @@
 import { create } from 'zustand'
 import type { Timeframe } from '../types'
 
+// `hollow` remains in the type only so older persisted settings can be
+// migrated safely. It is no longer offered by the UI or rendered with a
+// transparent candle body.
 export type CandlesType = 'default' | 'hollow' | 'bars' | 'line'
 export type PriceScaleMode = 'default' | 'log'
 export type WatermarkPlace =
@@ -79,6 +82,7 @@ function loadSettings(): ChartSettings {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return DEFAULT_CHART_SETTINGS
     const parsed = JSON.parse(raw) as Partial<ChartSettings>
+    if (parsed.candlesType === 'hollow') parsed.candlesType = 'default'
     return { ...DEFAULT_CHART_SETTINGS, ...parsed }
   } catch {
     return DEFAULT_CHART_SETTINGS

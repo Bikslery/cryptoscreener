@@ -1919,12 +1919,12 @@ function ChartSettingsPanel() {
 
       <SettingsRow label="Candles">
         <div className="flex gap-[2px]">
-          {(['default', 'hollow', 'bars', 'line'] as const).map(t => (
+          {(['default', 'bars', 'line'] as const).map(t => (
             <Toggle
               key={t}
               checked={s.candlesType === t}
               onChange={() => setSetting('candlesType', t)}
-              label={t === 'default' ? 'Candles' : t === 'hollow' ? 'Hollow' : t === 'bars' ? 'Bars' : 'Line'}
+              label={t === 'default' ? 'Candles' : t === 'bars' ? 'Bars' : 'Line'}
             />
           ))}
         </div>

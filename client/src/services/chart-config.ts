@@ -112,11 +112,13 @@ export function candleSeriesOptions(s: ChartSettings): AnySeriesOptions {
       bottomColor: At('--foreground-10', '#cccccc1a'),
     } as DeepPartial<LineSeriesOptions>
   }
-  const hollow = s.candlesType === 'hollow'
   return {
     lastValueVisible: true,
     priceLineColor: At('--chart--price', '#b3b3b3'),
-    upColor: hollow ? 'transparent' : At('--chart--candle-up', '#4bd24b'),
+    // Candle bodies must stay opaque. The former hollow mode used a
+    // transparent upColor, which made candles disappear into overlays and
+    // persisted across sessions through chart settings.
+    upColor: At('--chart--candle-up', '#4bd24b'),
     borderUpColor: At('--chart--candle-border-up', '#4bd24b'),
     wickUpColor: At('--chart--candle-border-up', '#4bd24b'),
     downColor: At('--chart--candle-down', '#d24b4b'),
