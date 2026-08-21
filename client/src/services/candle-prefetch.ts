@@ -157,8 +157,32 @@ export function getOrFetchBulk(
     return Promise.resolve(cachedResult)
   }
 
-  const request = api.post('/coins/candles-bulk', { symbols: missing, tf, limit, exchange, compact: true })
-    .then(res => {
+  // Bidirectional dedupe: child chart effects can begin an individual GET
+  // before the parent registers its bulk request. Reuse those exact 300-bar
+  // promises and exclude their symbols from POST /candles-bulk, otherwise a
+  // cold grid can issue both transports for the same symbol.
+  const reusedIndividuals: Array<{ symbol: string; promise: Promise<UnifiedCandle[]> }> = []
+  const missingForBulk: string[] = []
+  for (const symbol of missing) {
+    const individualKey = `${exchange ?? 'auto'}:${symbol}:${tf}:${limit}`
+    const individual = getFreshEntry(inflightMap, individualKey)
+    if (individual) reusedIndividuals.push({ symbol, promise: individual.promise })
+    else missingForBulk.push(symbol)
+  }
+
+  const mergeReusedIndividuals = async (result: Record<string, UnifiedCandle[]>) => {
+    await Promise.all(reusedIndividuals.map(async ({ symbol, promise }) => {
+      try { result[symbol] = await promise } catch { result[symbol] = [] }
+    }))
+    return result
+  }
+
+  if (missingForBulk.length === 0) {
+    return mergeReusedIndividuals({ ...cachedResult })
+  }
+
+  const request = api.post('/coins/candles-bulk', { symbols: missingForBulk, tf, limit, exchange, compact: true })
+    .then(async res => {
       const result: Record<string, UnifiedCandle[]> = { ...cachedResult }
       if (isCompactBulk(res.data)) {
         for (const [symbol, entry] of Object.entries(res.data.data)) {
@@ -171,7 +195,7 @@ export function getOrFetchBulk(
             result[symbol] = []
           }
         }
-        return result
+        return mergeReusedIndividuals(result)
       }
       // Legacy format: Record<string, UnifiedCandle[]>
       const data = res.data as Record<string, UnifiedCandle[]>
@@ -188,7 +212,7 @@ export function getOrFetchBulk(
           result[symbol] = []
         }
       }
-      return result
+      return mergeReusedIndividuals(result)
     })
 
   // Register the bulk attempt per-symbol so concurrent getOrFetchHistory calls
@@ -197,7 +221,7 @@ export function getOrFetchBulk(
   // falls through to its own individual fetch.
   const settled = request.then(() => undefined, () => undefined)
   const registeredKeys: string[] = []
-  for (const symbol of missing) {
+  for (const symbol of missingForBulk) {
     const k = inflightKey(symbol, tf, undefined, exchange)
     if (!symbolInflight.has(k)) {
       symbolInflight.set(k, freshEntry(settled))
@@ -215,14 +239,14 @@ export function getOrFetchBulk(
       // Bulk failed — fall back to individual fetches (registry entries are
       // already settled at this point, so no deadlock).
       const result: Record<string, UnifiedCandle[]> = {}
-      const individualPromises = missing.map(async (symbol) => {
+      const individualPromises = missingForBulk.map(async (symbol) => {
         try {
           result[symbol] = await getOrFetchHistory(symbol, tf, limit, exchange)
         } catch {
           result[symbol] = []
         }
       })
-      return Promise.all(individualPromises).then(() => result)
+      return Promise.all(individualPromises).then(() => mergeReusedIndividuals(result))
     })
     .finally(() => inflightBulk.delete(bulkKey))
 

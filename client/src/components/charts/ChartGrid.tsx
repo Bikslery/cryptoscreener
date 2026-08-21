@@ -1,4 +1,4 @@
-import { useEffect, useRef, memo, useState, useMemo, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useRef, memo, useState, useMemo, useCallback } from 'react'
 import { createChart, CandlestickSeries, BarSeries, LineSeries, HistogramSeries, PriceScaleMode } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, Time, SeriesType, DeepPartial, CandlestickSeriesOptions, BarSeriesOptions, LineSeriesOptions } from 'lightweight-charts'
 import { useCoinListStore, setLivePrice, setLivePriceEx, useAuthStore } from '../../store'
@@ -2535,9 +2535,12 @@ export const ChartGrid = memo(function ChartGrid() {
 
   useInitialCandlesPush()
 
-  useEffect(() => {
+  // Parent layout effects run before the mini charts' passive history effects.
+  // Register the one bulk request first so every child joins it instead of
+  // opening nine individual GETs on a cold grid.
+  useLayoutEffect(() => {
     if (topSymbols.length === 0) return
-    getOrFetchBulk(topSymbols, tf, GRID_CANDLE_LIMIT, chartExchange)
+    getOrFetchBulk(topSymbols, tf, GRID_CANDLE_LIMIT, chartExchange).catch(() => {})
   }, [topSymbols, tf, chartExchange])
 
   if (expandedSymbol) {
