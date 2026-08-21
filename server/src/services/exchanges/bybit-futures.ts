@@ -80,7 +80,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   private depthSubs = new Map<string, Set<DepthCallback>>()
   private bookTickerCbs: Array<(symbol: string, midPrice: number) => void> = []
   private bookTickerSubs = new Set<string>()
-  private tradeSubs = new Set<string>()
+  private tradeSubs = new Map<string, number>()
   private tickerState = new Map<string, BybitTickerRaw>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
@@ -130,18 +130,29 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   }
 
   subscribeTrade(symbol: string) {
-    if (this.tradeSubs.has(symbol)) return
-    this.tradeSubs.add(symbol)
+    const count = (this.tradeSubs.get(symbol) ?? 0) + 1
+    this.tradeSubs.set(symbol, count)
+    if (count > 1) return
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ op: 'subscribe', args: [`publicTrade.${symbol}`] }))
     }
   }
 
   unsubscribeTrade(symbol: string) {
-    if (!this.tradeSubs.delete(symbol)) return
+    const count = this.tradeSubs.get(symbol) ?? 0
+    if (count <= 0) return
+    if (count > 1) {
+      this.tradeSubs.set(symbol, count - 1)
+      return
+    }
+    this.tradeSubs.delete(symbol)
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ op: 'unsubscribe', args: [`publicTrade.${symbol}`] }))
     }
+  }
+
+  getTradeSubscriptionRefCount(symbol: string): number {
+    return this.tradeSubs.get(symbol) ?? 0
   }
 
   connect() {
@@ -323,7 +334,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
     const args: string[] = []
     for (const symbol of this.precisionMap.keys()) args.push(`tickers.${symbol}`)
-    for (const symbol of this.tradeSubs) args.push(`publicTrade.${symbol}`)
+    for (const symbol of this.tradeSubs.keys()) args.push(`publicTrade.${symbol}`)
     for (const topic of this.candleSubs.keys()) args.push(topic)
     for (const symbol of this.depthSubs.keys()) args.push(`orderbook.${BybitFuturesAdapter.DEPTH_DEPTH}.${symbol}`)
     for (let i = 0; i < args.length; i += 10) {
