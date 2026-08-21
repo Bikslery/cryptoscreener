@@ -16,6 +16,7 @@ const PING_INTERVAL_MS = 20_000
 // silence watchdog terminates it and lets the reconnect logic take over.
 const SILENCE_KILL_MS = 45_000
 const SILENCE_CHECK_MS = 15_000
+const BYBIT_PUBLIC_LINEAR_WS = 'wss://stream.bybit.com/v5/public/linear'
 // Bybit public REST guidance is ~10 req/s per IP. A serial slot with a min
 // gap keeps bursts (history stitching, metrics passes) polite — Bybit does
 // not echo used-weight headers, so a Binance-style header limiter is not an
@@ -73,6 +74,10 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   exchange: Exchange = 'bybit-futures'
 
   private ws: WebSocket | null = null
+  // Keep active chart trades off the market-data socket. That socket carries
+  // hundreds of ticker topics at startup; a small dedicated lane prevents a
+  // ticker burst from delaying the price that is currently visible to a user.
+  private tradeWs: WebSocket | null = null
   private tickerCbs: TickerCallback[] = []
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
@@ -83,16 +88,23 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   private tradeSubs = new Map<string, number>()
   private tickerState = new Map<string, BybitTickerRaw>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private tradeReconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
+  private tradePingTimer: ReturnType<typeof setInterval> | null = null
   private silenceTimer: ReturnType<typeof setInterval> | null = null
+  private tradeSilenceTimer: ReturnType<typeof setInterval> | null = null
   private instrumentsTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectDelay = RECONNECT_BASE_MS
+  private tradeReconnectDelay = RECONNECT_BASE_MS
   private instrumentsRetryDelay = 5_000
   private lastMsgAt = 0
+  private tradeLastMsgAt = 0
   private subscribedSymbols = new Set<string>()
   private candleSubs = new Map<string, CandleCallback>()
   private precisionMap = new Map<string, number>()
   private intentionalClose = false
+  private tradeIntentionalClose = false
+  private connected = false
   private restQueue: Promise<unknown> = Promise.resolve()
   private restLastAt = 0
 
@@ -133,8 +145,11 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     const count = (this.tradeSubs.get(symbol) ?? 0) + 1
     this.tradeSubs.set(symbol, count)
     if (count > 1) return
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ op: 'subscribe', args: [`publicTrade.${symbol}`] }))
+    this.tradeIntentionalClose = false
+    if (this.tradeWs?.readyState === WebSocket.OPEN) {
+      this.sendTradeSubscriptions('subscribe', [`publicTrade.${symbol}`])
+    } else if (this.connected) {
+      this.connectTradeSocket()
     }
   }
 
@@ -146,8 +161,11 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
       return
     }
     this.tradeSubs.delete(symbol)
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ op: 'unsubscribe', args: [`publicTrade.${symbol}`] }))
+    if (this.tradeWs?.readyState === WebSocket.OPEN) {
+      this.sendTradeSubscriptions('unsubscribe', [`publicTrade.${symbol}`])
+    }
+    if (this.tradeSubs.size === 0) {
+      this.closeTradeSocket()
     }
   }
 
@@ -155,12 +173,26 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     return this.tradeSubs.get(symbol) ?? 0
   }
 
+  getSubscriptionPlan(): { market: string[]; trades: string[] } {
+    const market: string[] = []
+    for (const symbol of this.precisionMap.keys()) market.push(`tickers.${symbol}`)
+    for (const topic of this.candleSubs.keys()) market.push(topic)
+    for (const symbol of this.depthSubs.keys()) {
+      market.push(`orderbook.${BybitFuturesAdapter.DEPTH_DEPTH}.${symbol}`)
+    }
+    return {
+      market,
+      trades: Array.from(this.tradeSubs.keys(), symbol => `publicTrade.${symbol}`),
+    }
+  }
+
   connect() {
+    this.connected = true
+    this.intentionalClose = false
     // Instruments are only needed once (precision per symbol); reconnects
     // keep the map. A failed first fetch is retried inside fetchInstruments.
     if (this.precisionMap.size === 0) this.fetchInstruments()
-    const url = 'wss://stream.bybit.com/v5/public/linear'
-    this.ws = new WebSocket(url)
+    this.ws = new WebSocket(BYBIT_PUBLIC_LINEAR_WS)
     this.ws.on('open', () => {
       this.reconnectDelay = RECONNECT_BASE_MS
       this.lastMsgAt = Date.now()
@@ -193,10 +225,6 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
                 }
               }
             }
-          } else if (msg.topic.startsWith('publicTrade.')) {
-            for (const trade of this.parseTrades(msg.data, msg.topic)) {
-              for (const cb of this.tradeCbs) cb(trade)
-            }
           } else if (msg.topic.startsWith('kline.')) {
             const candle = this.parseCandle(msg.data, msg.topic)
             if (candle) {
@@ -217,6 +245,82 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     })
     this.ws.on('close', () => this.scheduleReconnect())
     this.ws.on('error', () => this.scheduleReconnect())
+    if (this.tradeSubs.size > 0) this.connectTradeSocket()
+  }
+
+  private connectTradeSocket() {
+    if (!this.connected || this.tradeIntentionalClose || this.tradeSubs.size === 0) return
+    if (this.tradeWs?.readyState === WebSocket.OPEN || this.tradeWs?.readyState === WebSocket.CONNECTING) return
+
+    const socket = new WebSocket(BYBIT_PUBLIC_LINEAR_WS)
+    this.tradeWs = socket
+    socket.on('open', () => {
+      if (this.tradeWs !== socket) return
+      this.tradeReconnectDelay = RECONNECT_BASE_MS
+      this.tradeLastMsgAt = Date.now()
+      if (this.tradePingTimer) clearInterval(this.tradePingTimer)
+      if (this.tradeSilenceTimer) clearInterval(this.tradeSilenceTimer)
+      this.tradePingTimer = setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ op: 'ping' }))
+      }, PING_INTERVAL_MS)
+      this.tradeSilenceTimer = setInterval(() => {
+        if (Date.now() - this.tradeLastMsgAt > SILENCE_KILL_MS && socket.readyState !== WebSocket.CLOSED) {
+          console.warn(`[${this.name}] Trade WS silent for ${SILENCE_KILL_MS / 1000}s — terminating for reconnect`)
+          socket.terminate()
+        }
+      }, SILENCE_CHECK_MS)
+      this.sendTradeSubscriptions('subscribe', this.getSubscriptionPlan().trades)
+    })
+    socket.on('message', (raw) => {
+      if (this.tradeWs !== socket) return
+      this.tradeLastMsgAt = Date.now()
+      try {
+        const msg = JSON.parse(raw.toString())
+        if (msg.success === false) {
+          console.error(`[${this.name}] Trade WS subscription failed: ${msg.ret_msg ?? msg.retMsg ?? 'unknown error'}`)
+          return
+        }
+        if (typeof msg.topic === 'string' && msg.topic.startsWith('publicTrade.')) {
+          for (const trade of this.parseTrades(msg.data, msg.topic)) {
+            for (const cb of this.tradeCbs) cb(trade)
+          }
+        }
+      } catch {}
+    })
+    socket.on('close', () => {
+      if (this.tradeWs !== socket) return
+      this.tradeWs = null
+      this.scheduleTradeReconnect()
+    })
+    socket.on('error', () => {
+      if (this.tradeWs === socket && socket.readyState !== WebSocket.CLOSED) socket.terminate()
+    })
+  }
+
+  private sendTradeSubscriptions(op: 'subscribe' | 'unsubscribe', topics: string[]) {
+    if (!this.tradeWs || this.tradeWs.readyState !== WebSocket.OPEN) return
+    for (let i = 0; i < topics.length; i += 10) {
+      this.tradeWs.send(JSON.stringify({
+        op,
+        args: topics.slice(i, i + 10),
+        req_id: `trade-${Date.now()}-${i}`,
+      }))
+    }
+  }
+
+  private closeTradeSocket() {
+    this.tradeIntentionalClose = true
+    if (this.tradeReconnectTimer) clearTimeout(this.tradeReconnectTimer)
+    if (this.tradePingTimer) clearInterval(this.tradePingTimer)
+    if (this.tradeSilenceTimer) clearInterval(this.tradeSilenceTimer)
+    this.tradeReconnectTimer = null
+    this.tradePingTimer = null
+    this.tradeSilenceTimer = null
+    const socket = this.tradeWs
+    this.tradeWs = null
+    if (!socket || socket.readyState === WebSocket.CLOSED) return
+    if (socket.readyState === WebSocket.OPEN) socket.close()
+    else socket.terminate()
   }
 
   private async fetchInstruments() {
@@ -332,16 +436,12 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   // kline subscriptions are re-established after reconnects.
   private subscribeAll() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    const args: string[] = []
-    for (const symbol of this.precisionMap.keys()) args.push(`tickers.${symbol}`)
-    for (const symbol of this.tradeSubs.keys()) args.push(`publicTrade.${symbol}`)
-    for (const topic of this.candleSubs.keys()) args.push(topic)
-    for (const symbol of this.depthSubs.keys()) args.push(`orderbook.${BybitFuturesAdapter.DEPTH_DEPTH}.${symbol}`)
+    const args = this.getSubscriptionPlan().market
     for (let i = 0; i < args.length; i += 10) {
       this.ws.send(JSON.stringify({ op: 'subscribe', args: args.slice(i, i + 10) }))
     }
     if (args.length > 0) {
-      console.log(`[${this.name}] Subscribed ${args.length} topics (tickers + trades + klines + depth)`)
+      console.log(`[${this.name}] Subscribed ${args.length} topics (tickers + klines + depth)`)
     }
   }
 
@@ -408,8 +508,10 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   }
 
   disconnect() {
+    this.connected = false
     this.intentionalClose = true
     this.ws?.close()
+    this.closeTradeSocket()
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     if (this.pingTimer) clearInterval(this.pingTimer)
     if (this.silenceTimer) clearInterval(this.silenceTimer)
@@ -482,6 +584,22 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       this.connect()
+    }, delay)
+  }
+
+  private scheduleTradeReconnect() {
+    if (!this.connected || this.tradeIntentionalClose || this.tradeSubs.size === 0) return
+    if (this.tradeReconnectTimer) return
+    if (this.tradePingTimer) clearInterval(this.tradePingTimer)
+    if (this.tradeSilenceTimer) clearInterval(this.tradeSilenceTimer)
+    this.tradePingTimer = null
+    this.tradeSilenceTimer = null
+    const delay = this.tradeReconnectDelay
+    this.tradeReconnectDelay = Math.min(this.tradeReconnectDelay * 2, RECONNECT_MAX_MS)
+    console.log(`[${this.name}] Trade WS closed, reconnecting in ${Math.round(delay / 1000)}s...`)
+    this.tradeReconnectTimer = setTimeout(() => {
+      this.tradeReconnectTimer = null
+      this.connectTradeSocket()
     }, delay)
   }
 }
