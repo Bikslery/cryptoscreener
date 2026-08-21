@@ -158,6 +158,17 @@ describe('BybitFuturesAdapter trade subscription refcount', () => {
     bybit.unsubscribeTrade('BTCUSDT')
     expect(bybit.getTradeSubscriptionRefCount('BTCUSDT')).toBe(0)
   })
+
+  it('routes publicTrade topics to an isolated websocket lane', () => {
+    const bybit = new BybitFuturesAdapter()
+    bybit.subscribeTrade('BTCUSDT')
+
+    const plan = bybit.getSubscriptionPlan()
+    expect(plan.market).not.toContain('publicTrade.BTCUSDT')
+    expect(plan.trades).toEqual(['publicTrade.BTCUSDT'])
+
+    bybit.disconnect()
+  })
 })
 
 describe('BybitFuturesAdapter.parseCandle', () => {
