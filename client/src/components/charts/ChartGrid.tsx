@@ -17,7 +17,7 @@ import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT, 
 import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
 import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatch, type TickPayload } from '../../services/candle-events'
 import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
-import { canPaintPartialHistory, resolveHistoryViewportAction } from '../../services/chart-history-paint'
+import { canPaintPartialHistory, replaceDataPreservingPriceScale, resolveHistoryViewportAction } from '../../services/chart-history-paint'
 import { isFiniteOHLCV, validateCandle } from '../../services/candle-utils'
 import { resolveHistoryLoadPlan } from '../../services/history-load-plan'
 import { recordDiag } from '../../services/candle-diag'
@@ -642,8 +642,10 @@ function useFullHistory(
         // Exact data replaces everything — a pending forming-candle glide
         // must not paint stale interpolated values onto the new series.
         stopFormingGlide(candleRef)
-        candleRef.current.setData(candleData)
-        volumeRef.current.setData(volumeData)
+        replaceDataPreservingPriceScale(chartRef.current, () => {
+          candleRef.current?.setData(candleData)
+          volumeRef.current?.setData(volumeData)
+        })
       } catch { /* benign: setData may throw on a fresh/empty series */ }
       if (ts && candleData.length > 0) {
         const saved = getViewport(key)
@@ -931,8 +933,10 @@ function useLazyScroll(
             time: toChartTime(c.time) as Time, value: c.volume,
           }))
           onLogicalShiftRef.current?.(added)
-          candleRef.current?.setData(candleData)
-          volumeRef.current?.setData(volumeData)
+          replaceDataPreservingPriceScale(chart, () => {
+            candleRef.current?.setData(candleData)
+            volumeRef.current?.setData(volumeData)
+          })
           // End reconciliation: replay any live events captured since the
           // fetch started ON TOP of the merged history.
           const flush = eventsRef?.current?.setBuffered(false)
