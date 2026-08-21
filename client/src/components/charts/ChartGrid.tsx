@@ -4,11 +4,11 @@ import type { IChartApi, ISeriesApi, Time, SeriesType, DeepPartial, CandlestickS
 import { useCoinListStore, setLivePrice, setLivePriceEx, useAuthStore } from '../../store'
 import { useSmoothedPriceRef } from '../../hooks/useSmoothedPrice'
 import { registerGlider, unregisterGlider, type Glider } from '../../services/glide'
-import { stepFormingAnimation, formingGlideK, FORMING_SNAP_INTERVAL_MS, type FormingTarget } from '../../services/candle-anim'
+import { stepFormingAnimation, formingGlideK, FORMING_LIVE_INTERVAL_MS, FORMING_QUIET_K60, FORMING_LIVE_K60, type FormingTarget } from '../../services/candle-anim'
 import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount, getWsLastMessageAt } from '../../services/ws'
-import type { Timeframe, UnifiedCandle, Exchange, DrawingTool } from '../../types'
+import type { Timeframe, UnifiedCandle, Exchange, DrawingTool, UnifiedTicker } from '../../types'
 import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { resolveIndicators, formatIndicator } from '../../services/indicators'
 import { ArrowLeft, Settings2 } from 'lucide-react'
@@ -83,8 +83,12 @@ export class FormingAnimator implements Glider {
   private running = false
   private readonly series: ISeriesApi<SeriesType>
   private readonly getRef: () => ISeriesApi<SeriesType> | null
-  /** When the last target was set — a retarget sooner than the snap
-   *  interval means a live pair, which SNAPS instead of gliding. */
+  /** True while the pair is retargeting faster than FORMING_LIVE_INTERVAL_MS —
+   *  live pairs glide with the faster FORMING_LIVE_K60, quiet ones smoothly
+   *  with FORMING_QUIET_K60. */
+  private live = false
+  /** When the last target was set — a retarget sooner than the live
+   *  interval means a live pair. */
   private lastTargetAt = 0
 
   constructor(series: ISeriesApi<SeriesType>, getRef: () => ISeriesApi<SeriesType> | null) {
@@ -141,20 +145,12 @@ export class FormingAnimator implements Glider {
     }
     this.target = t
     const now = performance.now()
-    if (now - this.lastTargetAt <= FORMING_SNAP_INTERVAL_MS) {
-      // LIVE pair: snap straight to the target — a glide restarted by every
-      // retarget never converges and visibly chases the стакан. The body
-      // then moves on the exact frame the trade arrives, like the book.
-      this.lastTargetAt = now
-      if (this.running) {
-        unregisterGlider(this)
-        this.running = false
-      }
-      this.displayed = { ...t }
-      this.paintSeries(this.displayed)
-      return true
-    }
-    // Quiet pair — smooth glide toward the new target.
+    // Live-pair detection: retargets closer than FORMING_LIVE_INTERVAL_MS
+    // switch to the fast glide (FORMING_LIVE_K60). Exponential smoothing has
+    // no restart problem — every step continues from the current displayed
+    // value toward the newest target — so a hot feed converges instead of
+    // chasing forever, and the body never teleports between prints.
+    this.live = now - this.lastTargetAt <= FORMING_LIVE_INTERVAL_MS
     this.lastTargetAt = now
     this.ensureLoop()
     return true
@@ -185,7 +181,8 @@ export class FormingAnimator implements Glider {
   /** Shared-coordinator entry: advance one frame, false = converged/stop. */
   tick(dt: number): boolean {
     if (this.getRef() !== this.series || !this.target || !this.displayed) return false
-    const { next, converged } = stepFormingAnimation(this.displayed, this.target, formingGlideK(dt))
+    const k = formingGlideK(dt, this.live ? FORMING_LIVE_K60 : FORMING_QUIET_K60)
+    const { next, converged } = stepFormingAnimation(this.displayed, this.target, k)
     if (converged) {
       this.displayed = { ...this.target }
       this.paintSeries(this.displayed)
@@ -423,6 +420,10 @@ function checkTailInvariant(
   source: PatchSource,
   n = 3,
 ) {
+  // Dev-only instrumentation: this ran on EVERY kline/trade patch across all
+  // charts (peekTail + slice + map allocations per event). On a hot feed that
+  // is hundreds of wasted allocations per second in production.
+  if (!import.meta.env.DEV) return
   const ev = eventsRef?.current
   if (!ev) return
   const arr = candlesDataRef.current
@@ -493,6 +494,22 @@ function StaleDataOverlay({ visible }: { visible: boolean }) {
   )
 }
 
+/**
+ * Merge-only bulk write for the reconnect `initial-candles` push. `storeBulk`
+ * REPLACES each entry wholesale, so a 300-bar initial push used to truncate a
+ * 3000-bar expanded-chart history down to 300 on every WS reconnect (shorter
+ * scroll-back + an immediate refetch). `setCandles` merges and dedupes with
+ * incoming-on-collision semantics instead.
+ */
+function storeBulkMerged(data: Record<string, UnifiedCandle[]>): void {
+  for (const [key, candles] of Object.entries(data)) {
+    if (!Array.isArray(candles) || candles.length === 0) continue
+    const parts = key.split(':')
+    if (parts.length !== 3) continue
+    candleCache.setCandles(parts[0] as Exchange, parts[1], parts[2], candles)
+  }
+}
+
 let initialPushReceived = false
 
 function useInitialCandlesPush() {
@@ -514,10 +531,10 @@ function useInitialCandlesPush() {
           const [ex, symbol, tf] = parts
           expanded[key] = expandCompactCandles(tuples as CompactCandle[], symbol, ex as Exchange, tf)
         }
-        candleCache.storeBulk(expanded)
+        storeBulkMerged(expanded)
         return
       }
-      candleCache.storeBulk(data as Record<string, UnifiedCandle[]>)
+      storeBulkMerged(data as Record<string, UnifiedCandle[]>)
     })
     return () => { unsubReconnect(); unsubPush() }
   }, [])
@@ -577,18 +594,23 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  options?: { limit?: number; initialLimit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServer?: boolean; wsEpoch?: number; recentVersion?: number },
+  options?: { limit?: number; initialLimit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServerToken?: number; wsEpoch?: number; recentVersion?: number },
   lastUpdateRef?: React.RefObject<number>,
   eventsRef?: React.RefObject<CandleEvents | null>,
   chartVersion?: number,
 ): { isInitialLoading: boolean; status: FullHistoryStatus; dataVersion: number } {
   const limit = options?.limit ?? 1000
   const initialLimit = options?.initialLimit ?? limit
-  const forceServer = options?.forceServer ?? false
-  const wsEpoch = options?.wsEpoch ?? 0
   const fitOnOpen = options?.fitOnOpen ?? false
   const visibleBars = options?.visibleBars ?? 150
   const recentVersion = options?.recentVersion ?? 0
+  // Force-server token semantics: the WS-open counter. A run triggered by a
+  // token CHANGE (a fresh reconnect) bypasses the client cache ONCE so periods
+  // lost during the dead window are healed from the server. Every later run
+  // (symbol/TF switch, candles-recent bump, top-up) uses the cache again — the
+  // old boolean stayed true forever after the first reconnect and made ALL
+  // history loads ignore the cache until a page reload.
+  const forceServerToken = options?.wsEpoch ?? 0
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const [status, setStatus] = useState<FullHistoryStatus>('loading')
   const [dataVersion, setDataVersion] = useState(0)
@@ -596,9 +618,17 @@ function useFullHistory(
   // Key of the last painted series — used to save the viewport we are about
   // to leave and to know whether a reload is a same-key refresh.
   const lastPaintedKeyRef = useRef<string | null>(null)
+  const prevForceTokenRef = useRef<number | null>(null)
   useEffect(() => {
     if (!exchange) return
     const cancelled = { value: false }
+    // Forced server round-trip only on a FRESH reconnect epoch (see the token
+    // doc above). First run (prev === null) is never forced — the cache/SWR
+    // path owns the first paint.
+    const forceServer = forceServerToken > 0
+      && prevForceTokenRef.current !== null
+      && prevForceTokenRef.current !== forceServerToken
+    prevForceTokenRef.current = forceServerToken
     const sameKeyReload = forceServer && lastPaintedKeyRef.current === `${exchange}:${symbol}:${tf}`
     // Already painted this key? A recentVersion re-run (candles-recent landed
     // after the full history) must NOT re-show the loading spinner over the
@@ -827,9 +857,9 @@ function useFullHistory(
     return () => { cancelled.value = true }
     // `chartVersion` re-paints history when the canvas/series is recreated
     // (pricePrecision flip) — the new chart starts empty.
-    // `wsEpoch` re-paints after a WS reconnect so periods that fell through
-    // the dead window are restored from the server.
-  }, [symbol, exchange, tf, chartVersion, wsEpoch, limit, initialLimit, forceServer, fitOnOpen, visibleBars, recentVersion,
+    // `wsEpoch` (the force-server token) re-paints after a WS reconnect so
+    // periods that fell through the dead window are restored from the server.
+  }, [symbol, exchange, tf, chartVersion, forceServerToken, limit, initialLimit, fitOnOpen, visibleBars, recentVersion,
     candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, lastUpdateRef, eventsRef])
 
   return { isInitialLoading, status, dataVersion }
@@ -1162,12 +1192,30 @@ function useWsCandle(
  * стакан" look. The per-exchange master list is consulted first; falls back
  * to coinMap, then 2.
  */
+/**
+ * Per-coins-array index of `${symbol}:${exchange}` → coin. The precision
+ * selector ran `s.coins.find(...)` — a full linear scan — on EVERY store
+ * notification × every mounted chart (10 charts × ~1200 tickers × up to 25Hz).
+ * The coins array reference only changes when its contents change, so the
+ * index is cached against THAT reference (WeakMap → GC'd with the array).
+ */
+const exCoinIndexCache = new WeakMap<UnifiedTicker[], Map<string, UnifiedTicker>>()
+function getExCoinIndex(coins: UnifiedTicker[]): Map<string, UnifiedTicker> {
+  let m = exCoinIndexCache.get(coins)
+  if (!m) {
+    m = new Map()
+    for (const c of coins) m.set(`${c.symbol}:${c.exchange}`, c)
+    exCoinIndexCache.set(coins, m)
+  }
+  return m
+}
+
 function useCoinPrecision(symbol: string, exchange?: string): number {
   return useCoinListStore(s => {
     const coin = s.coinMap.get(symbol)
     if (coin && (!exchange || coin.exchange === exchange)) return coin.pricePrecision ?? 2
     if (exchange) {
-      const byEx = s.coins.find(c => c.symbol === symbol && c.exchange === exchange)
+      const byEx = getExCoinIndex(s.coins).get(`${symbol}:${exchange}`)
       if (byEx && typeof byEx.pricePrecision === 'number') return byEx.pricePrecision
     }
     return coin?.pricePrecision ?? 2
@@ -1217,6 +1265,15 @@ function useWsTrade(
 
       const ev = eventsRef.current
       if (!ev) return
+
+      // Liveness lane: even when the print falls OUTSIDE the current bar's
+      // period window (the next period hasn't been opened by a kline yet),
+      // the trade itself is real. Feed the price lanes directly so chart
+      // headers and stale-data detection keep moving on quiet pairs instead
+      // of freezing until the next kline. OHLC is NEVER touched here — bars
+      // still come only from klines/ticks inside their own window.
+      setLivePrice(symbol, price)
+      if (exchange) setLivePriceEx(symbol, exchange, price)
 
       // Price tick → mutate ONLY the last bar's close/high/low (scalpboard's
       // En). Volume never comes from trades.
@@ -1435,7 +1492,6 @@ const MiniChart = memo(function MiniChart({
   }, [baseSettings.priceScaleMode, baseSettings.vertGrid, baseSettings.horzGrid, baseSettings.interval, baseSettings.barSpace, baseSettings.rightOffset, baseSettings.volumesHeight])
 
   const [wsCount, setWsCount] = useState(getWsOpenCount)
-  const [mountWsCount] = useState(() => getWsOpenCount())
   useEffect(() => {
     const un = wsOnType('open', () => setWsCount(getWsOpenCount()))
     return un
@@ -1446,7 +1502,6 @@ const MiniChart = memo(function MiniChart({
 
   const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
     limit: GRID_CANDLE_LIMIT,
-    forceServer: wsCount > mountWsCount,
     wsEpoch: wsCount,
     recentVersion,
   }, lastUpdateRef, eventsRef, chartVersion)
@@ -2173,7 +2228,6 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
   }, [baseSettings.priceScaleMode, baseSettings.vertGrid, baseSettings.horzGrid, baseSettings.interval, baseSettings.barSpace, baseSettings.rightOffset, baseSettings.volumesHeight, baseSettings.watermark, baseSettings.watermarkSize, baseSettings.watermarkPlace, baseSettings.watermarkPattern, symbol])
 
   const [wsCount, setWsCount] = useState(getWsOpenCount)
-  const [mountWsCount] = useState(() => getWsOpenCount())
   useEffect(() => {
     const un = wsOnType('open', () => setWsCount(getWsOpenCount()))
     return un
@@ -2186,7 +2240,6 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
     limit: EXPANDED_CANDLE_LIMIT,
     initialLimit: GRID_CANDLE_LIMIT,
     fitOnOpen: true,
-    forceServer: wsCount > mountWsCount,
     wsEpoch: wsCount,
     recentVersion,
   }, lastUpdateRef, eventsRef, chartVersion)

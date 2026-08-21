@@ -7,6 +7,7 @@ import { fetchWithTimeout } from '../../utils/fetch.js'
 import { BinanceRateLimiter } from './rate-limiter.js'
 import { RateLimitError, ExchangeRequestError } from './errors.js'
 import { WsStreamPool } from './ws-pool.js'
+import { CandleSilenceFallback } from './candle-fallback.js'
 import { BinanceDepthBook, type DiffDepthEvent } from './binance-depth-book.js'
 import { withDepthSnapshotSlot } from './depth-snapshot-limiter.js'
 import { getFetchDispatcher } from './proxy.js'
@@ -118,6 +119,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
 
   private candlePool: WsStreamPool
   private depthPool: WsStreamPool
+  private candleFallback: CandleSilenceFallback
 
   constructor() {
     this.fetchDispatcher = getFetchDispatcher()
@@ -129,6 +131,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
         try {
           const candle = this.parseCandle(msg)
           if (candle) {
+            this.candleFallback.noteMessage()
             for (const cb of this.candleCbs) cb(candle)
             const streamName = msg.stream || ''
             const subCb = this.candleSubs.get(streamName)
@@ -141,6 +144,18 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
       this.wsAgent,
       true  // supportsIncrementalSub
     )
+
+    this.candleFallback = new CandleSilenceFallback({
+      name: this.name,
+      fetch: (symbol, tf) => this.fetchCandles(symbol, tf, 2),
+      emit: (c) => {
+        for (const cb of this.candleCbs) cb(c)
+        const stream = `${c.symbol.toLowerCase()}@kline_${TF_MAP[c.timeframe] || '1m'}`
+        const subCb = this.candleSubs.get(stream)
+        if (subCb) subCb(c)
+      },
+      skip: () => this.rateLimiter.isThrottled() || this.rateLimiter.isOverThreshold(),
+    })
 
     this.depthPool = new WsStreamPool(
       `${SPOT_WS_BASE}/stream`,
@@ -362,6 +377,7 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     if (this.tickerWsSilenceTimer) clearTimeout(this.tickerWsSilenceTimer)
     this.candlePool.close()
     this.depthPool.close()
+    this.candleFallback.stop()
     if (this.pollTimer) clearInterval(this.pollTimer)
   }
 
@@ -369,12 +385,14 @@ export class BinanceSpotAdapter implements ExchangeAdapter {
     const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
     this.candleSubs.set(stream, cb)
     this.candlePool.addStream(stream)
+    this.candleFallback.register(stream, symbol, tf)
   }
 
   unsubscribeCandle(symbol: string, tf: string) {
     const stream = `${symbol.toLowerCase()}@kline_${TF_MAP[tf] || '1m'}`
     this.candleSubs.delete(stream)
     this.candlePool.removeStream(stream)
+    this.candleFallback.unregister(stream)
   }
 
   subscribeDepth(symbol: string, cb: DepthCallback) {

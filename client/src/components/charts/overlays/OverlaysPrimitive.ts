@@ -71,6 +71,10 @@ export class OverlaysPrimitive implements ISeriesPrimitive<Time> {
   private _data: OverlaysData | null = null
   private _lastDataTime: number | null = null
   private _pricePrecision = 2
+  /** Specs are pure data+precision — computed ONCE per update(), not on every
+   *  paint frame (they were rebuilt, incl. cascadeLevel scans and string
+   *  formatting, for every pan/zoom/crosshair repaint). */
+  private _specs: LineSpec[] = []
   private _view: OverlaysPaneView
 
   constructor() {
@@ -81,6 +85,7 @@ export class OverlaysPrimitive implements ISeriesPrimitive<Time> {
     this._data = data
     this._lastDataTime = lastDataTime
     this._pricePrecision = pricePrecision
+    this._specs = data ? buildSpecs(data, pricePrecision) : []
     this._requestUpdate?.()
   }
 
@@ -106,6 +111,7 @@ export class OverlaysPrimitive implements ISeriesPrimitive<Time> {
   data(): OverlaysData | null { return this._data }
   lastDataTime(): number | null { return this._lastDataTime }
   pricePrecision(): number { return this._pricePrecision }
+  specs(): readonly LineSpec[] { return this._specs }
 }
 
 interface CanvasTarget {
@@ -135,7 +141,7 @@ class OverlaysPaneView implements IPrimitivePaneView {
 
     target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
       const width = mediaSize.width
-      const specs = this._buildSpecs(data)
+      const specs = this._primitive.specs()
       if (specs.length === 0) return
 
       const render = data.render
@@ -204,26 +210,26 @@ class OverlaysPaneView implements IPrimitivePaneView {
       ctx.textBaseline = 'alphabetic'
     })
   }
+}
 
-  private _buildSpecs(data: OverlaysData): LineSpec[] {
-    const specs: LineSpec[] = []
-    for (const side of ['h', 'l'] as const) {
-      for (const cascade of data.cascades[side]) {
-        if (cascade.length === 0) continue
-        // One level line per cascade (deliberate deviation from scalpboard's
-        // per-rung ladder): the drawn price is the cascade's extreme вЂ” the
-        // highest rejection for resistance, the lowest support for support вЂ”
-        // and the label shows the level price plus how many times price
-        // tested it (chain members are the touches).
-        const price = cascadeLevel(cascade, side)
-        specs.push({
-          time: cascade[0].t,
-          price,
-          text: `${price.toFixed(this._primitive.pricePrecision())} ×${cascade.length}`,
-          baseline: side === 'l' ? 'top' : 'bottom',
-        })
-      }
+function buildSpecs(data: OverlaysData, pricePrecision: number): LineSpec[] {
+  const specs: LineSpec[] = []
+  for (const side of ['h', 'l'] as const) {
+    for (const cascade of data.cascades[side]) {
+      if (cascade.length === 0) continue
+      // One level line per cascade (deliberate deviation from scalpboard's
+      // per-rung ladder): the drawn price is the cascade's extreme — the
+      // highest rejection for resistance, the lowest support for support —
+      // and the label shows the level price plus how many times price
+      // tested it (chain members are the touches).
+      const price = cascadeLevel(cascade, side)
+      specs.push({
+        time: cascade[0].t,
+        price,
+        text: `${price.toFixed(pricePrecision)} ×${cascade.length}`,
+        baseline: side === 'l' ? 'top' : 'bottom',
+      })
     }
-    return specs
   }
+  return specs
 }

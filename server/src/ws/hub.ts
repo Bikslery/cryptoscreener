@@ -39,6 +39,22 @@ const MAX_BUFFERED = 50
 const BACKPRESSURE_HARD_LIMIT = MAX_BUFFERED * 2
 const BACKPRESSURE_NOTIFY_INTERVAL = 5000
 
+// Real outbound-queue gate. `client.buffered` only counts send-callback
+// ERRORS (immediate send failures), so it almost never rises — a slow client's
+// frames silently piled up inside the ws internal queue and were replayed as a
+// burst later (the classic "candles teleport after a stall" mechanism).
+// bufferedAmount reflects bytes actually queued for the wire.
+const MAX_BUFFERED_BYTES = 512 * 1024
+const BACKPRESSURE_HARD_LIMIT_BYTES = 4 * 1024 * 1024
+
+/** True when another frame would only deepen this client's outbound queue.
+ *  Callers drop the frame (latest-wins lanes) instead of queueing it. */
+function isCongested(client: Client): boolean {
+  if (client.buffered >= MAX_BUFFERED) return true
+  // readyState OPEN is guaranteed by every call site before this check.
+  return client.ws.bufferedAmount >= MAX_BUFFERED_BYTES
+}
+
 // --- DIAGNOSTICS: outbound frame drops --------------------------------
 // Counts frames that never reached the wire because a client was lagging
 // (buffered >= MAX_BUFFERED). Distinguishes candle/trade/price/ticker lanes
@@ -179,7 +195,7 @@ function deliverTickerSnapshot(frame: Buffer | string, source: UnifiedTicker[], 
   const sigCache = new Map<string, Buffer | string>()
   for (const client of clients.values()) {
     if (client.ws.readyState !== WebSocket.OPEN) continue
-    if (client.buffered >= MAX_BUFFERED) {
+    if (isCongested(client)) {
       recordDroppedMsg('ticker')
       handleBackpressure(client)
       continue
@@ -204,8 +220,8 @@ function deliverTickerSnapshot(frame: Buffer | string, source: UnifiedTicker[], 
 function handleBackpressure(client: Client): boolean {
   client.totalDropped++
   wsDroppedTotal.inc()
-  if (client.buffered >= BACKPRESSURE_HARD_LIMIT) {
-    console.warn(`[Hub] Client dropped (backpressure), buffered=${client.buffered}, totalDropped=${client.totalDropped}`)
+  if (client.buffered >= BACKPRESSURE_HARD_LIMIT || client.ws.bufferedAmount >= BACKPRESSURE_HARD_LIMIT_BYTES) {
+    console.warn(`[Hub] Client dropped (backpressure), buffered=${client.buffered}, bytes=${client.ws.bufferedAmount}, totalDropped=${client.totalDropped}`)
     wsClientKilledTotal.inc()
     client.ws.close(1008, 'backpressure')
     cleanupClient(client)
@@ -230,7 +246,7 @@ function flushBatchBuffer() {
       let raw: Buffer | string | null = null
       for (const client of clients.values()) {
         if (client.subscriptions.has(channel) && client.ws.readyState === WebSocket.OPEN) {
-          if (client.buffered >= MAX_BUFFERED) {
+          if (isCongested(client)) {
             recordDroppedMsg(channel)
             handleBackpressure(client)
             continue
@@ -315,8 +331,26 @@ function buildInitialCandlesData(): Record<string, CompactCandle[]> {
   return result
 }
 
-function cleanupClient(client: Client) {
-  if (candleManager) {
+// --- Initial-candles frame cache -------------------------------------------
+// The ~9x300-candle compact push was built, stringified and synchronously
+// deflated on the event loop for EVERY new connection (deflateRawSync of a
+// >4KB payload), so a connect storm stalled every parser and coalescing lane.
+// Like the ticker snapshot: encode once (async zlib) and reuse the encoded
+// frame for connections within the TTL. A few seconds of staleness is fine —
+// the client merges this push into its cache and live klines stream on top.
+interface InitialCandlesFrameCache { frame: Buffer | string; ts: number }
+let initialCandlesFrameCache: InitialCandlesFrameCache | null = null
+const INITIAL_CANDLES_FRAME_TTL_MS = 5000
+
+function encodeInitialCandles(data: Record<string, CompactCandle[]>): Promise<Buffer | string> {
+  const json = JSON.stringify({ type: 'initial-candles', format: 'compact', data })
+  if (json.length <= PLAIN_FRAME_MAX_BYTES) return Promise.resolve(json)
+  return new Promise((resolve, reject) => {
+    deflateRaw(Buffer.from(json), (err, buf) => (err ? reject(err) : resolve(buf)))
+  })
+}
+
+function cleanupClient(client: Client) {  if (candleManager) {
     for (const channel of client.subscriptions) {
       const candleInfo = parseCandleChannel(channel)
       if (candleInfo) candleManager.unsubscribeCandle(candleInfo.exchange, candleInfo.symbol, candleInfo.tf)
@@ -367,9 +401,32 @@ export function setupWsHub(wss: WebSocketServer) {
     ws.on('pong', () => { client.alive = true; client.buffered = 0 })
 
     try {
-      const initialCandles = buildInitialCandlesData()
-      if (Object.keys(initialCandles).length > 0) {
-        ws.send(encodePayload({ type: 'initial-candles', format: 'compact', data: initialCandles }))
+      const cachedFrame = initialCandlesFrameCache && Date.now() - initialCandlesFrameCache.ts < INITIAL_CANDLES_FRAME_TTL_MS
+        ? initialCandlesFrameCache.frame
+        : null
+      if (cachedFrame) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(cachedFrame)
+      } else {
+        const initialCandles = buildInitialCandlesData()
+        if (Object.keys(initialCandles).length > 0) {
+          // Async encode off the event loop; the frame is cached so concurrent
+          // connections reuse it instead of re-deflating the same payload.
+          encodeInitialCandles(initialCandles)
+            .then(frame => {
+              initialCandlesFrameCache = { frame, ts: Date.now() }
+              if (ws.readyState === WebSocket.OPEN) ws.send(frame)
+            })
+            .catch(() => {
+              // Deflate failure — fall back to the sync encode so the push is
+              // never silently lost.
+              try {
+                const data = buildInitialCandlesData()
+                if (Object.keys(data).length > 0 && ws.readyState === WebSocket.OPEN) {
+                  ws.send(encodePayload({ type: 'initial-candles', format: 'compact', data }))
+                }
+              } catch { /* socket gone */ }
+            })
+        }
       }
     } catch (err) {
       console.warn('[Hub] Failed to send initial-candles', err)
@@ -576,7 +633,7 @@ export function broadcast(msg: WsMessage) {
 
       for (const client of clients.values()) {
         if (client.ws.readyState !== WebSocket.OPEN) continue
-        if (client.buffered >= MAX_BUFFERED) {
+        if (isCongested(client)) {
           recordDroppedMsg(msg.channel || 'ticker')
           handleBackpressure(client)
           continue
@@ -612,7 +669,7 @@ export function broadcast(msg: WsMessage) {
     const raw = encodePayload(msg)
     for (const client of clients.values()) {
       if (client.ws.readyState !== WebSocket.OPEN) continue
-      if (client.buffered >= MAX_BUFFERED) {
+      if (isCongested(client)) {
         recordDroppedMsg(channel)
         handleBackpressure(client)
         continue
@@ -632,7 +689,7 @@ export function broadcastToChannel(channel: string, data: unknown, immediate = f
     const raw = encodePayload(msg)
     for (const client of clients.values()) {
       if (!client.subscriptions.has(channel) || client.ws.readyState !== WebSocket.OPEN) continue
-      if (client.buffered >= MAX_BUFFERED) {
+      if (isCongested(client)) {
         recordDroppedMsg(channel)
         handleBackpressure(client)
         continue

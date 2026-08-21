@@ -49,8 +49,8 @@ function makeSeries() {
   return { series, updates }
 }
 
-describe('FormingAnimator — live pairs SNAP (стакан parity)', () => {
-  it('snaps straight to the target on a live pair (updates <= 80ms apart)', () => {
+describe('FormingAnimator — live pairs FAST GLIDE (no teleport)', () => {
+  it('glides quickly toward the target on a live pair (updates <= 80ms apart)', () => {
     const { series, updates } = makeSeries()
     const animator = new FormingAnimator(series, () => series)
 
@@ -58,18 +58,42 @@ describe('FormingAnimator — live pairs SNAP (стакан parity)', () => {
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 100, high: 101, low: 99, close: 100, volume: 1 })
     expect(animator.isAnimating).toBe(false) // first paint snaps immediately, no glide yet
 
-    // 10ms later — a live pair retarget: the body must move EXACTLY to the
-    // new price (like the стакан), not interpolate.
+    // 10ms later — a live pair retarget: the body must MOVE smoothly toward
+    // the new price (no teleport), converging within a couple of frames.
     nowValue = 10
     animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 100, high: 102, low: 99, close: 101.5, volume: 1 })
 
-    expect(animator.isAnimating).toBe(false) // snapped — no glide registered
+    expect(animator.isAnimating).toBe(true) // gliding — not snapped
+    flushRaf(16.7)
+    const partial = updates[updates.length - 1]
+    expect(partial.close).toBeGreaterThan(100)
+    expect(partial.close).toBeLessThan(101.5) // mid-glide, smooth motion
+
+    // Fast-glide k60=0.7 → converged well within ~10 frames.
+    for (let f = 0; f < 10 && animator.isAnimating; f++) flushRaf(16.7)
     const last = updates[updates.length - 1]
     expect(last.time).toBe(toChartTime(300))
-    expect(last.close).toBe(101.5) // exact target, zero chase
+    expect(last.close).toBeCloseTo(101.5, 6) // exact target at convergence
     expect(last.high).toBe(102)
+    expect(animator.isAnimating).toBe(false) // loop self-stopped
+  })
+
+  it('caps per-frame paint work at one update per animation frame', () => {
+    // A hot feed retargeting every 10ms must NOT produce a series.update()
+    // per event anymore — the shared rAF coordinator paints at frame rate.
+    const { series, updates } = makeSeries()
+    const animator = new FormingAnimator(series, () => series)
+
+    nowValue = 0
+    animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 100, high: 101, low: 99, close: 100, volume: 1 })
+    for (let i = 1; i <= 10; i++) {
+      nowValue = i * 10
+      animator.paint({ symbol: 'X', exchange: 'binance-futures', timeframe: '1m', time: 300, open: 100, high: 102, low: 99, close: 100 + i * 0.15, volume: 1 })
+    }
+    // 1 snap + 10 retargets queued, but only frames painted so far:
     flushRaf(16.7)
-    expect(updates.length).toBe(2) // no extra glide frames
+    expect(updates.length).toBeLessThanOrEqual(3) // far below the event count
+    animator.finalizeAndReset()
   })
 
   it('glides smoothly on a quiet pair (updates > 80ms apart)', () => {

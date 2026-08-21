@@ -102,6 +102,9 @@ services:
       ROLE: all
       NODE_ENV: production
       DIAG_LOG: ${DIAG_LOG:-0}
+      # Candle cache hole repair (backfills real rows over exchange WS gaps).
+      # Set to 0 to keep holes visible (scalpboard parity).
+      CACHE_REPAIR_ENABLED: ${CACHE_REPAIR_ENABLED:-1}
       # Prometheus scrapes /metrics?token=... — the server must know the token
       # or it falls back to JWT auth and rejects the scrape with 401.
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN must be set for /metrics auth}

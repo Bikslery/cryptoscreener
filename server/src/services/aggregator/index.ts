@@ -373,6 +373,35 @@ const ROLE = process.env.ROLE || 'all'
 const isBroadcast = ROLE === 'broadcast' || ROLE === 'all'
 const isIngestion = ROLE === 'ingestion' || ROLE === 'all'
 
+// --- Redis candle publish coalescing ----------------------------------------
+// Kline snapshots are CUMULATIVE, so latest-wins per channel key loses nothing:
+// the newest snapshot fully replaces the pending one. Publishing every inbound
+// kline JSON.stringify'd the whole candle at TRADE frequency (dozens/sec on
+// active symbols) and made every broadcast node re-broadcast that flood.
+const REDIS_CANDLE_INTERVAL_MS = 50
+let pendingRedisCandles = new Map<string, UnifiedCandle>()
+let redisCandleTimer: ReturnType<typeof setTimeout> | null = null
+
+function queueRedisCandle(candle: UnifiedCandle): void {
+  pendingRedisCandles.set(`${candle.exchange}:${candle.symbol}:${candle.timeframe}`, candle)
+  if (redisCandleTimer === null) {
+    redisCandleTimer = setTimeout(flushRedisCandles, REDIS_CANDLE_INTERVAL_MS)
+  }
+}
+
+function flushRedisCandles(): void {
+  redisCandleTimer = null
+  const batch = pendingRedisCandles
+  pendingRedisCandles = new Map()
+  if (batch.size === 0 || !isIngestion || !REDIS_ENABLED) return
+  try {
+    const redis = getRedisPub()
+    for (const candle of batch.values()) {
+      redis.publish('candles', JSON.stringify(candle)).catch(() => {})
+    }
+  } catch { /* redis unavailable — broadcast nodes fall back to their own REST */ }
+}
+
 let broadcastCount = 0
 const BROADCAST_LOG_INTERVAL = 30_000
 
@@ -403,12 +432,8 @@ export function startAggregator() {
       if (candle.timeframe === '5m' && candle.isFinal) {
         lastCloseMap.set(`${candle.symbol}:${candle.exchange}`, candle.close)
       }
-      if (isIngestion && REDIS_ENABLED) {
-        try {
-          const redis = getRedisPub()
-          redis.publish('candles', JSON.stringify(candle)).catch(() => {})
-        } catch {}
-      }
+      // Coalesced (latest-wins per channel) — see the block above.
+      queueRedisCandle(candle)
       // NOTE: no local broadcast here. The candle manager's per-subscription
       // callback (createCandleManager → candleCallback) already broadcasts
       // the same candle IMMEDIATELY to subscribed charts. A second broadcast

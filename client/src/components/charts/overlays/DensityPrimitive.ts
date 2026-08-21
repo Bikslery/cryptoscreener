@@ -108,11 +108,30 @@ interface CanvasTarget {
   useMediaCoordinateSpace(cb: (scope: { context: CanvasRenderingContext2D; mediaSize: { width: number; height: number } }) => void): void
 }
 
+const EMPTY_TIMES: readonly number[] = []
+
 class DensityPaneView implements IPrimitivePaneView {
   private _primitive: DensityPrimitive
+  /** Bar timeline cache — rebuilding `sd.map(b => b.time)` inside _draw
+   *  allocated a fresh array on EVERY paint frame (pan/zoom/crosshair).
+   *  Invalidated by length + first/last time, which covers history loads,
+   *  appends and lazy-scroll prepends. */
+  private _barTimesCache: { times: number[]; len: number; first: number; last: number } | null = null
 
   constructor(primitive: DensityPrimitive) {
     this._primitive = primitive
+  }
+
+  private getBarTimes(series: ISeriesApi<SeriesType>): readonly number[] {
+    const sd = series.data()
+    if (sd.length === 0) return EMPTY_TIMES
+    const first = sd[0].time as number
+    const last = sd[sd.length - 1].time as number
+    const c = this._barTimesCache
+    if (c && c.len === sd.length && c.first === first && c.last === last) return c.times
+    const times = sd.map(b => b.time as number)
+    this._barTimesCache = { times, len: sd.length, first, last }
+    return times
   }
 
   zOrder(): 'top' {
@@ -139,10 +158,13 @@ class DensityPaneView implements IPrimitivePaneView {
       ctx.textBaseline = 'top'
 
       // Bar timeline (chart-time space) — used to anchor a wall's birth to
-      // the bar that contains its creation moment.
-      const sd = series.data()
-      if (sd.length === 0) return
-      const barTimes = sd.map(b => b.time as number)
+      // the bar that contains its creation moment (cached between frames).
+      const barTimes = this.getBarTimes(series)
+      if (barTimes.length === 0) return
+
+      // Hoisted out of the wall loop — the API call itself is trivial but it
+      // ran once per wall per frame.
+      const timeScale = chart.timeScale()
 
       for (const s of data) {
         const y0 = series.priceToCoordinate(s.price)
@@ -153,7 +175,6 @@ class DensityPaneView implements IPrimitivePaneView {
         // v5.2.0's timeToCoordinate has no findNearest: it returns null for
         // any non-bar-aligned time, so anchor the birth to the CONTAINING
         // bar (scalpboard semantics: the line starts at the birth bar).
-        const timeScale = chart.timeScale()
         const birthChartSec = toChartTime(s.birthTimeSec)
         const birthIdx = birthBarIndex(barTimes, birthChartSec)
         const anchor = birthIdx >= 0 ? birthIdx : 0

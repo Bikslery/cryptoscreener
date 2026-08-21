@@ -17,13 +17,26 @@ export interface FormingTarget {
 }
 
 /**
- * Forming-candle behavior on LIVE pairs (mirroring glide.ts):
- * a live pair retargets the glide every few dozen ms, so a glide restarted
- * by every retarget never converges — the body visibly chases the стакан.
- * Paints closer than this interval SNAP to the target instead of gliding;
- * quiet symbols keep the smooth long glide (formingGlideK's k60=0.45).
+ * Retargets closer than this interval mean a LIVE pair. The interval is the
+ * liveness signal only — both quiet and live pairs glide now (live pairs use
+ * the faster FORMING_LIVE_K60 so the body tracks prints closely without
+ * teleporting).
  */
-export const FORMING_SNAP_INTERVAL_MS = 80
+export const FORMING_LIVE_INTERVAL_MS = 80
+
+/** Per-frame convergence factor (k60) on QUIET pairs — updates rarer than
+ *  FORMING_LIVE_INTERVAL_MS. Long smooth glide (~converges visually in
+ *  ~100 ms). */
+export const FORMING_QUIET_K60 = 0.45
+
+/**
+ * Per-frame convergence factor (k60) on LIVE pairs. Exponential smoothing has
+ * no restart problem — each retarget continues from the current displayed
+ * value — so frequent retargets converge instead of chasing forever. k60=0.7
+ * covers ~91% of every jump within two frames (~33 ms): the body visibly
+ * moves smoothly yet stays within a hair of the last print.
+ */
+export const FORMING_LIVE_K60 = 0.7
 
 /**
  * One interpolation step. `k` is the per-step convergence factor (0..1]:
@@ -57,7 +70,7 @@ export function stepFormingAnimation(
  * per second, so each step uses a smaller k and the glide still converges in
  * ~100 ms — identical to the time-based easing in glide.ts.
  */
-export function formingGlideK(dtMs: number, k60 = 0.45): number {
+export function formingGlideK(dtMs: number, k60: number = FORMING_QUIET_K60): number {
   const dt = Number.isFinite(dtMs) && dtMs > 0 ? dtMs : 16.7
   return 1 - Math.pow(1 - k60, dt / 16.7)
 }

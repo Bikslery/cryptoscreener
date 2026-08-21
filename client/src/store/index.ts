@@ -162,6 +162,9 @@ export function mergeTickerBatch(
       dirty = true
     }
   }
+  // Nothing changed → hand back the SAME list reference so downstream
+  // identity checks (rebuildDedupedView fast path, subscribers) see no churn.
+  if (!dirty) return { next: list, dirty }
   return { next, dirty }
 }
 
@@ -169,6 +172,11 @@ export function mergeTickerBatch(
 // master list, keeping the previous sort ORDER stable and only updating
 // entries / appending newly-listed chartExchange symbols. The full re-sort
 // happens on snapshots.
+//
+// Identity fast-path: when NO entry reference changed, the previous
+// sortedCoins/coinMap identities are kept (empty patch) so downstream
+// subscribers — CoinList rows, mini-chart grids, prefetch memos — skip their
+// render entirely instead of re-rendering ~25x/s on untouched deltas.
 function rebuildDedupedView(
   state: { sortedCoins: UnifiedTicker[]; chartExchange: ChartExchange },
   raw: UnifiedTicker[],
@@ -192,6 +200,16 @@ function rebuildDedupedView(
     seen.add(d.symbol)
     newSorted.push(d)
   }
+
+  if (newSorted.length === state.sortedCoins.length) {
+    let identical = true
+    for (let i = 0; i < newSorted.length; i++) {
+      if (newSorted[i] !== state.sortedCoins[i]) { identical = false; break }
+    }
+    // The previous coinMap was built from that exact array — contents match.
+    if (identical) return {}
+  }
+
   return {
     coins: raw,
     sortedCoins: newSorted,
@@ -332,11 +350,16 @@ const livePriceListeners = new Map<string, Set<() => void>>()
 // exchange (binance-futures) and by trade lanes of ANY exchange, so it cannot
 // tell a spot chart from a futures chart — a spot/bybit chart's header would
 // show the futures price and precision. Charts write their OWN painted price
-// here (applyChartPatch → setLivePriceEx) and headers subscribe per exchange,
-// so the displayed number always matches the chart's candles exactly. Commits
-// are immediate (no cadence): the presentation glides smooth the frames.
+// here (applyChartPatch / trade ticks → setLivePriceEx) and headers subscribe
+// per exchange, so the displayed number always matches the chart's candles
+// exactly. Commits follow the SAME fixed cadence as the symbol lane (see
+// below): immediate commits re-rendered subscribed rows/headers on every
+// trade print (dozens/sec on hot symbols).
 const livePricesEx = new Map<string, number>()
 const livePriceListenersEx = new Map<string, Set<() => void>>()
+// Cadence buffers for the Ex lane (shared sweep with the symbol lane).
+const pendingPricesEx = new Map<string, number>()
+const lastPublishAtEx = new Map<string, number>()
 
 function liveExKey(symbol: string, exchange: string): string {
   return `${symbol}:${exchange}`
@@ -360,14 +383,28 @@ export function getLivePriceEx(symbol: string, exchange: string): number | undef
   return livePricesEx.get(liveExKey(symbol, exchange))
 }
 
-/** Publish a price for one specific exchange. Immediate, latest-wins. */
+function commitLivePriceExKey(key: string, price: number): void {
+  const prev = livePricesEx.get(key)
+  if (prev === price) return
+  livePricesEx.set(key, price)
+  const set = livePriceListenersEx.get(key)
+  if (set) for (const l of set) l()
+}
+
+/** Publish a price for one specific exchange. Same fixed cadence as the
+ *  symbol lane — first value commits instantly, bursts coalesce latest-wins. */
 export function setLivePriceEx(symbol: string, exchange: string, price: number): void {
   if (!Number.isFinite(price) || price <= 0) return
   const key = liveExKey(symbol, exchange)
   if (livePricesEx.get(key) === price) return
-  livePricesEx.set(key, price)
-  const set = livePriceListenersEx.get(key)
-  if (set) for (const l of set) l()
+  const since = Date.now() - (lastPublishAtEx.get(key) ?? -Infinity)
+  if (since >= LIVE_PRICE_INTERVAL_MS) {
+    lastPublishAtEx.set(key, Date.now())
+    commitLivePriceExKey(key, price)
+    return
+  }
+  pendingPricesEx.set(key, price)
+  scheduleSweep(LIVE_PRICE_INTERVAL_MS - since)
 }
 
 // --- Live-price publisher: fixed cadence (default 50 ms). ----------------
@@ -407,6 +444,11 @@ export function flushLivePrices(): void {
     commitLivePrice(symbol, price)
   }
   pendingPrices.clear()
+  for (const [key, price] of pendingPricesEx) {
+    lastPublishAtEx.set(key, now)
+    commitLivePriceExKey(key, price)
+  }
+  pendingPricesEx.clear()
 }
 
 /** Wipe all live-price state incl. batching (tests only). */
@@ -416,6 +458,8 @@ export function resetLivePriceStore(): void {
   lastPublishAt.clear()
   livePrices.clear()
   livePriceListeners.clear()
+  pendingPricesEx.clear()
+  lastPublishAtEx.clear()
   livePricesEx.clear()
   livePriceListenersEx.clear()
 }
@@ -467,8 +511,20 @@ function sweepPendingPrices() {
       nextIn = Math.min(nextIn, LIVE_PRICE_INTERVAL_MS - since)
     }
   }
+  const readyEx: Array<[string, number]> = []
+  for (const [key, price] of pendingPricesEx) {
+    const since = now - (lastPublishAtEx.get(key) ?? 0)
+    if (since >= LIVE_PRICE_INTERVAL_MS) {
+      readyEx.push([key, price])
+      pendingPricesEx.delete(key)
+      lastPublishAtEx.set(key, now)
+    } else {
+      nextIn = Math.min(nextIn, LIVE_PRICE_INTERVAL_MS - since)
+    }
+  }
   for (const [symbol, price] of ready) commitLivePrice(symbol, price)
-  if (pendingPrices.size > 0) scheduleSweep(Math.max(1, nextIn))
+  for (const [key, price] of readyEx) commitLivePriceExKey(key, price)
+  if (pendingPrices.size > 0 || pendingPricesEx.size > 0) scheduleSweep(Math.max(1, nextIn))
 }
 
 export function setLivePrice(symbol: string, price: number) {

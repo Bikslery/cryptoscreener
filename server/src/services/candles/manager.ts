@@ -90,7 +90,12 @@ export function flushCandleLane(): void {
   flushPendingCandles()
 }
 
-export function recordInboundCandle(candle: UnifiedCandle): GapEvent | null {
+/** Result of the inbound candle audit: 'ok' = normal forming/closed update,
+ *  'late' = out-of-order (older than the last seen period for this channel),
+ *  or a detected GapEvent. */
+export type InboundAudit = GapEvent | 'late' | null
+
+export function recordInboundCandle(candle: UnifiedCandle): InboundAudit {
   candleDiagState.candlesReceived++
   const key = `${candle.exchange}:${candle.symbol}:${candle.timeframe}`
   const prev = candleDiagState.lastSeen.get(key)
@@ -99,7 +104,7 @@ export function recordInboundCandle(candle: UnifiedCandle): GapEvent | null {
   if (candle.time === prev) return null // normal repeat update of the same period
   if (candle.time < prev) {
     candleDiagState.lateCandles++
-    return null
+    return 'late'
   }
   // Phantom-candle watchdog: a candle whose range explodes vs its own previous
   // step (>25x) is a strong outlier signal on the inbound lane (whatever the
@@ -216,6 +221,12 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
   const candleCallback: CandleCallback = (candle: UnifiedCandle) => {
     const channel = `candle:${candle.exchange}:${candle.symbol}:${candle.timeframe}`
     const gap = recordInboundCandle(candle)
+    // Late/out-of-order bar (older than the last period this channel already
+    // saw): broadcasting it only to have lightweight-charts reject it on the
+    // client (monotonic-time invariant) wasted a frame per client and spammed
+    // series_update_rejected. The cache layer handles the correction via its
+    // sorted upsert; the wire stays clean.
+    if (gap === 'late') return
     if (candle.isFinal) {
       // A closed bar lands immediately: pending forming klines for the same
       // channel are superseded by this final snapshot, and the client's bar

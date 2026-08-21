@@ -11,12 +11,12 @@ const TF_SECONDS: Record<string, number> = {
 const MAX_REPAIR_WINDOW = 1000
 
 /**
- * Cache auto-repair is DISABLED by default (scalpboard.io parity): the client
- * must render exactly what the server received, holes included. Set
- * CACHE_REPAIR_ENABLED=1 to restore the "no holes ever" watchdog + instant
- * repair (backfills real rows from the exchange over WS-skip gaps).
+ * Cache auto-repair is ENABLED by default: exchange-side stream gaps are
+ * backfilled with REAL rows (never synthetic) so clients never see holes.
+ * Set CACHE_REPAIR_ENABLED=0 to restore scalpboard.io parity (holes stay
+ * visible until the exchange serves the missing window again).
  */
-const CACHE_REPAIR_ENABLED = process.env.CACHE_REPAIR_ENABLED === '1'
+const CACHE_REPAIR_ENABLED = process.env.CACHE_REPAIR_ENABLED !== '0'
 
 export interface CacheRepairEvent {
   ts: number
@@ -148,7 +148,7 @@ let watchdogTimer: ReturnType<typeof setInterval> | null = null
  */
 export function startCacheRepairWatchdog(): void {
   if (!CACHE_REPAIR_ENABLED) {
-    console.log('[CacheRepair] Disabled (CACHE_REPAIR_ENABLED unset — scalpboard parity, holes stay visible)')
+    console.log('[CacheRepair] Disabled (CACHE_REPAIR_ENABLED=0 — holes stay visible)')
     return
   }
   if (watchdogTimer) return

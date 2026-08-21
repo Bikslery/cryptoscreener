@@ -127,6 +127,11 @@ export default function CursorGlow() {
 
     const onMouseLeave = () => {
       visibleRef.current = false
+      // Park the lerp target offscreen — otherwise the trail keeps chasing
+      // the last in-window position forever, `allOffscreen` never becomes
+      // true, and the rAF loop spins a clearRect at ~60fps until reload.
+      mouseRef.current.x = -200
+      mouseRef.current.y = -200
     }
 
     window.addEventListener('mousemove', onMouse)

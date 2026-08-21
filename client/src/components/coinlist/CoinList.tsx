@@ -163,12 +163,15 @@ export function CoinList() {
   }, [settings])
   const rowCols = useMemo(() => cols.map(c => c.width).join(' '), [cols])
 
-  const coinMap = useCoinListStore(s => s.coinMap)
   const onPrefetch = useCallback((symbol: string) => {
+    // Read coinMap imperatively at call time: depending on it here handed the
+    // callback a fresh identity on every ticker delta (~25 Hz), which defeated
+    // the memo on EVERY visible Row even when nothing inside them changed.
+    const ex = useCoinListStore.getState().coinMap.get(symbol)?.exchange
     // Pass the exchange so the prefetch and the chart's own loader share one
     // cache key and don't fire duplicate requests.
-    getOrFetchHistory(symbol, tf, undefined, coinMap.get(symbol)?.exchange).catch(() => {})
-  }, [tf, coinMap])
+    getOrFetchHistory(symbol, tf, undefined, ex).catch(() => {})
+  }, [tf])
 
   const pageSet = useMemo(() => new Set(topChartSymbols), [topChartSymbols])
   const highlightActive = expandedSymbol === null

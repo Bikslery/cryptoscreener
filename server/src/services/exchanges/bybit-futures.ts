@@ -3,6 +3,7 @@ import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback, Tr
 import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth, UnifiedTrade } from '../../types.js'
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
 import { fetchWithTimeout } from '../../utils/fetch.js'
+import { CandleSilenceFallback } from './candle-fallback.js'
 
 const TF_MAP: Record<string, string> = {
   '1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1d': 'D', '1w': 'W',
@@ -101,6 +102,19 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   private tradeLastMsgAt = 0
   private subscribedSymbols = new Set<string>()
   private candleSubs = new Map<string, CandleCallback>()
+  // WS-silence → REST-poll guard: Bybit's reconnect backoff can leave klines
+  // dark for up to a minute — polled candles keep the forming tail alive.
+  private candleFallback: CandleSilenceFallback = new CandleSilenceFallback({
+    name: this.name,
+    fetch: (symbol, tf) => this.fetchCandles(symbol, tf, 2),
+    emit: (c) => {
+      for (const cb of this.candleCbs) cb(c)
+      const interval = TF_MAP[c.timeframe]
+      if (!interval) return
+      const subCb = this.candleSubs.get(`kline.${interval}.${c.symbol}`)
+      if (subCb) subCb(c)
+    },
+  })
   private precisionMap = new Map<string, number>()
   private intentionalClose = false
   private tradeIntentionalClose = false
@@ -228,6 +242,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
           } else if (msg.topic.startsWith('kline.')) {
             const candle = this.parseCandle(msg.data, msg.topic)
             if (candle) {
+              this.candleFallback.noteMessage()
               for (const cb of this.candleCbs) cb(candle)
               const subCb = this.candleSubs.get(msg.topic)
               if (subCb) subCb(candle)
@@ -467,6 +482,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     if (!interval) return
     const topic = `kline.${interval}.${symbol}`
     this.candleSubs.set(topic, cb)
+    this.candleFallback.register(topic, symbol, tf)
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ op: 'subscribe', args: [topic] }))
     }
@@ -477,6 +493,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     if (!interval) return
     const topic = `kline.${interval}.${symbol}`
     this.candleSubs.delete(topic)
+    this.candleFallback.unregister(topic)
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ op: 'unsubscribe', args: [topic] }))
     }

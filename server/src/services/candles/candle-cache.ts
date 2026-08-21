@@ -59,27 +59,29 @@ export function fillGaps(candles: UnifiedCandle[], symbol: string, exchange: Exc
 
   const tfSec = TF_SECONDS[tf]
   if (!tfSec || candles.length < 2) return candles
-  let prev: UnifiedCandle | null = null
+  // Lazy copy: `output` stays null until the first real gap so a contiguous
+  // series is returned by reference (no allocation on the hot serve path).
   let output: UnifiedCandle[] | null = null
-  for (const c of candles) {
-    if (prev && c.time > prev.time) {
-      const diff = c.time - prev.time
-      const periods = Math.round(diff / tfSec)
-      if (periods > 1) {
-        const missing = Math.min(periods - 1, MAX_FILL_WINDOW)
-        if (missing > 0) {
-          if (!output) output = candles.slice(0, candles.indexOf(c))
-          for (let i = 1; i <= missing; i++) {
-            output.push(flatCandle(c, prev.time + i * tfSec, prev.close))
-            syntheticFilledTotal++
-          }
-          output.push(c)
-          continue
-        }
+  let prevTime = candles[0].time
+  let prevClose = candles[0].close
+  for (let i = 1; i < candles.length; i++) {
+    const c = candles[i]
+    // Advance the anchor on EVERY iteration — the old version skipped this
+    // after filling a gap (`continue` past `prev = c`), so the next candle
+    // was compared against the pre-gap anchor again and re-filled the same
+    // region with duplicate timestamps.
+    const periods = c.time > prevTime ? Math.round((c.time - prevTime) / tfSec) : 1
+    const missing = periods > 1 ? Math.min(periods - 1, MAX_FILL_WINDOW) : 0
+    if (missing > 0 && !output) output = candles.slice(0, i)
+    if (output) {
+      for (let k = 1; k <= missing; k++) {
+        output.push(flatCandle(c, prevTime + k * tfSec, prevClose))
+        syntheticFilledTotal++
       }
+      output.push(c)
     }
-    if (output) output.push(c)
-    prev = c
+    prevTime = c.time
+    prevClose = c.close
   }
   return output || candles
 }

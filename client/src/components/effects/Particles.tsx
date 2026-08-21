@@ -318,15 +318,31 @@ export default function Particles({ fixed = true, style = 'white' }: ParticlesPr
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    let w: number, h: number
+    let w = 0, h = 0
+    // HiDPI support: back the canvas with device pixels and draw in CSS-pixel
+    // coordinates (capped at 2x — beyond that the glow cost outweighs the gain).
+    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+
+    // Particle re-init is O(count) plus allocation-heavy; running it on EVERY
+    // resize event stuttered window dragging. Canvas size updates stay instant;
+    // only the particle field rebuild is debounced.
+    let initTimer: ReturnType<typeof setTimeout> | null = null
 
     const resize = () => {
-      w = canvas.width = window.innerWidth
-      h = canvas.height = window.innerHeight
-      particlesRef.current = config.init(config.count, w, h)
+      w = window.innerWidth
+      h = window.innerHeight
+      canvas.width = Math.max(1, Math.floor(w * dpr))
+      canvas.height = Math.max(1, Math.floor(h * dpr))
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      if (initTimer) clearTimeout(initTimer)
+      initTimer = setTimeout(() => {
+        initTimer = null
+        particlesRef.current = config.init(config.count, w, h)
+      }, 150)
     }
 
     resize()
+    particlesRef.current = config.init(config.count, w, h)
     window.addEventListener('resize', resize)
 
     const onMouse = (e: MouseEvent) => {
@@ -354,6 +370,7 @@ export default function Particles({ fixed = true, style = 'white' }: ParticlesPr
 
     return () => {
       cancelAnimationFrame(frameRef.current)
+      if (initTimer) clearTimeout(initTimer)
       window.removeEventListener('resize', resize)
       window.removeEventListener('mousemove', onMouse)
       window.removeEventListener('mouseleave', onMouseLeave)

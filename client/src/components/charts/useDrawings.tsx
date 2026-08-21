@@ -702,16 +702,11 @@ export function useDrawings(
     isDraggingRef.current = true
   }, [chartRef, candleRef, containerRef])
 
-  const handleMouseMove = useCallback((e: MouseEvent) => {
-    const container = containerRef.current
+  const applyMove = useCallback((x: number, y: number) => {
     const chart = chartRef.current
     const series = candleRef.current
     const primitive = primitiveRef.current
-    if (!container || !chart || !series || !primitive) return
-
-    const rect = container.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
+    if (!chart || !series || !primitive) return
 
     if (isDraggingRef.current && dragStateRef.current) {
       const result = pixelToPriceTime(x, y)
@@ -755,7 +750,31 @@ export function useDrawings(
       hoveredIdRef.current = hoveredId
       primitive.setHoveredId(hoveredId)
     }
-  }, [pixelToPriceTime, candlesDataRef, containerRef, chartRef, candleRef])
+  }, [pixelToPriceTime, candlesDataRef, chartRef, candleRef])
+
+  // rAF coalescing: mousemove fires faster than frames; without this every
+  // event ran a full drawing rebuild + requestUpdate during drags/previews —
+  // several rebuilds per frame. Latest-wins: only the newest position paints.
+  const moveRafRef = useRef<number | null>(null)
+  const lastMoveRef = useRef<{ x: number; y: number } | null>(null)
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    const container = containerRef.current
+    if (!container) return
+    const rect = container.getBoundingClientRect()
+    lastMoveRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+    if (moveRafRef.current !== null) return
+    moveRafRef.current = requestAnimationFrame(() => {
+      moveRafRef.current = null
+      const m = lastMoveRef.current
+      lastMoveRef.current = null
+      if (m) applyMove(m.x, m.y)
+    })
+  }, [applyMove, containerRef])
+
+  useEffect(() => () => {
+    if (moveRafRef.current !== null) cancelAnimationFrame(moveRafRef.current)
+  }, [])
 
   const handleMouseUp = useCallback((e: MouseEvent) => {
     void e
