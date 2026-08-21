@@ -28,7 +28,7 @@ vi.mock('../src/services/exchanges/rate-limiter.js', () => ({
   acquireBudget: vi.fn(async () => true),
 }))
 
-import { flushHistoryChunkCache } from '../src/services/candles/history.js'
+import { decodeHistoryChunk, flushHistoryChunkCache } from '../src/services/candles/history.js'
 
 describe('history cache startup migration', () => {
   beforeEach(() => {
@@ -44,5 +44,30 @@ describe('history cache startup migration', () => {
     await flushHistoryChunkCache()
 
     expect(redisMock.del).not.toHaveBeenCalled()
+  })
+
+  it('decodes the versioned envelope while waiting for another process lock', () => {
+    const raw = JSON.stringify({
+      version: 2,
+      writtenAt: 1700000000000,
+      complete: false,
+      rowCount: 1,
+      minTime: 1700000000,
+      maxTime: 1700000000,
+      sources: ['binance-futures'],
+      rows: [[1700000000, 100, 101, 99, 100.5, 10]],
+    })
+
+    expect(decodeHistoryChunk(raw, 'BTCUSDT', 'binance-futures', '1m')).toEqual([{
+      symbol: 'BTCUSDT',
+      exchange: 'binance-futures',
+      timeframe: '1m',
+      time: 1700000000,
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100.5,
+      volume: 10,
+    }])
   })
 })
