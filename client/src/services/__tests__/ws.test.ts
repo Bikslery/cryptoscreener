@@ -129,3 +129,14 @@ describe('ws self-heal', () => {
     expect(FakeWebSocket.instances.length).toBe(1)
   })
 })
+
+describe('ws lane priority', () => {
+  it('classifies chart hot-path frames separately from bulk snapshots', async () => {
+    const wsMod = await freshWs()
+    expect(wsMod.isHighPriorityMessage({ type: 'trade:binance-futures:BTCUSDT' })).toBe(true)
+    expect(wsMod.isHighPriorityMessage({ type: 'candle:binance-futures:BTCUSDT:1m' })).toBe(true)
+    expect(wsMod.isHighPriorityMessage({ type: 'price:BTCUSDT' })).toBe(true)
+    expect(wsMod.isHighPriorityMessage({ type: 'ticker' })).toBe(false)
+    expect(wsMod.isHighPriorityMessage({ type: 'density' })).toBe(false)
+  })
+})
