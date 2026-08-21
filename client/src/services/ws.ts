@@ -93,6 +93,32 @@ function dispatch(msg: WsMessage) {
   }
 }
 
+export function isHighPriorityMessage(msg: Pick<WsMessage, 'type'>): boolean {
+  const type = msg.type as string | undefined
+  return !!type && (
+    type.startsWith('trade:') ||
+    type.startsWith('candle:') ||
+    type.startsWith('price:')
+  )
+}
+
+function processParsedMessage(msg: WsMessage, arrivedAt: number): void {
+  wsDiag.framesProcessed++
+  const lag = Date.now() - arrivedAt
+  if (lag > wsDiag.maxQueueLagMs) wsDiag.maxQueueLagMs = lag
+  if (lag > 500) {
+    recordDiag('ws_frame_lag', { detail: `${lag}ms queue lag, stale=${lag / 1000}s` })
+  }
+  if (typeof msg.ts === 'number') {
+    recordFrameLatency(Date.now() - msg.ts)
+  }
+  const eventTimeMs = (msg.data as { eventTimeMs?: unknown } | undefined)?.eventTimeMs
+  if (typeof eventTimeMs === 'number') {
+    recordMarketDataFreshness(Date.now() - eventTimeMs)
+  }
+  dispatch(msg)
+}
+
 // Server frames are deflate-raw compressed binary (see server hub.ts
 // encodePayload). DecompressionStream is async, so frames are processed
 // through a promise chain to preserve WebSocket message order.
@@ -132,27 +158,38 @@ function connect() {
     lastMessageAt = Date.now()
     wsDiag.framesReceived++
     const arrivedAt = Date.now()
+
+    // Hot chart lanes are deliberately emitted by the server as small text
+    // frames. Parse and dispatch them immediately so a large compressed
+    // ticker/density snapshot cannot hold executed trades behind async
+    // DecompressionStream work. Low-priority frames retain their serial order.
+    if (typeof e.data === 'string') {
+      try {
+        const parsed = JSON.parse(e.data) as WsMessage
+        if (isHighPriorityMessage(parsed)) {
+          processParsedMessage(parsed, arrivedAt)
+          return
+        }
+        frameQueue = frameQueue
+          .then(() => processParsedMessage(parsed, arrivedAt))
+          .catch((err) => {
+            wsDiag.queueErrors++
+            console.error('[WS] frame-queue rejection, chain reseeded', err)
+            recordDiag('ws_frame_queue_error', { detail: err instanceof Error ? err.message : String(err) })
+          })
+        return
+      } catch {
+        wsDiag.parseErrors++
+        return
+      }
+    }
+
     frameQueue = frameQueue
       .then(async () => {
-        wsDiag.framesProcessed++
-        const lag = Date.now() - arrivedAt
-        if (lag > wsDiag.maxQueueLagMs) wsDiag.maxQueueLagMs = lag
-        if (lag > 500) {
-          recordDiag('ws_frame_lag', { detail: `${lag}ms queue lag, stale=${lag / 1000}s` })
-        }
         try {
-          const text = typeof e.data === 'string' ? e.data : await decompressFrame(e.data)
+          const text = await decompressFrame(e.data)
           const msg = JSON.parse(text) as WsMessage
-          // Server stamps ts on ticker/price frames — arrival latency incl. the
-          // client-side queue, so it reflects what the user actually sees.
-          if (typeof msg.ts === 'number') {
-            recordFrameLatency(Date.now() - msg.ts)
-          }
-          const eventTimeMs = (msg.data as { eventTimeMs?: unknown } | undefined)?.eventTimeMs
-          if (typeof eventTimeMs === 'number') {
-            recordMarketDataFreshness(Date.now() - eventTimeMs)
-          }
-          dispatch(msg)
+          processParsedMessage(msg, arrivedAt)
         } catch { wsDiag.parseErrors++ /* ignore malformed frame */ }
       })
       .catch((err) => {
