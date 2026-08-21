@@ -101,7 +101,7 @@ function refreshCandlesInBackground(symbol: string, tf: string, limit: number, e
   if (existing && Date.now() - existing.ts < 2000) return existing.promise
 
   const attempt = (n: number): Promise<void> => {
-    return getHistory(symbol, tf, { limit, exchange })
+    return getHistory(symbol, tf, { limit, exchange, priority: 'background' })
       .then((candles) => {
         if (candles.length > 0) {
           setCachedCandlesFromRest(symbol, tf, candles, cacheExchange || candles[0]?.exchange)

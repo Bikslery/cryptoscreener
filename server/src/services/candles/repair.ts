@@ -97,7 +97,7 @@ export async function repairCacheWindow(
       const before = h.to + tfSec
       const limit = Math.min(Math.round((h.to - h.from) / tfSec) + 2, MAX_REPAIR_WINDOW)
       try {
-        const real = await getHistory(symbol, tf, { before, limit, exchange })
+        const real = await getHistory(symbol, tf, { before, limit, exchange, priority: 'background' })
         const inWindow = real.filter(c => c.time >= h.from && c.time <= h.to)
         filledReal += inWindow.length
         fetched.push(...inWindow)

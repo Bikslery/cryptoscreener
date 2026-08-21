@@ -3,6 +3,7 @@ import { getRedisData, REDIS_ENABLED } from '../../redis.js'
 import { pickDispatcher, addWeightToIp, getIpCount } from '../exchanges/proxy.js'
 import { acquireBudget } from '../exchanges/rate-limiter.js'
 import type { Exchange, UnifiedCandle } from '../../types.js'
+import { beginForegroundHistory, waitForHistoryBackgroundSlot } from './history-priority.js'
 
 const CHUNK_SIZE = 1000
 
@@ -343,6 +344,7 @@ export interface HistoryOptions {
   before?: number
   limit?: number
   exchange?: Exchange
+  priority?: 'foreground' | 'background'
 }
 
 /**
@@ -357,7 +359,7 @@ export interface HistoryOptions {
  *    - Glues the results together, deduplicates by time
  * 4. Merge all chunks, dedup by time, sort, slice to limit
  */
-export async function getHistory(
+async function getHistoryInternal(
   symbol: string,
   tf: string,
   options: HistoryOptions = {},
@@ -432,4 +434,22 @@ export async function getHistory(
   const result = filtered.slice(-limit)
   if (result.length > 0) setCachedResponse(responseKey, result)
   return result
+}
+
+export async function getHistory(
+  symbol: string,
+  tf: string,
+  options: HistoryOptions = {},
+): Promise<UnifiedCandle[]> {
+  if (options.priority === 'background') {
+    await waitForHistoryBackgroundSlot()
+    return getHistoryInternal(symbol, tf, options)
+  }
+
+  const releaseForeground = beginForegroundHistory()
+  try {
+    return await getHistoryInternal(symbol, tf, options)
+  } finally {
+    releaseForeground()
+  }
 }

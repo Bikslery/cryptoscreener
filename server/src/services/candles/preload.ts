@@ -2,6 +2,7 @@ import type { ExchangeAdapter } from '../exchanges/types.js'
 import type { UnifiedCandle, Exchange } from '../../types.js'
 import { setCachedCandlesFromRest, getCachedCandles } from './candle-cache.js'
 import { getTickers, getTicker } from '../aggregator/index.js'
+import { waitForHistoryBackgroundSlot } from './history-priority.js'
 
 // 1m включён: это рабочий таймфрейм для скальпинга, без прелоада первый
 // переход на 1m всегда был холодным (REST к бирже). Топ-50 символов достаточно.
@@ -115,6 +116,7 @@ async function fetchCandlesFor(
     ...adapters.filter(a => a.exchange !== target),
   ]
   for (const adapter of ordered) {
+    await waitForHistoryBackgroundSlot()
     try {
       const candles = await adapter.fetchCandles(symbol, tf, limit)
       if (candles.length > 0) {
