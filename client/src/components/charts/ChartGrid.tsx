@@ -18,7 +18,7 @@ import { expandCompactCandles, type CompactCandle } from '../../services/candle-
 import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatch, type TickPayload } from '../../services/candle-events'
 import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
 import { canPaintPartialHistory, replaceDataPreservingPriceScale, resolveHistoryViewportAction } from '../../services/chart-history-paint'
-import { isFiniteOHLCV, validateCandle } from '../../services/candle-utils'
+import { isFiniteOHLCV, validateCandle, MAX_FORWARD_FILL_PERIODS, forwardFillGap, isFlatFiller } from '../../services/candle-utils'
 import { resolveHistoryLoadPlan } from '../../services/history-load-plan'
 import { recordDiag } from '../../services/candle-diag'
 import { useDrawings } from './useDrawings'
@@ -269,6 +269,78 @@ function isFormingBar(bar: UnifiedCandle, candlesDataRef: React.RefObject<Unifie
 }
 
 /**
+ * Period-jump forward-fill (TradingView-style continuity) — see
+ * candle-utils.forwardFillGap. A quiet pair can go many periods without a
+ * single kline; the sharp move that ends the silence arrives as a bar
+ * SEVERAL periods ahead of the tail. Painting it directly makes
+ * lightweight-charts insert internal whitespace for every skipped bucket —
+ * the "empty stretch + lone detached candle" artifact. Bridge bars are flat
+ * candles anchored to the previous close; `backfillJumpWindow` replaces them
+ * with real rows seconds later (server cache-repair keeps that cache warm).
+ */
+
+// One background backfill per channel per window — several jumps in a row
+// must not stampede REST.
+const JUMP_BACKFILL_THROTTLE_MS = 10_000
+const jumpBackfillAt = new Map<string, number>()
+
+/**
+ * Replace freshly-forward-filled flat bars with REAL rows from the server
+ * cache. Repaints in place via `series.update(bar, true)` (historicalUpdate)
+ * — no setData, no viewport reset. Bounded to the filler region; anything the
+ * cache cannot cover yet stays flat until the repair watchdog heals it and a
+ * later history load paints it.
+ */
+function backfillJumpWindow(
+  candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
+  volumeRef: React.RefObject<ISeriesApi<'Histogram'> | null>,
+  candlesDataRef: React.RefObject<UnifiedCandle[]>,
+  symbol: string,
+  tf: Timeframe,
+  exchange?: Exchange,
+): void {
+  const key = `${exchange ?? 'auto'}:${symbol}:${tf}`
+  const now = Date.now()
+  if (now - (jumpBackfillAt.get(key) ?? 0) < JUMP_BACKFILL_THROTTLE_MS) return
+  jumpBackfillAt.set(key, now)
+  if (jumpBackfillAt.size > 200) {
+    for (const [k, ts] of jumpBackfillAt) {
+      if (now - ts > JUMP_BACKFILL_THROTTLE_MS) jumpBackfillAt.delete(k)
+    }
+  }
+
+  getOrFetchHistory(symbol, tf, GRID_CANDLE_LIMIT, exchange)
+    .then(data => {
+      const arr = candlesDataRef.current
+      const series = candleRef.current
+      if (!arr || arr.length === 0 || !series || data.length === 0) return
+      const candlesType = useChartSettings.getState().candlesType
+      if (candlesType === 'line') return
+      const realByTime = new Map<number, UnifiedCandle>()
+      for (const c of data) realByTime.set(c.time, c)
+
+      // Scan the tail region where fillers live (they were just appended).
+      let checked = 0
+      for (let i = arr.length - 1; i >= 0 && checked <= MAX_FORWARD_FILL_PERIODS + 2; i--, checked++) {
+        const cur = arr[i]
+        if (!isFlatFiller(cur)) continue
+        const real = realByTime.get(cur.time)
+        if (!real || !validateCandle(real)) continue
+        if (real.close === cur.close && real.open === cur.open && real.high === cur.high && real.low === cur.low && real.volume === cur.volume) continue
+        arr[i] = { ...real }
+        try {
+          series.update({
+            time: toChartTime(real.time) as Time,
+            open: real.open, high: real.high, low: real.low, close: real.close,
+          }, true)
+          volumeRef.current?.update({ time: toChartTime(real.time) as Time, value: real.volume }, true)
+        } catch { /* series recreated mid-backfill — next history load covers */ }
+      }
+    })
+    .catch(() => { /* transient — the next jump or history load retries */ })
+}
+
+/**
  * Source tag for diagnostics only — identifies which lane produced the patch
  * being applied (kline stream, trade tick, bookTicker mid, or a buffered-flush
  * replay from a history/lazy-scroll cycle).
@@ -285,6 +357,7 @@ function applyChartPatch(
   exchange: Exchange | undefined,
   tf: Timeframe,
   source: PatchSource,
+  eventsRef?: React.RefObject<CandleEvents | null>,
 ) {
   const candlesType = useChartSettings.getState().candlesType
   const series = candleRef.current
@@ -293,6 +366,59 @@ function applyChartPatch(
   for (const u of patch.updates) {
     const bar = u.bar
     const t = toChartTime(bar.time) as Time
+
+    // ── Period-jump forward-fill ──────────────────────────────────────────
+    // The incoming bar lands SEVERAL periods after the tail (quiet pair →
+    // sharp move). Paint flat bridge bars first so lightweight-charts never
+    // inserts whitespace between the tail and the new bar.
+    const jumpArr = candlesDataRef.current
+    const lastArrBar = jumpArr && jumpArr.length > 0 ? jumpArr[jumpArr.length - 1] : null
+    if (lastArrBar && lastArrBar.time > 0 && bar.time > lastArrBar.time) {
+      const tfSec = getTfSeconds(tf)
+      const gapPeriods = Math.round((bar.time - lastArrBar.time) / tfSec)
+      if (gapPeriods > 1 && gapPeriods <= MAX_FORWARD_FILL_PERIODS + 1) {
+        const fillers = forwardFillGap(lastArrBar, bar.time, tfSec)
+        try {
+          // Same handoff rule as a normal new-period paint: snap the old
+          // bar's pending glide to its exact target before moving the
+          // series' time forward.
+          if (animator) animator.finalizeAndReset()
+          const lineMode = candlesType === 'line'
+          for (const f of fillers) {
+            const ft = toChartTime(f.time) as Time
+            if (lineMode) {
+              candleRef.current?.update({ time: ft, value: f.close })
+            } else {
+              candleRef.current?.update({ time: ft, open: f.open, high: f.high, low: f.low, close: f.close })
+            }
+            volumeRef.current?.update({ time: ft, value: 0 })
+            upsertBar(candlesDataRef, f)
+          }
+          eventsRef?.current?.forwardFill(fillers)
+        } catch (err) {
+          recordDiag('forward_fill_paint_failed', {
+            symbol, exchange, tf,
+            from: lastArrBar.time, to: bar.time,
+            detail: `source=${source} error=${err instanceof Error ? err.message : String(err)}`,
+          })
+        }
+        recordDiag('period_jump_filled', {
+          symbol, exchange, tf,
+          from: lastArrBar.time, to: bar.time,
+          detail: `gap=${gapPeriods - 1}p filled=${fillers.length} source=${source}`,
+        })
+        backfillJumpWindow(candleRef, volumeRef, candlesDataRef, symbol, tf, exchange)
+      } else if (gapPeriods > MAX_FORWARD_FILL_PERIODS + 1) {
+        // Absurd jump (clock skew / bad data): do NOT synthesize hundreds of
+        // bars — log it; the next history load repaints truthfully.
+        recordDiag('period_jump_skipped', {
+          symbol, exchange, tf,
+          from: lastArrBar.time, to: bar.time,
+          detail: `gap=${gapPeriods - 1}p exceeds cap ${MAX_FORWARD_FILL_PERIODS}, source=${source}`,
+        })
+      }
+    }
+
     try {
       if (candlesType === 'line') {
         candleRef.current?.update({ time: t, value: bar.close })
@@ -708,7 +834,7 @@ function useFullHistory(
         eventsRef.current?.applyHistory(valid)
         const flush = eventsRef.current?.setBuffered(false)
         if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
-          applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'history-flush')
+          applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'history-flush', eventsRef)
         }
         checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'history-flush')
       }
@@ -941,7 +1067,7 @@ function useLazyScroll(
         if (added <= 0) {
           const flush = eventsRef?.current?.setBuffered(false)
           if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
-            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush', eventsRef)
           }
           checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
           return
@@ -971,7 +1097,7 @@ function useLazyScroll(
           // fetch started ON TOP of the merged history.
           const flush = eventsRef?.current?.setBuffered(false)
           if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
-            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush', eventsRef)
           }
           checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
         } catch (err) {
@@ -1018,7 +1144,7 @@ function useLazyScroll(
             setIsLoadingMoreRef.current?.(false)
             const flush = eventsRef?.current?.setBuffered(false)
             if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
-              applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+              applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush', eventsRef)
             }
             checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
             return
@@ -1051,7 +1177,7 @@ function useLazyScroll(
           setIsLoadingMoreRef.current?.(false)
           const flush = eventsRef?.current?.setBuffered(false)
           if (flush && (flush.updates.length > 0 || (flush.outOfOrder && flush.outOfOrder.length > 0))) {
-            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
+            applyChartPatch(flush, candleRef, volumeRef, candlesDataRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush', eventsRef)
           }
           checkTailInvariant(candlesDataRef, eventsRef, curSymbol, curExchange, curTf, 'lazy-scroll-flush')
         })
@@ -1172,7 +1298,7 @@ function useWsCandle(
         return
       }
 
-      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'kline')
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'kline', eventsRef)
       checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'kline')
     })
     wsSubscribe(channel)
@@ -1288,7 +1414,7 @@ function useWsTrade(
         return
       }
 
-      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'tick-trade')
+      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'tick-trade', eventsRef)
       checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'tick-trade')
     })
     wsSubscribe(tradeType)

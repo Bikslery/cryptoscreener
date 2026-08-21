@@ -107,6 +107,14 @@ export interface CandleEvents {
   applyHistory(candles: UnifiedCandle[]): void
   applyOlderPage?(candles: UnifiedCandle[]): void
   /**
+   * Advance the tail through client-side gap-filler bars WITHOUT producing
+   * patches — the caller paints them itself. Keeps tick-window bookkeeping
+   * (`cur.candle.time`) aligned with what the chart actually shows, so a
+   * forward-filled jump does not leave the events layer stuck on a stale
+   * period while the series has moved on.
+   */
+  forwardFill(fillers: UnifiedCandle[]): void
+  /**
    * Nested-safe buffering. `on=true` increments a depth counter; `on=false`
    * decrements it. The buffer is only flushed (replayed) when depth returns
    * to 0 — while ANY caller still holds it open (reconnect history reload
@@ -341,6 +349,18 @@ export function createCandleEvents(opts: CandleEventsOpts): CandleEvents {
     return patch
   }
 
+  function forwardFill(fillers: UnifiedCandle[]): void {
+    if (destroyed) return
+    for (const f of fillers) {
+      if (!isFiniteOHLCV(f) || f.time <= 0) continue
+      const cur = current()
+      // Only ever move FORWARD through time — a filler older than the tail is
+      // bookkeeping noise and must not rewind tick windows.
+      if (!cur || f.time <= cur.candle.time) continue
+      pushTail({ candle: f, lastTickPrice: 0 })
+    }
+  }
+
   function peekTail(n: number = MAX_TAIL): TailSnapshot[] {
     const start = Math.max(0, tail.length - n)
     return tail.slice(start).map(t => ({ time: t.candle.time, close: t.candle.close }))
@@ -358,6 +378,7 @@ export function createCandleEvents(opts: CandleEventsOpts): CandleEvents {
     applyTick,
     applyHistory,
     applyOlderPage,
+    forwardFill,
     setBuffered,
     peekTail,
     destroy,
