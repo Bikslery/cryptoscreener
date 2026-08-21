@@ -103,7 +103,46 @@ describe('BybitFuturesAdapter.parseTicker', () => {
   })
 
   it('rejects deltas that omit lastPrice (would serialize to null price)', () => {
-    expect(bybit.parseTicker({ symbol: 'BTCUSDT' })).toBeNull()
+    expect(bybit.parseTicker({ symbol: 'NEVERSEENUSDT' })).toBeNull()
+  })
+
+  it('merges ticker deltas with the previous snapshot', () => {
+    bybit.parseTicker({
+      symbol: 'ETHUSDT', lastPrice: '2000', prevPrice24h: '1900', highPrice24h: '2100',
+      lowPrice24h: '1800', volume24h: '500', turnover24h: '1000000',
+    })
+
+    const updated = bybit.parseTicker({ symbol: 'ETHUSDT', lastPrice: '2050' })
+
+    expect(updated!.price).toBe(2050)
+    expect(updated!.openPrice24h).toBe(1900)
+    expect(updated!.high24h).toBe(2100)
+    expect(updated!.volume24h).toBe(500)
+  })
+})
+
+describe('BybitFuturesAdapter.parseTrades', () => {
+  const bybit = new BybitFuturesAdapter()
+
+  it('normalizes publicTrade rows with millisecond event time and maker side', () => {
+    const trades = bybit.parseTrades([
+      { s: 'BTCUSDT', p: '50123.5', v: '0.25', T: 1700000000123, S: 'Sell', i: 'trade-1', seq: '77' },
+    ], 'publicTrade.BTCUSDT')
+
+    expect(trades).toEqual([{
+      symbol: 'BTCUSDT',
+      exchange: 'bybit-futures',
+      price: 50123.5,
+      volume: 0.25,
+      eventTimeMs: 1700000000123,
+      isBuyerMaker: true,
+      tradeId: 'trade-1',
+      sequence: '77',
+    }])
+  })
+
+  it('drops malformed publicTrade rows', () => {
+    expect(bybit.parseTrades([{ s: 'BTCUSDT', p: 'bad', v: '1', T: 1 }], 'publicTrade.BTCUSDT')).toEqual([])
   })
 })
 
