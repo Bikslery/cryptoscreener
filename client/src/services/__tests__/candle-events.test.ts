@@ -76,6 +76,19 @@ describe('candle-events (scalpboard parity)', () => {
     expect(lastBar(p3).volume).toBe(12)
   })
 
+  it('never mutates OHLC from a bid/ask quote', () => {
+    const ev = makeEvents()
+    ev.applyKline(makeCandle(300, 100, 100, 100, 100, 12))
+
+    const quotePatch = ev.applyTick({ price: 110, timeSec: 318, source: 'quote' })
+    expect(quotePatch.updates).toHaveLength(0)
+
+    const tradePatch = ev.applyTick({ price: 101, timeSec: 319, source: 'trade' })
+    expect(tradePatch.updates).toHaveLength(1)
+    expect(lastBar(tradePatch).high).toBe(101)
+    expect(lastBar(tradePatch).close).toBe(101)
+  })
+
   it('tick outside (barStart, barStart+tf) is DROPPED (no synthetic candle)', () => {
     const ev = makeEvents()
     ev.applyKline(makeCandle(300, 100, 101, 99, 100.5, 12))
