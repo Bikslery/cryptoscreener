@@ -86,4 +86,19 @@ describe('getOrFetchHistory — limit-aware cache semantics', () => {
     expect(individualCandles).toHaveLength(300)
     expect(bulkResult.BTCUSDT).toHaveLength(300)
   })
+
+  it('does not let a 300-bar bulk response satisfy a concurrent 3000-bar request', async () => {
+    let resolvePost!: (value: { data: Record<string, UnifiedCandle[]> }) => void
+    mockPost.mockReturnValueOnce(new Promise(resolve => { resolvePost = resolve }))
+    mockGet.mockResolvedValueOnce({ data: makeCandles(3000) })
+
+    const bulk = getOrFetchBulk(['BTCUSDT'], '5m', 300, 'binance-futures')
+    const deep = getOrFetchHistory('BTCUSDT', '5m', 3000, 'binance-futures')
+    resolvePost({ data: { BTCUSDT: makeCandles(300) } })
+
+    const [, deepCandles] = await Promise.all([bulk, deep])
+
+    expect(mockGet).toHaveBeenCalledTimes(1)
+    expect(deepCandles).toHaveLength(3000)
+  })
 })
