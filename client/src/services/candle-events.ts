@@ -28,6 +28,8 @@ export interface TickPayload {
   price: number
   /** Trade/exchange time in UTC seconds (raw, NOT shifted). */
   timeSec: number
+  /** Quotes are display-only and must never create executed OHLC values. */
+  source?: 'trade' | 'quote'
 }
 
 /** One bar to paint via `series.update()` (exact scalpboard Cn/En semantics). */
@@ -218,6 +220,7 @@ export function createCandleEvents(opts: CandleEventsOpts): CandleEvents {
   function applyTick(tick: TickPayload): ChartEventPatch {
     if (destroyed) return EMPTY_PATCH()
     if (!isFinite(tick.price) || tick.price <= 0) return EMPTY_PATCH()
+    if (tick.source === 'quote') return EMPTY_PATCH()
 
     if (bufferDepth > 0) {
       bufferedEvents.push({ kind: 'tick', tick, seq: bufferSeq++ })

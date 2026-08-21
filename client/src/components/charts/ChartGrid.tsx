@@ -9,7 +9,7 @@ import type { ChartExchange } from '../../store'
 import { useShallow } from 'zustand/shallow'
 import { wsOnChannel, wsOnType, wsSubscribe, wsUnsubscribe, getWsOpenCount, getWsLastMessageAt } from '../../services/ws'
 import type { Timeframe, UnifiedCandle, Exchange, DrawingTool } from '../../types'
-import { formatPrice, formatCompact, extractBaseAsset, snapToTick } from '../../utils/format'
+import { formatPrice, formatCompact, extractBaseAsset } from '../../utils/format'
 import { resolveIndicators, formatIndicator } from '../../services/indicators'
 import { ArrowLeft, Settings2 } from 'lucide-react'
 import * as candleCache from '../../services/candle-cache'
@@ -1155,14 +1155,9 @@ function useWsTrade(
   adjustingRef?: React.RefObject<boolean>,
   lastUpdateRef?: React.RefObject<number>,
 ) {
-  // The trade lane (aggTrade prints — the actual last trade price, what a
-  // trading terminal shows) is the primary tick source. The price lane
-  // (bookTicker mid) only kicks in when trades have been quiet for a second,
-  // so two prices never alternate on the same forming bar (mid sits in the
-  // spread and wobbles ±spread/2 on thin books — the source of the visible
-  // price flicker).
-  const lastTradeAtRef = useRef(0)
-  const precision = useCoinPrecision(symbol, exchange)
+  // Executed trades are the only price ticks allowed to mutate candle OHLC.
+  // Bid/ask midpoint is a quote, not a trade; it intentionally stays outside
+  // this chart event path so sparse markets cannot manufacture highs/lows.
 
   useEffect(() => {
     if (!exchange) return
@@ -1177,8 +1172,6 @@ function useWsTrade(
       if (lastUpdateRef) {
         lastUpdateRef.current = Date.now()
       }
-      lastTradeAtRef.current = Date.now()
-
       const price = typeof trade.price === 'number' ? trade.price : parseFloat(trade.price)
       if (!isFinite(price)) return
 
@@ -1196,7 +1189,7 @@ function useWsTrade(
 
       // Price tick → mutate ONLY the last bar's close/high/low (scalpboard's
       // En). Volume never comes from trades.
-      const patch = ev.applyTick({ price, timeSec: tradeTime } as TickPayload)
+      const patch = ev.applyTick({ price, timeSec: tradeTime, source: 'trade' } as TickPayload)
       if (adjustingRef?.current) {
         if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
           recordDiag('adjusting_drop_unbuffered', {
@@ -1212,58 +1205,11 @@ function useWsTrade(
     })
     wsSubscribe(tradeType)
 
-    // Fast-lane price: bookTicker mid — fallback for pairs with sparse
-    // trades. Exchange filter: the channel is keyed by symbol only; only the
-    // matching exchange's mid reaches this chart.
-    const priceChannel = `price:${symbol}`
-    const unsubPrice = wsOnChannel(priceChannel, (msg) => {
-      if (destroyedRef.current) return
-      const d = msg.data as { symbol: string; exchange?: string; price: number } | undefined
-      if (!d || typeof d.price !== 'number' || !isFinite(d.price) || d.price <= 0) return
-      if (exchange && d.exchange && d.exchange !== exchange) return
-      if (lastUpdateRef) lastUpdateRef.current = Date.now()
-
-      // Trades are the true price — skip the mid entirely while prints are
-      // flowing so the mid never wobbles the forming bar within the spread.
-      if (Date.now() - lastTradeAtRef.current < 1000) return
-
-      const ev = eventsRef.current
-      if (!ev) return
-
-      // Bug fix (Stage 2 item 1 — atomicity): this branch used to check
-      // `adjustingRef.current` BEFORE calling `ev.applyTick`, which meant a
-      // mid-price tick arriving during a lazy-scroll prepend was dropped
-      // entirely — never even queued into the events layer's buffer (which
-      // is already held open at this point, see useLazyScroll's
-      // setBuffered(true)). The kline/trade-lane branches above call
-      // apply*() FIRST (so the event is queued/buffered) and only then check
-      // adjustingRef to decide whether to paint immediately — mirror that
-      // ordering here so the tick's tail-events queue and the painted
-      // candlesDataRef/series can never diverge (the tail no longer "gets
-      // ahead" of the series during the adjusting window).
-      const patch = ev.applyTick({ price: snapToTick(d.price, precision), timeSec: Math.floor(Date.now() / 1000) } as TickPayload)
-      if (adjustingRef?.current) {
-        if (patch.updates.length > 0 || (patch.outOfOrder && patch.outOfOrder.length > 0)) {
-          recordDiag('adjusting_drop_unbuffered', {
-            symbol, exchange, tf,
-            detail: 'bookTicker mid tick mutated events tail while adjustingRef was true but buffer was NOT held — event lost',
-          })
-        }
-        return
-      }
-
-      applyChartPatch(patch, candleRef, volumeRef, candlesDataRef, symbol, exchange, tf, 'tick-price')
-      checkTailInvariant(candlesDataRef, eventsRef, symbol, exchange, tf, 'tick-price')
-    })
-    wsSubscribe(priceChannel)
-
     return () => {
       unsub()
       wsUnsubscribe(tradeType)
-      unsubPrice()
-      wsUnsubscribe(priceChannel)
     }
-  }, [symbol, exchange, tf, precision, adjustingRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
+  }, [symbol, exchange, tf, adjustingRef, candleRef, candlesDataRef, destroyedRef, eventsRef, lastUpdateRef, volumeRef])
 }
 
 
