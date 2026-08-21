@@ -1,15 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import * as candleCache from '../candle-cache'
-import { getOrFetchHistory } from '../candle-prefetch'
+import { getOrFetchBulk, getOrFetchHistory } from '../candle-prefetch'
 import type { UnifiedCandle } from '../../types'
 
-const { mockGet } = vi.hoisted(() => ({
+const { mockGet, mockPost } = vi.hoisted(() => ({
   mockGet: vi.fn(),
+  mockPost: vi.fn(),
 }))
 
 vi.mock('../api', () => ({
   default: {
     get: mockGet,
+    post: mockPost,
   },
 }))
 
@@ -29,6 +31,7 @@ describe('getOrFetchHistory — limit-aware cache semantics', () => {
     // Clean the candle cache for the test key
     candleCache.clearAll()
     mockGet.mockReset()
+    mockPost.mockReset()
   })
 
   it('serves the cache only when it covers the FULL requested window', async () => {
@@ -64,5 +67,23 @@ describe('getOrFetchHistory — limit-aware cache semantics', () => {
     ])
     expect(big.length).toBe(3000)
     expect(small.length).toBe(300)
+  })
+
+  it('reuses an individual grid request that started before bulk registration', async () => {
+    let resolveGet!: (value: { data: UnifiedCandle[] }) => void
+    mockGet.mockReturnValueOnce(new Promise(resolve => { resolveGet = resolve }))
+    mockPost.mockResolvedValueOnce({ data: { BTCUSDT: [] } })
+
+    const individual = getOrFetchHistory('BTCUSDT', '5m', 300, 'binance-futures')
+    const bulk = getOrFetchBulk(['BTCUSDT'], '5m', 300, 'binance-futures')
+
+    expect(mockGet).toHaveBeenCalledTimes(1)
+    expect(mockPost).not.toHaveBeenCalled()
+
+    resolveGet({ data: makeCandles(300) })
+    const [individualCandles, bulkResult] = await Promise.all([individual, bulk])
+
+    expect(individualCandles).toHaveLength(300)
+    expect(bulkResult.BTCUSDT).toHaveLength(300)
   })
 })
