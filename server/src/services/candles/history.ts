@@ -16,7 +16,8 @@ const TF_MS: Record<string, number> = {
   '1w': 604_800_000,
 }
 
-const CHUNK_PREFIX = 'hist:'
+export const HISTORY_CACHE_VERSION = 2
+const CHUNK_PREFIX = `hist:v${HISTORY_CACHE_VERSION}:`
 const LOCK_PREFIX = 'lock:'
 
 const inflightChunks = new Map<string, Promise<UnifiedCandle[]>>()
@@ -27,13 +28,26 @@ const inflightChunks = new Map<string, Promise<UnifiedCandle[]>>()
 // spots" during sharp moves). Redis keys get an expiry so poisoned chunks
 // self-heal, and memory chunks are revalidated after MEM_CHUNK_TTL_MS so a
 // bad fetch is retried instead of being served indefinitely.
-const REDIS_CHUNK_TTL_FULL_S = 24 * 3600 // full chunk (CHUNK_SIZE candles)
+const REDIS_CHUNK_TTL_FULL_S = 30 * 24 * 3600 // closed immutable chunk
 const REDIS_CHUNK_TTL_PARTIAL_S = 10 * 60 // partial chunk (short-lived: retry soon)
 const MEM_CHUNK_TTL_MS = 5 * 60 * 1000
 
 interface MemChunk {
   candles: UnifiedCandle[]
   ts: number
+}
+
+type CompactCandle = [number, number, number, number, number, number]
+
+interface StoredHistoryChunkV2 {
+  version: typeof HISTORY_CACHE_VERSION
+  writtenAt: number
+  complete: boolean
+  rowCount: number
+  minTime: number
+  maxTime: number
+  sources: Exchange[]
+  rows: CompactCandle[]
 }
 
 const memChunks = new Map<string, MemChunk>()
@@ -102,7 +116,7 @@ function chunkKeysFor(exchange: Exchange, symbol: string, tf: string, beforeMs: 
   return keys
 }
 
-function compactCandle(c: UnifiedCandle): [number, number, number, number, number, number] {
+function compactCandle(c: UnifiedCandle): CompactCandle {
   return [c.time, c.open, c.high, c.low, c.close, c.volume]
 }
 
@@ -118,8 +132,13 @@ async function readChunksFromRedis(keys: string[], symbol: string, exchange: Exc
     return raws.map(raw => {
       if (!raw) return null
       try {
-        const tuples = JSON.parse(raw as string) as [number, number, number, number, number, number][]
-        return tuples.map(([t, o, h, l, c, v]) => expandCandle(t, o, h, l, c, v, symbol, exchange, tf))
+        const stored = JSON.parse(raw as string) as StoredHistoryChunkV2
+        if (
+          stored.version !== HISTORY_CACHE_VERSION ||
+          !Array.isArray(stored.rows) ||
+          stored.rowCount !== stored.rows.length
+        ) return null
+        return stored.rows.map(([t, o, h, l, c, v]) => expandCandle(t, o, h, l, c, v, symbol, exchange, tf))
       } catch {
         return null
       }
@@ -133,9 +152,19 @@ async function writeChunkToRedis(key: string, candles: UnifiedCandle[]): Promise
   if (!REDIS_ENABLED || candles.length === 0) return
   try {
     const redis = getRedisData()
-    const tuples = candles.map(compactCandle)
+    const rows = candles.map(compactCandle)
+    const stored: StoredHistoryChunkV2 = {
+      version: HISTORY_CACHE_VERSION,
+      writtenAt: Date.now(),
+      complete: candles.length >= CHUNK_SIZE,
+      rowCount: rows.length,
+      minTime: candles[0].time,
+      maxTime: candles[candles.length - 1].time,
+      sources: Array.from(new Set(candles.map(c => c.exchange))),
+      rows,
+    }
     const ttl = candles.length >= CHUNK_SIZE ? REDIS_CHUNK_TTL_FULL_S : REDIS_CHUNK_TTL_PARTIAL_S
-    await redis.set(key, JSON.stringify(tuples), 'EX', ttl)
+    await redis.set(key, JSON.stringify(stored), 'EX', ttl)
   } catch {}
 }
 
@@ -157,40 +186,13 @@ function writeChunkToMem(key: string, candles: UnifiedCandle[]): void {
 }
 
 /**
- * Drop OLD cached history chunks (Redis). Called once at startup: chunks
- * written while an exchange was throttled/geo-blocked may be partial or from
- * the wrong exchange, and serving them forever shows holes in history. Chunks
- * are pure cache — they refetch on demand — so clearing is always safe.
- *
- * Chunk keys embed their grid start (`hist:<ex>:<symbol>:<tf>:<csMs>`), so a
- * startup sweep only purges chunks older than `olderThanMs` (default 1h) —
- * recent warm chunks survive restarts and keep charts fast after a deploy,
- * while old poisoned ones still get flushed. Fresh partial chunks are
- * short-TTL'd (10 min) by the writer and never need the sweep.
+ * Kept as a compatibility hook for older deployments. Cache invalidation is
+ * namespace-based now: a schema change increments HISTORY_CACHE_VERSION.
+ * Legacy keys already carry TTLs and expire naturally, so startup never scans
+ * or deletes warm history based on the candles' market timestamp.
  */
-export async function flushHistoryChunkCache(olderThanMs: number = 60 * 60 * 1000): Promise<void> {
-  if (!REDIS_ENABLED) return
-  try {
-    const redis = getRedisData()
-    let cursor = '0'
-    let deleted = 0
-    const cutoff = Date.now() - olderThanMs
-    do {
-      const [next, keys] = await redis.scan(cursor, 'MATCH', `${CHUNK_PREFIX}*`, 'COUNT', 200)
-      cursor = next
-      const toDelete = keys.filter(k => {
-        const csMs = Number(k.split(':').pop())
-        return Number.isFinite(csMs) && csMs < cutoff
-      })
-      if (toDelete.length > 0) {
-        deleted += toDelete.length
-        await redis.del(...toDelete)
-      }
-    } while (cursor !== '0')
-    console.log(`[History] Startup sweep: flushed ${deleted} chunk(s) older than ${olderThanMs / 1000}s`)
-  } catch (e) {
-    console.warn('[History] Failed to sweep chunk cache:', e instanceof Error ? e.message : e)
-  }
+export async function flushHistoryChunkCache(): Promise<void> {
+  return
 }
 
 async function acquireLock(lockKey: string, ttlMs: number = 5000): Promise<boolean> {

@@ -14,7 +14,6 @@ import { startAlertEngine, stopAlertEngine } from './services/alerts/index.js'
 import { startTelegramPolling } from './services/telegram/bot.js'
 import { createCandleManager, createRemoteCandleManager } from './services/candles/manager.js'
 import { startPreload } from './services/candles/preload.js'
-import { flushHistoryChunkCache } from './services/candles/history.js'
 import { startCacheRepairWatchdog } from './services/candles/repair.js'
 import authRoutes from './routes/auth.js'
 import coinRoutes from './routes/coins.js'
@@ -123,11 +122,6 @@ async function main() {
 
   const isIngestion = ROLE === 'ingestion' || ROLE === 'all'
   const isBroadcast = ROLE === 'broadcast' || ROLE === 'all'
-
-  // Chunks written while an exchange was throttled/geo-blocked may be partial
-  // or from the wrong exchange; clearing the pure-cache chunk store on boot
-  // guarantees history never serves those holes again (they refetch on demand).
-  await flushHistoryChunkCache()
 
   if (isBroadcast) setupWsHub(wss)
 
