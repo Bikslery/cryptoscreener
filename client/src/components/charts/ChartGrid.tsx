@@ -17,6 +17,7 @@ import { getOrFetchHistory, getOrFetchOlder, getOrFetchBulk, GRID_CANDLE_LIMIT, 
 import { expandCompactCandles, type CompactCandle } from '../../services/candle-compact'
 import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatch, type TickPayload } from '../../services/candle-events'
 import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
+import { canPaintPartialHistory, resolveHistoryViewportAction } from '../../services/chart-history-paint'
 import { isFiniteOHLCV, validateCandle } from '../../services/candle-utils'
 import { recordDiag } from '../../services/candle-diag'
 import { useDrawings } from './useDrawings'
@@ -566,14 +567,6 @@ type FullHistoryStatus = 'loading' | 'ready' | 'empty' | 'error' | 'retrying'
  *  throttle, route timeout) trigger ONE background retry — no page reload. */
 const HISTORY_LOAD_DEADLINE_MS = 10_000
 
-/**
- * Minimum candles worth painting from a partial cache. Painting 3 stray
- * candles looks like a broken chart; 150 already renders a usable window.
- */
-function minPartialCandles(limit: number): number {
-  return Math.min(150, Math.max(40, Math.floor(limit / 2)))
-}
-
 function useFullHistory(
   symbol: string,
   exchange: Exchange | undefined,
@@ -601,11 +594,6 @@ function useFullHistory(
   // Key of the last painted series — used to save the viewport we are about
   // to leave and to know whether a reload is a same-key refresh.
   const lastPaintedKeyRef = useRef<string | null>(null)
-  /** True once a PARTIAL cache paint happened in this effect run — the full
-   *  history that lands later must fitContent (expanded chart zoom-out) so
-   *  the partial first paint doesn't freeze the view at shallow depth. */
-  const partialPaintedRef = useRef(false)
-
   useEffect(() => {
     if (!exchange) return
     const cancelled = { value: false }
@@ -615,9 +603,7 @@ function useFullHistory(
     // visible chart — only a first paint or a symbol/TF switch should.
     const alreadyPaintedThisKey = lastPaintedKeyRef.current === `${exchange}:${symbol}:${tf}`
     if (!sameKeyReload && !alreadyPaintedThisKey) setIsInitialLoading(true)
-    partialPaintedRef.current = false
-
-    const renderCandles = (candles: UnifiedCandle[], opts?: { fit?: boolean }) => {
+    const renderCandles = (candles: UnifiedCandle[]) => {
       if (destroyedRef.current || !candleRef.current || !volumeRef.current) {
         // Nothing was painted — release reconciliation so realtime events
         // that arrived during the fetch are not stuck in the buffer.
@@ -658,25 +644,24 @@ function useFullHistory(
         volumeRef.current.setData(volumeData)
       } catch { /* benign: setData may throw on a fresh/empty series */ }
       if (ts && candleData.length > 0) {
-        if (opts?.fit) {
-          // A partial cache paint happened first (expanded chart): the full
-          // history just landed — open maximally zoomed out, exactly as the
-          // first-paint path would have.
+        const saved = getViewport(key)
+        const viewportAction = resolveHistoryViewportAction({
+          hasViewport: saved !== null,
+          fitOnOpen,
+        })
+        if (viewportAction === 'restore' && saved) {
+          // setData resets the time scale. Background history therefore
+          // restores the exact pre-update viewport instead of calling
+          // fitContent and visibly zooming the chart after it is on screen.
+          restoreViewport(chartRef.current, saved)
+        } else if (viewportAction === 'fit') {
+          // First expanded-chart paint only. Older history arriving later is
+          // restored around this viewport and remains invisible to the user.
           ts.fitContent()
         } else {
-          const saved = getViewport(key)
-          if (saved) {
-            // Restore the pair's saved viewport (scroll position, bar spacing,
-            // right offset, time visibility) — scalpboard's ae() equivalent.
-            restoreViewport(chartRef.current, saved)
-          } else if (fitOnOpen) {
-            // Expanded chart: open maximally zoomed out.
-            ts.fitContent()
-          } else {
-            // Mini charts: how many bars fit on screen.
-            const vbars = Math.min(Math.max(visibleBars, 20), 2000)
-            ts.setVisibleLogicalRange({ from: candleData.length - vbars, to: candleData.length + 5 })
-          }
+          // Mini charts: how many bars fit on screen.
+          const vbars = Math.min(Math.max(visibleBars, 20), 2000)
+          ts.setVisibleLogicalRange({ from: candleData.length - vbars, to: candleData.length + 5 })
         }
       }
       lastPaintedKeyRef.current = key
@@ -700,7 +685,7 @@ function useFullHistory(
       eventsRef?.current?.setBuffered(true)
 
       const cached = candleCache.getCandles(exchange, symbol, tf)
-      // SWR-style partial paint: ANY usable cache paints immediately (chart
+      // SWR-style partial paint: ANY non-empty cache paints immediately (chart
       // visible at once, live WS events replay on top), then the fetch below
       // tops up to the full requested depth in the background. Previously a
       // cache with fewer than `limit` candles was discarded entirely, forcing
@@ -708,11 +693,9 @@ function useFullHistory(
       // push landed (recentVersion > 0), even a handful of candles is enough
       // for the first paint — the server answered the subscription from its
       // cache, so the chart draws from the socket instead of the REST round-trip.
-      const minPartial = recentVersion > 0 ? 1 : minPartialCandles(limit)
-      if (cached && cached.length >= minPartial) {
+      if (cached && canPaintPartialHistory(cached.length)) {
         if (!cancelled.value && !destroyedRef.current) {
           renderCandles(cached)
-          partialPaintedRef.current = cached.length < limit
           setIsInitialLoading(false)
           setStatus('ready')
           if (lastUpdateRef) lastUpdateRef.current = Date.now()
@@ -753,7 +736,7 @@ function useFullHistory(
         return
       }
       if (fetched.length > 0) {
-        renderCandles(fetched, { fit: fitOnOpen && partialPaintedRef.current })
+        renderCandles(fetched)
         setIsInitialLoading(false)
         setStatus('ready')
         if (lastUpdateRef) lastUpdateRef.current = Date.now()
@@ -771,7 +754,7 @@ function useFullHistory(
               .then(data => {
                 if (cancelled.value || destroyedRef.current) return
                 if (data.length > candlesDataRef.current.length && data.length > 0) {
-                  renderCandles(data, { fit: fitOnOpen && partialPaintedRef.current })
+                  renderCandles(data)
                   if (lastUpdateRef) lastUpdateRef.current = Date.now()
                 }
                 if (data.length < limit) setTimeout(topUp, 2500)
