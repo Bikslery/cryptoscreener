@@ -1,5 +1,6 @@
 import type { UnifiedCandle, Exchange } from '../types'
 import { validateCandle, normalizeCandle } from './candle-utils'
+import { loadCandleTail, persistCandleTail } from './candle-persistence'
 
 const MAX_CANDLES_PER_KEY = 10000
 const MAX_TOTAL_CANDLES = 300_000
@@ -7,6 +8,7 @@ const MAX_TOTAL_CANDLES = 300_000
 const cache = new Map<string, UnifiedCandle[]>()
 const lruOrder = new Set<string>()
 let totalCandleCount = 0
+const hydrateInflight = new Map<string, Promise<UnifiedCandle[] | undefined>>()
 
 function key(exchange: Exchange, symbol: string, tf: string): string {
   return `${exchange}:${symbol}:${tf}`
@@ -66,6 +68,8 @@ export function setCandles(exchange: Exchange, symbol: string, tf: string, candl
   }
   touchLru(k)
   evictIfNeeded()
+  const stored = cache.get(k)
+  if (stored) persistCandleTail(exchange, symbol, tf, stored)
 }
 
 export function prependCandles(exchange: Exchange, symbol: string, tf: string, older: UnifiedCandle[]): void {
@@ -100,6 +104,7 @@ export function prependCandles(exchange: Exchange, symbol: string, tf: string, o
   totalCandleCount += trimmed.length
   touchLru(k)
   evictIfNeeded()
+  persistCandleTail(exchange, symbol, tf, trimmed)
 }
 
 export function updateCandle(exchange: Exchange, symbol: string, tf: string, candle: UnifiedCandle): void {
@@ -142,6 +147,7 @@ export function updateCandle(exchange: Exchange, symbol: string, tf: string, can
       }
     }
   }
+  persistCandleTail(exchange, symbol, tf, arr)
 }
 
 export function storeBulk(data: Record<string, UnifiedCandle[]>): void {
@@ -153,6 +159,8 @@ export function storeBulk(data: Record<string, UnifiedCandle[]>): void {
     cache.set(k, trimmed)
     totalCandleCount += trimmed.length
     touchLru(k)
+    const [exchange, symbol, tf] = k.split(':')
+    if (exchange && symbol && tf) persistCandleTail(exchange as Exchange, symbol, tf, trimmed)
   }
   evictIfNeeded()
 }
@@ -166,4 +174,25 @@ export function clearAll(): void {
   cache.clear()
   lruOrder.clear()
   totalCandleCount = 0
+  hydrateInflight.clear()
+}
+
+/** Load one persisted tail without ever overwriting fresher in-memory data. */
+export function hydratePersistentCandles(exchange: Exchange, symbol: string, tf: string): Promise<UnifiedCandle[] | undefined> {
+  const k = key(exchange, symbol, tf)
+  const existing = cache.get(k)
+  if (existing?.length) return Promise.resolve(existing)
+  const active = hydrateInflight.get(k)
+  if (active) return active
+  const promise = loadCandleTail(exchange, symbol, tf)
+    .then(candles => {
+      const arrivedWhileLoading = cache.get(k)
+      if (arrivedWhileLoading?.length) return arrivedWhileLoading
+      if (candles.length === 0) return undefined
+      setCandles(exchange, symbol, tf, candles)
+      return cache.get(k)
+    })
+    .finally(() => hydrateInflight.delete(k))
+  hydrateInflight.set(k, promise)
+  return promise
 }

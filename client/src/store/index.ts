@@ -5,7 +5,7 @@ import { wsOnMessage, wsOnType, wsSubscribe, wsUnsubscribe } from '../services/w
 import { notifyNewAlert } from '../services/alert-notify.js'
 import { emitAlertRemoved } from '../services/alert-drawing-sync.js'
 import { useToastStore } from './toast.js'
-import { getOrFetchHistory, EXPANDED_CANDLE_LIMIT } from '../services/candle-prefetch.js'
+import { getOrFetchHistory } from '../services/candle-prefetch.js'
 import api from '../services/api.js'
 import { VOLUME_HIGH_THRESHOLD, VOLUME_FILTER_DEFAULT } from '../constants/volume.js'
 
@@ -561,7 +561,7 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
     if (symbol) {
       const s = get()
       const coin = s.coinMap.get(symbol)
-      getOrFetchHistory(symbol, s.activeTimeframe, EXPANDED_CANDLE_LIMIT, coin?.exchange).catch(() => {})
+      getOrFetchHistory(symbol, s.activeTimeframe, 300, coin?.exchange).catch(() => {})
     }
     set({ expandedSymbol: symbol, selectedSymbol: symbol, expandedFocusPrice: null })
   },
@@ -569,7 +569,7 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   expandChartAtPrice: (symbol, price) => {
     const s = get()
     const coin = s.coinMap.get(symbol)
-    getOrFetchHistory(symbol, s.activeTimeframe, EXPANDED_CANDLE_LIMIT, coin?.exchange).catch(() => {})
+    getOrFetchHistory(symbol, s.activeTimeframe, 300, coin?.exchange).catch(() => {})
     set({ expandedSymbol: symbol, selectedSymbol: symbol, expandedFocusPrice: price })
   },
 

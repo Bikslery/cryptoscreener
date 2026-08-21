@@ -19,6 +19,7 @@ import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatc
 import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
 import { canPaintPartialHistory, resolveHistoryViewportAction } from '../../services/chart-history-paint'
 import { isFiniteOHLCV, validateCandle } from '../../services/candle-utils'
+import { resolveHistoryLoadPlan } from '../../services/history-load-plan'
 import { recordDiag } from '../../services/candle-diag'
 import { useDrawings } from './useDrawings'
 import DrawingToolsPanel from './DrawingToolsPanel'
@@ -576,12 +577,13 @@ function useFullHistory(
   chartRef: React.RefObject<IChartApi | null>,
   destroyedRef: React.RefObject<boolean>,
   candlesDataRef: React.RefObject<UnifiedCandle[]>,
-  options?: { limit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServer?: boolean; wsEpoch?: number; recentVersion?: number },
+  options?: { limit?: number; initialLimit?: number; visibleBars?: number; fitOnOpen?: boolean; forceServer?: boolean; wsEpoch?: number; recentVersion?: number },
   lastUpdateRef?: React.RefObject<number>,
   eventsRef?: React.RefObject<CandleEvents | null>,
   chartVersion?: number,
 ): { isInitialLoading: boolean; status: FullHistoryStatus; dataVersion: number } {
   const limit = options?.limit ?? 1000
+  const initialLimit = options?.initialLimit ?? limit
   const forceServer = options?.forceServer ?? false
   const wsEpoch = options?.wsEpoch ?? 0
   const fitOnOpen = options?.fitOnOpen ?? false
@@ -684,7 +686,14 @@ function useFullHistory(
       // Reconcile: buffer live events while the history loads.
       eventsRef?.current?.setBuffered(true)
 
-      const cached = candleCache.getCandles(exchange, symbol, tf)
+      let cached = candleCache.getCandles(exchange, symbol, tf)
+      if (!cached?.length) {
+        cached = await candleCache.hydratePersistentCandles(exchange, symbol, tf)
+        if (cancelled.value || destroyedRef.current) {
+          eventsRef?.current?.setBuffered(false)
+          return
+        }
+      }
       // SWR-style partial paint: ANY non-empty cache paints immediately (chart
       // visible at once, live WS events replay on top), then the fetch below
       // tops up to the full requested depth in the background. Previously a
@@ -701,6 +710,24 @@ function useFullHistory(
           if (lastUpdateRef) lastUpdateRef.current = Date.now()
         }
         if (cached.length >= limit) return
+      }
+
+      const loadPlan = resolveHistoryLoadPlan({
+        cachedCount: cached?.length ?? 0,
+        initialLimit,
+        targetLimit: limit,
+      })
+      const firstRequestLimit = loadPlan[0]
+      if (firstRequestLimit !== undefined && firstRequestLimit < limit) {
+        try {
+          const tail = await getOrFetchHistory(symbol, tf, firstRequestLimit, exchange, forceServer)
+          if (tail.length > 0 && !cancelled.value && !destroyedRef.current) {
+            renderCandles(tail)
+            setIsInitialLoading(false)
+            setStatus('ready')
+            if (lastUpdateRef) lastUpdateRef.current = Date.now()
+          }
+        } catch { /* deep request below remains the recovery path */ }
       }
 
       // Fetch with a hard deadline + bounded retries. Transient failures
@@ -800,7 +827,7 @@ function useFullHistory(
     // (pricePrecision flip) — the new chart starts empty.
     // `wsEpoch` re-paints after a WS reconnect so periods that fell through
     // the dead window are restored from the server.
-  }, [symbol, exchange, tf, chartVersion, wsEpoch, limit, forceServer, fitOnOpen, visibleBars, recentVersion,
+  }, [symbol, exchange, tf, chartVersion, wsEpoch, limit, initialLimit, forceServer, fitOnOpen, visibleBars, recentVersion,
     candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, lastUpdateRef, eventsRef])
 
   return { isInitialLoading, status, dataVersion }
@@ -2153,6 +2180,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
 
   const { isInitialLoading, status, dataVersion } = useFullHistory(symbol, exchange, tf, candleRef, volumeRef, chartRef, destroyedRef, candlesDataRef, {
     limit: EXPANDED_CANDLE_LIMIT,
+    initialLimit: GRID_CANDLE_LIMIT,
     fitOnOpen: true,
     forceServer: wsCount > mountWsCount,
     wsEpoch: wsCount,
