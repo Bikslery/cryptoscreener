@@ -1,6 +1,6 @@
 import WebSocket from 'ws'
-import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback } from './types.js'
-import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth } from '../../types.js'
+import type { ExchangeAdapter, TickerCallback, CandleCallback, DepthCallback, TradeCallback } from './types.js'
+import type { Exchange, UnifiedTicker, UnifiedCandle, UnifiedDepth, UnifiedTrade } from '../../types.js'
 import { precisionFromTickSize, fallbackPrecision } from '../../utils/precision.js'
 import { fetchWithTimeout } from '../../utils/fetch.js'
 
@@ -30,6 +30,20 @@ interface BybitTickerRaw {
   lowPrice24h?: string
   volume24h?: string
   turnover24h?: string
+  bid1Price?: string
+  ask1Price?: string
+  markPrice?: string
+  indexPrice?: string
+}
+
+interface BybitTradeRaw {
+  s?: string
+  p?: string
+  v?: string
+  T?: number
+  S?: 'Buy' | 'Sell'
+  i?: string
+  seq?: string
 }
 
 interface BybitCandleRaw {
@@ -62,9 +76,12 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   private tickerCbs: TickerCallback[] = []
   private candleCbs: CandleCallback[] = []
   private depthCbs: DepthCallback[] = []
+  private tradeCbs: TradeCallback[] = []
   private depthSubs = new Map<string, Set<DepthCallback>>()
   private bookTickerCbs: Array<(symbol: string, midPrice: number) => void> = []
   private bookTickerSubs = new Set<string>()
+  private tradeSubs = new Set<string>()
+  private tickerState = new Map<string, BybitTickerRaw>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private silenceTimer: ReturnType<typeof setInterval> | null = null
@@ -87,6 +104,7 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   onTicker(cb: TickerCallback) { this.tickerCbs.push(cb) }
   onCandle(cb: CandleCallback) { this.candleCbs.push(cb) }
   onDepth(cb: DepthCallback) { this.depthCbs.push(cb) }
+  onTrade(cb: TradeCallback) { this.tradeCbs.push(cb) }
   onBookTicker(cb: (symbol: string, midPrice: number) => void) { this.bookTickerCbs.push(cb) }
 
   /** Serialize REST calls with a minimum gap (~9 req/s) across ALL Bybit
@@ -105,15 +123,24 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   subscribeBookTicker(symbol: string) {
     if (this.bookTickerSubs.has(symbol)) return
     this.bookTickerSubs.add(symbol)
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ op: 'subscribe', args: [`bookTicker.${symbol}`] }))
-    }
   }
 
   unsubscribeBookTicker(symbol: string) {
-    if (!this.bookTickerSubs.delete(symbol)) return
+    this.bookTickerSubs.delete(symbol)
+  }
+
+  subscribeTrade(symbol: string) {
+    if (this.tradeSubs.has(symbol)) return
+    this.tradeSubs.add(symbol)
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ op: 'unsubscribe', args: [`bookTicker.${symbol}`] }))
+      this.ws.send(JSON.stringify({ op: 'subscribe', args: [`publicTrade.${symbol}`] }))
+    }
+  }
+
+  unsubscribeTrade(symbol: string) {
+    if (!this.tradeSubs.delete(symbol)) return
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ op: 'unsubscribe', args: [`publicTrade.${symbol}`] }))
     }
   }
 
@@ -144,7 +171,21 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
         if (msg.topic) {
           if (msg.topic.startsWith('tickers.')) {
             const ticker = this.parseTicker(msg.data)
-            if (ticker) for (const cb of this.tickerCbs) cb(ticker)
+            if (ticker) {
+              for (const cb of this.tickerCbs) cb(ticker)
+              const quote = this.tickerState.get(ticker.symbol)
+              if (this.bookTickerSubs.has(ticker.symbol) && quote) {
+                const bid = parseFloat(quote.bid1Price ?? '')
+                const ask = parseFloat(quote.ask1Price ?? '')
+                if (isFinite(bid) && isFinite(ask) && bid > 0 && ask > 0) {
+                  for (const cb of this.bookTickerCbs) cb(ticker.symbol, (bid + ask) / 2)
+                }
+              }
+            }
+          } else if (msg.topic.startsWith('publicTrade.')) {
+            for (const trade of this.parseTrades(msg.data, msg.topic)) {
+              for (const cb of this.tradeCbs) cb(trade)
+            }
           } else if (msg.topic.startsWith('kline.')) {
             const candle = this.parseCandle(msg.data, msg.topic)
             if (candle) {
@@ -158,19 +199,6 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
               for (const cb of this.depthCbs) cb(depth)
               const subs = this.depthSubs.get(depth.symbol)
               if (subs) for (const cb of subs) cb(depth)
-            }
-          } else if (msg.topic.startsWith('bookTicker.')) {
-            // Best bid/ask — fires on every top-of-book change (dozens/sec on
-            // liquid pairs), the same "live" price feed Binance bookTicker is.
-            const d = msg.data
-            const symbol = msg.topic.split('.').pop() || ''
-            if (d && symbol && d.bp !== undefined && d.ap !== undefined) {
-              const bid = parseFloat(String(d.bp))
-              const ask = parseFloat(String(d.ap))
-              if (isFinite(bid) && isFinite(ask) && bid > 0 && ask > 0) {
-                const mid = (bid + ask) / 2
-                for (const cb of this.bookTickerCbs) cb(symbol, mid)
-              }
             }
           }
         }
@@ -211,24 +239,27 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
   }
 
   parseTicker(d: BybitTickerRaw): UnifiedTicker | null {
-    const price = parseFloat(d.lastPrice ?? '')
-    // Bybit ticker 'delta' messages can omit lastPrice (only changed fields) —
-    // skip them instead of emitting NaN (which JSON-serializes to null and
-    // made the price flicker to null in the UI).
+    const symbol = d.symbol ?? ''
+    if (!symbol) return null
+    const merged = { ...(this.tickerState.get(symbol) ?? {}), ...d, symbol }
+    this.tickerState.set(symbol, merged)
+    const price = parseFloat(merged.lastPrice ?? '')
     if (!isFinite(price) || price <= 0) return null
-    const open = parseFloat(d.prevPrice24h ?? '') || price
-    const pricePrecision = this.precisionMap.get(d.symbol ?? '') ?? fallbackPrecision(price)
+    const open = parseFloat(merged.prevPrice24h ?? '') || price
+    const high = parseFloat(merged.highPrice24h ?? '') || Math.max(price, open)
+    const low = parseFloat(merged.lowPrice24h ?? '') || Math.min(price, open)
+    const pricePrecision = this.precisionMap.get(symbol) ?? fallbackPrecision(price)
     return {
-      symbol: d.symbol ?? '',
+      symbol,
       exchange: this.exchange,
       price,
       openPrice24h: open,
       change24h: open > 0 ? ((price - open) / open) * 100 : 0,
-      high24h: parseFloat(d.highPrice24h ?? ''),
-      low24h: parseFloat(d.lowPrice24h ?? ''),
-      volume24h: parseFloat(d.volume24h ?? ''),
+      high24h: high,
+      low24h: low,
+      volume24h: parseFloat(merged.volume24h ?? '') || 0,
       trades24h: 0,
-      quoteVolume24h: parseFloat(d.turnover24h ?? ''),
+      quoteVolume24h: parseFloat(merged.turnover24h ?? '') || 0,
       range1m: 0,
       natr5m: 0,
       corrBtc: null,
@@ -237,6 +268,31 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
       pricePrecision,
       timestamp: Date.now(),
     }
+  }
+
+  parseTrades(d: BybitTradeRaw | BybitTradeRaw[] | null, topic: string): UnifiedTrade[] {
+    if (!d) return []
+    const rows = Array.isArray(d) ? d : [d]
+    const topicSymbol = topic.split('.').pop() || ''
+    const result: UnifiedTrade[] = []
+    for (const row of rows) {
+      const symbol = row.s || topicSymbol
+      const price = parseFloat(row.p ?? '')
+      const volume = parseFloat(row.v ?? '')
+      const eventTimeMs = Number(row.T)
+      if (!symbol || !isFinite(price) || price <= 0 || !isFinite(volume) || volume < 0 || !isFinite(eventTimeMs)) continue
+      result.push({
+        symbol,
+        exchange: this.exchange,
+        price,
+        volume,
+        eventTimeMs,
+        isBuyerMaker: row.S === 'Sell',
+        tradeId: row.i,
+        sequence: row.seq !== undefined ? String(row.seq) : undefined,
+      })
+    }
+    return result
   }
 
   parseCandle(d: BybitCandleRaw | BybitCandleRaw[] | null, topic: string): UnifiedCandle | null {
@@ -267,14 +323,14 @@ export class BybitFuturesAdapter implements ExchangeAdapter {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
     const args: string[] = []
     for (const symbol of this.precisionMap.keys()) args.push(`tickers.${symbol}`)
-    for (const symbol of this.bookTickerSubs) args.push(`bookTicker.${symbol}`)
+    for (const symbol of this.tradeSubs) args.push(`publicTrade.${symbol}`)
     for (const topic of this.candleSubs.keys()) args.push(topic)
     for (const symbol of this.depthSubs.keys()) args.push(`orderbook.${BybitFuturesAdapter.DEPTH_DEPTH}.${symbol}`)
     for (let i = 0; i < args.length; i += 10) {
       this.ws.send(JSON.stringify({ op: 'subscribe', args: args.slice(i, i + 10) }))
     }
     if (args.length > 0) {
-      console.log(`[${this.name}] Subscribed ${args.length} topics (tickers + klines + depth)`)
+      console.log(`[${this.name}] Subscribed ${args.length} topics (tickers + trades + klines + depth)`)
     }
   }
 

@@ -4,7 +4,7 @@ import { getWsAgent } from '../exchanges/proxy.js'
 import { FUTURES_AGGTRADE_WS_BASE, SPOT_WS_BASE } from '../exchanges/endpoints.js'
 import { updateTickerPrice, recordTradeBucket } from '../aggregator/index.js'
 import { getRedisPub, REDIS_ENABLED } from '../../redis.js'
-import type { Exchange } from '../../types.js'
+import type { Exchange, UnifiedTrade } from '../../types.js'
 
 /** Verbose per-message progress logs — opt-in via env (same flag as candle manager). */
 const DIAG_LOG = process.env.DIAG_LOG === '1'
@@ -34,7 +34,10 @@ interface PendingTrade {
   price: number
   volume: number
   time: number
+  eventTimeMs: number
   isBuyerMaker: boolean
+  tradeId?: string
+  sequence?: string
 }
 
 const TRADE_LANE_INTERVAL_MS = parseInt(process.env.TRADE_LANE_INTERVAL_MS || '30', 10)
@@ -48,8 +51,11 @@ function queueTrade(symbol: string, exchange: Exchange, payload: PendingTrade): 
     // Latest-wins price/time; volume accumulates so nothing is lost.
     prev.price = payload.price
     prev.time = payload.time
+    prev.eventTimeMs = payload.eventTimeMs
     prev.volume += payload.volume
     prev.isBuyerMaker = payload.isBuyerMaker
+    prev.tradeId = payload.tradeId
+    prev.sequence = payload.sequence
   } else {
     pendingTrades.set(key, { ...payload })
   }
@@ -62,7 +68,17 @@ function flushPendingTrades(): void {
   tradeFlushTimer = null
   for (const [key, t] of pendingTrades) {
     pendingTrades.delete(key)
-    const payload = { symbol: t.symbol, exchange: t.exchange, price: t.price, volume: t.volume, time: t.time, isBuyerMaker: t.isBuyerMaker }
+    const payload = {
+      symbol: t.symbol,
+      exchange: t.exchange,
+      price: t.price,
+      volume: t.volume,
+      time: t.time,
+      eventTimeMs: t.eventTimeMs,
+      isBuyerMaker: t.isBuyerMaker,
+      tradeId: t.tradeId,
+      sequence: t.sequence,
+    }
     broadcastToChannel(`trade:${t.exchange}:${t.symbol}`, payload, true)
     if (REDIS_ENABLED) {
       try {
@@ -70,6 +86,13 @@ function flushPendingTrades(): void {
       } catch { /* redis down */ }
     }
   }
+}
+
+export function enqueueTrade(trade: UnifiedTrade): void {
+  queueTrade(trade.symbol, trade.exchange, {
+    ...trade,
+    time: Math.floor(trade.eventTimeMs / 1000),
+  })
 }
 
 /** Flush immediately (reconnect/teardown safety). */
@@ -179,26 +202,20 @@ function connect(stream: AggTradeStream, exchange: Exchange) {
         // Bybit/OKX trade lanes are not Binance aggTrade streams).
         recordTradeBucket(symbol, data.T)
 
-        const tradePayload: PendingTrade = {
+        const tradePayload: UnifiedTrade = {
           symbol,
           exchange,
           price,
           volume,
-          // Binance `T` is milliseconds. Floor (not just divide) to whole
-          // epoch seconds — a bare `/1000` produces a fractional value
-          // (e.g. 1712345678.123) that flows straight through to the
-          // client's tick-window guard (`timeSec > candle.time`) and any
-          // future consumer that keys on `.time` for equality. Only the
-          // client's own second-candle-aggregator floors to ITS OWN bucket
-          // boundary, so nothing upstream can be relied on to normalize this.
-          time: Math.floor(data.T / 1000),
+          eventTimeMs: data.T,
           isBuyerMaker,
+          tradeId: String(data.a ?? ''),
         }
 
         // Coalesced latest-wins broadcast — the chart needs the newest price
         // (not every print). This cuts the per-trade frame flood that
         // saturated the client's parse queue.
-        queueTrade(symbol, exchange, tradePayload)
+        enqueueTrade(tradePayload)
       }
     } catch (e) {
       console.error(`[AggTrade${label}] Parse error:`, e)

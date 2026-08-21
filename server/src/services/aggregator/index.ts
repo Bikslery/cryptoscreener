@@ -7,7 +7,7 @@ import { RateLimitError } from '../exchanges/errors.js'
 import { broadcast, broadcastToChannel } from '../../ws/hub.js'
 import { updateCachedCandle, getCachedCandles } from '../candles/candle-cache.js'
 import { getRedisPub, getRedisData, REDIS_ENABLED } from '../../redis.js'
-import { subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
+import { enqueueTrade, subscribeAggTrade, unsubscribeAggTrade } from '../trades/aggTrade.js'
 import { pearson, computeVolumeSpike, TradeBucketTracker, applyIndicator, CORR_WINDOW, MAX_BUCKETS } from './indicators.js'
 
 export const adapters: ExchangeAdapter[] = [
@@ -415,6 +415,11 @@ export function startAggregator() {
       // from here (batched at WS_BATCH_INTERVAL_MS) duplicated every kline
       // frame on the wire and repainted the forming bar ~40 ms late with
       // identical values.
+    })
+
+    adapter.onTrade?.((trade) => {
+      updateTickerPrice(trade.symbol, trade.exchange, trade.price)
+      enqueueTrade(trade)
     })
 
     // Depth is NOT broadcast to a local WS channel: nothing subscribes to

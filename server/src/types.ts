@@ -45,6 +45,17 @@ export interface UnifiedDepth {
   lastUpdateId?: number
 }
 
+export interface UnifiedTrade {
+  symbol: string
+  exchange: Exchange
+  price: number
+  volume: number
+  eventTimeMs: number
+  isBuyerMaker: boolean
+  tradeId?: string
+  sequence?: string
+}
+
 export type AlertType = 'price' | 'impulse' | 'listing'
 
 export interface PriceAlertCondition {

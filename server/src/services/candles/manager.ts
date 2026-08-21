@@ -269,6 +269,8 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
       activeCandleSubs.set(key, { adapter, count: 1 })
       if (adapter.exchange === 'binance-futures' || adapter.exchange === 'binance-spot') {
         subscribeAggTrade(symbol, adapter.exchange)
+      } else {
+        adapter.subscribeTrade?.(symbol)
       }
       console.log(`[CandleManager] Subscribed to ${key} via ${adapter.name}`)
     },
@@ -284,6 +286,8 @@ export function createCandleManager(adapters: ExchangeAdapter[]) {
         activeCandleSubs.delete(key)
         if (existing.adapter.exchange === 'binance-futures' || existing.adapter.exchange === 'binance-spot') {
           unsubscribeAggTrade(symbol, existing.adapter.exchange)
+        } else {
+          existing.adapter.unsubscribeTrade?.(symbol)
         }
         console.log(`[CandleManager] Unsubscribed from ${key}`)
       }
