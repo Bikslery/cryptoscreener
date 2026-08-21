@@ -146,6 +146,20 @@ describe('BybitFuturesAdapter.parseTrades', () => {
   })
 })
 
+describe('BybitFuturesAdapter trade subscription refcount', () => {
+  it('keeps the trade topic while another timeframe still uses the symbol', () => {
+    const bybit = new BybitFuturesAdapter()
+    bybit.subscribeTrade('BTCUSDT')
+    bybit.subscribeTrade('BTCUSDT')
+    expect(bybit.getTradeSubscriptionRefCount('BTCUSDT')).toBe(2)
+
+    bybit.unsubscribeTrade('BTCUSDT')
+    expect(bybit.getTradeSubscriptionRefCount('BTCUSDT')).toBe(1)
+    bybit.unsubscribeTrade('BTCUSDT')
+    expect(bybit.getTradeSubscriptionRefCount('BTCUSDT')).toBe(0)
+  })
+})
+
 describe('BybitFuturesAdapter.parseCandle', () => {
   const bybit = new BybitFuturesAdapter()
 
