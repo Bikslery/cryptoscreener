@@ -295,7 +295,7 @@ export function getOrFetchHistory(
       ])
       if (bulkDone && exchange) {
         const cached = candleCache.getCandles(exchange, symbol, tf)
-        if (cached && cached.length > 0) return cached.slice(-limit)
+        if (cached && cached.length >= limit) return cached.slice(-limit)
       }
     }
 
