@@ -131,6 +131,20 @@ function expandCandle(t: number, o: number, h: number, l: number, c: number, v: 
   return { symbol, exchange, timeframe: tf, time: t, open: o, high: h, low: l, close: c, volume: v }
 }
 
+export function decodeHistoryChunk(raw: string, symbol: string, exchange: Exchange, tf: string): UnifiedCandle[] | null {
+  try {
+    const stored = JSON.parse(raw) as StoredHistoryChunkV2
+    if (
+      stored.version !== HISTORY_CACHE_VERSION ||
+      !Array.isArray(stored.rows) ||
+      stored.rowCount !== stored.rows.length
+    ) return null
+    return stored.rows.map(([t, o, h, l, c, v]) => expandCandle(t, o, h, l, c, v, symbol, exchange, tf))
+  } catch {
+    return null
+  }
+}
+
 async function readChunksFromRedis(keys: string[], symbol: string, exchange: Exchange, tf: string): Promise<(UnifiedCandle[] | null)[]> {
   if (!REDIS_ENABLED || keys.length === 0) return keys.map(() => null)
   try {
@@ -141,19 +155,13 @@ async function readChunksFromRedis(keys: string[], symbol: string, exchange: Exc
         historyCacheAccessTotal.inc({ tier: 'redis', outcome: 'miss' })
         return null
       }
-      try {
-        const stored = JSON.parse(raw as string) as StoredHistoryChunkV2
-        if (
-          stored.version !== HISTORY_CACHE_VERSION ||
-          !Array.isArray(stored.rows) ||
-          stored.rowCount !== stored.rows.length
-        ) return null
+      const decoded = decodeHistoryChunk(String(raw), symbol, exchange, tf)
+      if (decoded) {
         historyCacheAccessTotal.inc({ tier: 'redis', outcome: 'hit' })
-        return stored.rows.map(([t, o, h, l, c, v]) => expandCandle(t, o, h, l, c, v, symbol, exchange, tf))
-      } catch {
-        historyCacheAccessTotal.inc({ tier: 'redis', outcome: 'invalid' })
-        return null
+        return decoded
       }
+      historyCacheAccessTotal.inc({ tier: 'redis', outcome: 'invalid' })
+      return null
     })
   } catch {
     return keys.map(() => null)
@@ -234,10 +242,8 @@ async function waitForChunk(key: string, symbol: string, exchange: Exchange, tf:
         const redis = getRedisData()
         const raw = await redis.get(key)
         if (raw) {
-          try {
-            const tuples = JSON.parse(raw) as [number, number, number, number, number, number][]
-            return tuples.map(([t, o, h, l, c, v]) => expandCandle(t, o, h, l, c, v, symbol, exchange, tf))
-          } catch {}
+          const decoded = decodeHistoryChunk(String(raw), symbol, exchange, tf)
+          if (decoded) return decoded
         }
       } catch {}
     }
