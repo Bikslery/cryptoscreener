@@ -110,6 +110,68 @@ export function sanitizeCandles(candles: UnifiedCandle[]): UnifiedCandle[] {
 }
 
 /**
+ * Local-anomaly detection backing the autoscale guard (client) and the
+ * serve-time outlier healing (server).
+ *
+ * A bar is flagged when, against its ±NEIGHBORHOOD-bar window:
+ *   - its close sits more than LEVEL_FACTOR× away from the window's median
+ *     close — the "whole bar at a wrong price level" case (cross-exchange
+ *     stitch leftovers, a poisoned cache row); or
+ *   - its high-low range exceeds RANGE_FACTOR× the window's median range —
+ *     the "single absurd wick" case (a bad print spike).
+ *
+ * Genuine volatility survives by construction: a real move widens the WHOLE
+ * window's median range along with it, and a steady trend never leaves the
+ * ±5-bar window by 4×.
+ */
+export const OUTLIER_LEVEL_FACTOR = 4
+export const OUTLIER_RANGE_FACTOR = 20
+const OUTLIER_NEIGHBORHOOD = 5
+
+function median(nums: number[]): number {
+  if (nums.length === 0) return NaN
+  const s = nums.slice().sort((a, b) => a - b)
+  const mid = s.length >> 1
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
+}
+
+export interface OutlierCheckBar {
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
+/** Returns one flag per input bar; true = locally anomalous. */
+export function detectLocalOutliers(candles: OutlierCheckBar[]): Uint8Array {
+  const n = candles.length
+  const flags = new Uint8Array(n)
+  if (n < OUTLIER_NEIGHBORHOOD * 2 + 1) return flags
+  for (let i = 0; i < n; i++) {
+    const from = Math.max(0, i - OUTLIER_NEIGHBORHOOD)
+    const to = Math.min(n - 1, i + OUTLIER_NEIGHBORHOOD)
+    const closes: number[] = []
+    const ranges: number[] = []
+    for (let j = from; j <= to; j++) {
+      if (j === i) continue
+      closes.push(candles[j].close)
+      ranges.push(candles[j].high - candles[j].low)
+    }
+    const medClose = median(closes)
+    if (!(medClose > 0)) continue
+    const ratio = candles[i].close / medClose
+    if (ratio > OUTLIER_LEVEL_FACTOR || ratio < 1 / OUTLIER_LEVEL_FACTOR) {
+      flags[i] = 1
+      continue
+    }
+    const medRange = median(ranges)
+    const range = candles[i].high - candles[i].low
+    if (medRange > 0 && range > OUTLIER_RANGE_FACTOR * medRange) flags[i] = 1
+  }
+  return flags
+}
+
+/**
  * Merge a freshly loaded series INTO the currently painted one without
  * regression. lightweight-charts is append/replace-only: a setData() whose
  * last bar is OLDER than what is already on screen silently erases those

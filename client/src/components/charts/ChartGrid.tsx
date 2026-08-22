@@ -28,7 +28,7 @@ import { useDensityOverlay } from './overlays/useDensityOverlay'
 import { useChartSettings, resetChartSettings, type WatermarkPlace } from '../../services/chart-settings'
 import {
   buildChartOptions, candleSeriesOptions, volumeSeriesOptions,
-  applyWatermark, volumePaneTop, timeVisibleFor, secondsVisibleFor,
+  applyWatermark, volumePaneTop, timeVisibleFor, secondsVisibleFor, clampedAutoscaleProvider,
 } from '../../services/chart-config'
 
 
@@ -1663,6 +1663,7 @@ const MiniChart = memo(function MiniChart({
         precision: pricePrecision,
         minMove: Math.pow(10, -pricePrecision),
       },
+      autoscaleInfoProvider: clampedAutoscaleProvider(() => candlesDataRef.current),
     })
     const volumeSeries = chart.addSeries(HistogramSeries, { ...volumeSeriesOptions(), priceScaleId: '' })
     chart.priceScale('').applyOptions({ scaleMargins: { top: volumePaneTop(s.volumesHeight), bottom: 0 }, textColor: '#666666' })
@@ -2410,6 +2411,7 @@ function ExpandedChart({ symbol, onBack, chartExchange }: { symbol: string; onBa
         precision: pricePrecision,
         minMove: Math.pow(10, -pricePrecision),
       },
+      autoscaleInfoProvider: clampedAutoscaleProvider(() => candlesDataRef.current),
     })
     const volumeSeries = chart.addSeries(HistogramSeries, { ...volumeSeriesOptions(), priceScaleId: '' })
     chart.priceScale('').applyOptions({ scaleMargins: { top: volumePaneTop(s.volumesHeight), bottom: 0 }, textColor: '#666666' })

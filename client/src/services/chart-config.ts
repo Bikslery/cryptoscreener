@@ -1,7 +1,8 @@
 import { CrosshairMode, PriceScaleMode } from 'lightweight-charts'
-import type { DeepPartial, ChartOptions, CandlestickSeriesOptions, BarSeriesOptions, LineSeriesOptions, HistogramSeriesOptions, HorzAlign, VertAlign, IChartApi, ITextWatermarkPluginApi } from 'lightweight-charts'
+import type { DeepPartial, ChartOptions, CandlestickSeriesOptions, BarSeriesOptions, LineSeriesOptions, HistogramSeriesOptions, HorzAlign, VertAlign, IChartApi, ITextWatermarkPluginApi, AutoscaleInfoProvider, AutoscaleInfo } from 'lightweight-charts'
 import { createTextWatermark } from 'lightweight-charts'
 import type { ChartSettings } from './chart-settings'
+import { detectLocalOutliers, type OutlierCheckBar } from './candle-utils'
 
 /**
  * scalpboard.io chart parity helpers.
@@ -134,6 +135,44 @@ export function volumeSeriesOptions(): DeepPartial<HistogramSeriesOptions> {
     lastValueVisible: false,
     priceFormat: { type: 'volume' },
     color: At('--chart--volumes', '#4d4d4d'),
+  }
+}
+
+/**
+ * Autoscale guard: ONE locally-anomalous bar (a 10x bad print, a stitched
+ * foreign-venue row) otherwise stretches the whole visible price scale so
+ * every real candle collapses into a flat dotted line with empty space above
+ * and below. The provider computes the scale from all bars EXCEPT the ones
+ * detectLocalOutliers flags; the anomalous bars stay in the data (honest
+ * history), they just stop dictating the zoom.
+ */
+export function clampedAutoscaleProvider(
+  getCandles: () => OutlierCheckBar[] | null | undefined,
+): AutoscaleInfoProvider {
+  return (base) => {
+    let res: AutoscaleInfo | null
+    try {
+      res = base()
+    } catch {
+      // Library failed to compute a range (empty/odd series state) — nothing
+      // to clamp onto.
+      return null
+    }
+    const arr = getCandles()
+    if (!arr || arr.length < 13 || !res?.priceRange) return res
+    const flags = detectLocalOutliers(arr)
+    let flagged = 0
+    let min = Infinity
+    let max = -Infinity
+    for (let i = 0; i < arr.length; i++) {
+      if (flags[i]) { flagged++; continue }
+      if (arr[i].low < min) min = arr[i].low
+      if (arr[i].high > max) max = arr[i].high
+    }
+    // Nothing excluded, or everything was (degenerate feed) — trust the
+    // library's own computation.
+    if (flagged === 0 || !Number.isFinite(min) || !Number.isFinite(max) || min >= max) return res
+    return { priceRange: { minValue: min, maxValue: max }, margins: res.margins }
   }
 }
 

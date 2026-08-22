@@ -388,7 +388,7 @@ function healKey(exchange: Exchange | undefined, symbol: string, tf: string, h: 
   return `${exchange ?? 'auto'}:${symbol}:${tf}:${h.from}:${h.to}`
 }
 
-async function healOneHole(
+async function healOneWindow(
   symbol: string,
   tf: string,
   exchange: Exchange,
@@ -460,7 +460,7 @@ async function healHistoryHoles(
   if (bounded.length === 0) return candles
 
   const results = await Promise.all(
-    bounded.map(h => healOneHole(symbol, tf, exchange, h).catch(() => [] as UnifiedCandle[])),
+    bounded.map(h => healOneWindow(symbol, tf, exchange, h).catch(() => [] as UnifiedCandle[])),
   )
 
   let added = 0
@@ -476,6 +476,102 @@ async function healHistoryHoles(
   if (added === 0) return candles
   historyCacheAccessTotal.inc({ tier: 'exchange', outcome: 'hole_healed' }, added)
   return Array.from(byTime.values()).sort((a, b) => a.time - b.time)
+}
+
+// --- Serve-time outlier healing ----------------------------------------------
+// A single anomalous bar (a 10x bad print from an exchange hiccup, a poisoned
+// cache row) survives OHLC validation — its shape is internally consistent —
+// and stretches every autoscaling client into a flat dotted line. Locally-
+// flagged bars are re-fetched from the source window; only rows that actually
+// DIFFER get replaced, so genuine volatility stays exactly as the exchange
+// reported it.
+const OUTLIER_LEVEL_FACTOR = 4
+const OUTLIER_RANGE_FACTOR = 20
+const OUTLIER_NEIGHBORHOOD = 5
+const MAX_HEAL_OUTLIERS = 2
+
+function median(nums: number[]): number {
+  if (nums.length === 0) return NaN
+  const s = nums.slice().sort((a, b) => a - b)
+  const mid = s.length >> 1
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
+}
+
+export function detectOutlierFlags(candles: UnifiedCandle[]): Uint8Array {
+  const n = candles.length
+  const flags = new Uint8Array(n)
+  if (n < OUTLIER_NEIGHBORHOOD * 2 + 1) return flags
+  for (let i = 0; i < n; i++) {
+    const from = Math.max(0, i - OUTLIER_NEIGHBORHOOD)
+    const to = Math.min(n - 1, i + OUTLIER_NEIGHBORHOOD)
+    const closes: number[] = []
+    const ranges: number[] = []
+    for (let j = from; j <= to; j++) {
+      if (j === i) continue
+      closes.push(candles[j].close)
+      ranges.push(candles[j].high - candles[j].low)
+    }
+    const medClose = median(closes)
+    if (!(medClose > 0)) continue
+    const ratio = candles[i].close / medClose
+    if (ratio > OUTLIER_LEVEL_FACTOR || ratio < 1 / OUTLIER_LEVEL_FACTOR) {
+      flags[i] = 1
+      continue
+    }
+    const medRange = median(ranges)
+    const range = candles[i].high - candles[i].low
+    if (medRange > 0 && range > OUTLIER_RANGE_FACTOR * medRange) flags[i] = 1
+  }
+  return flags
+}
+
+function sameRow(a: UnifiedCandle, b: UnifiedCandle): boolean {
+  const rel = (x: number, y: number): number => (y === 0 ? Math.abs(x) : Math.abs(x - y) / y)
+  return (
+    rel(a.close, b.close) < 1e-6 &&
+    rel(a.high, b.high) < 1e-6 &&
+    rel(a.low, b.low) < 1e-6
+  )
+}
+
+/** Replace locally-anomalous bars whose source window disagrees with them. */
+export async function healHistoryOutliers(
+  candles: UnifiedCandle[],
+  symbol: string,
+  tf: string,
+  exchange: Exchange,
+): Promise<UnifiedCandle[]> {
+  const tfMs = TF_MS[tf]
+  if (!tfMs || candles.length < 13) return candles
+  const flags = detectOutlierFlags(candles)
+  const flagged: number[] = []
+  for (let i = 0; i < flags.length && flagged.length < MAX_HEAL_OUTLIERS; i++) {
+    if (flags[i]) flagged.push(i)
+  }
+  if (flagged.length === 0) return candles
+  const tfSec = Math.round(tfMs / 1000)
+
+  const out = candles.slice()
+  let healed = 0
+  for (const i of flagged) {
+    const fromIdx = Math.max(0, i - OUTLIER_NEIGHBORHOOD + 1)
+    const toIdx = Math.min(out.length - 1, i + OUTLIER_NEIGHBORHOOD - 1)
+    const hole: HistoryHole = { from: out[fromIdx].time, to: out[toIdx].time }
+    let rows: UnifiedCandle[]
+    try {
+      rows = await healOneWindow(symbol, tf, exchange, hole)
+    } catch {
+      continue
+    }
+    const fresh = rows.find(r => r.time === out[i].time)
+    if (!fresh || sameRow(fresh, out[i])) continue // genuine volatility — keep it
+    out[i] = { ...fresh, symbol, exchange, timeframe: tf }
+    healed++
+  }
+  if (healed > 0) {
+    historyCacheAccessTotal.inc({ tier: 'exchange', outcome: 'outlier_healed' }, healed)
+  }
+  return out
 }
 
 export interface HistoryOptions {
@@ -573,9 +669,11 @@ async function getHistoryInternal(
 
   const filtered = sorted.filter(c => c.time * 1000 <= beforeMs)
   // Slice first (holes are detected BETWEEN rows, so truncation cannot create
-  // a false hole), then heal what is actually about to be served.
+  // a false hole), then heal what is actually about to be served: gaps first,
+  // then locally-anomalous bars re-verified against the source window.
   const sliced = filtered.slice(-limit)
-  const result = await healHistoryHoles(sliced, symbol, tf, resolvedExchange)
+  const holesHealed = await healHistoryHoles(sliced, symbol, tf, resolvedExchange)
+  const result = await healHistoryOutliers(holesHealed, symbol, tf, resolvedExchange)
   if (result.length > 0) setCachedResponse(responseKey, result)
   return result
 }
