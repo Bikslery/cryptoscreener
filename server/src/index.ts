@@ -26,7 +26,7 @@ import { startDensityService, stopDensityService } from './services/density/inde
 import { prisma } from './db/index.js'
 import { disconnectRedis } from './redis.js'
 import { register } from './metrics.js'
-import { authMiddleware, requireTelegramVerified } from './middleware/auth.js'
+import { authMiddleware, requireTelegramVerified, verifyToken } from './middleware/auth.js'
 
 const PORT = parseInt(process.env.PORT || '3001')
 const ROLE = process.env.ROLE || 'all'
@@ -80,23 +80,36 @@ async function main() {
   app.use('/api/alerts', authMiddleware, requireTelegramVerified, alertRoutes)
   app.use('/api/drawings', authMiddleware, requireTelegramVerified, drawingRoutes)
   app.use('/api/density', authMiddleware, requireTelegramVerified, densityRoutes)
-  app.use('/api/debug', authMiddleware, debugRoutes)
+  // Telegram binding is mandatory: users without a bound Telegram account are
+  // locked out of every app feature (watchlists, alerts, drawings, settings).
+  // /api/debug can trigger real exchange REST fetches (history-check) — same
+  // Telegram gate as its siblings, otherwise any authenticated-but-unverified
+  // account gets an exchange-budget burn vector.
+  app.use('/api/debug', authMiddleware, requireTelegramVerified, debugRoutes)
 
   app.use('/api/health', (_req, res) => res.json({ ok: true, role: ROLE }))
 
   app.get('/metrics', async (req, res) => {
     // /metrics is scraped by Prometheus inside the compose network. A static
     // METRICS_TOKEN (env) is the preferred gate — it never expires like a JWT.
-    // Without it the route falls back to the user JWT (dev/local curl).
+    // Without it the route falls back to the user JWT — VERIFIED, not merely
+    // present: the old presence-only check accepted any garbage cookie and
+    // effectively made Prometheus output public.
     const token = process.env.METRICS_TOKEN
     if (token) {
       if (req.headers.authorization !== `Bearer ${token}` && req.query.token !== token) {
         res.status(401).end('Unauthorized')
         return
       }
-    } else if (!req.cookies?.token && !req.headers.authorization?.startsWith('Bearer ')) {
-      res.status(401).end('Unauthorized')
-      return
+    } else {
+      const bearer = req.headers.authorization?.startsWith('Bearer ')
+        ? req.headers.authorization.slice('Bearer '.length)
+        : undefined
+      const jwt = bearer ?? req.cookies?.token
+      if (!jwt || !verifyToken(jwt)) {
+        res.status(401).end('Unauthorized')
+        return
+      }
     }
     try {
       refreshMetrics()

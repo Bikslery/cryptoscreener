@@ -292,9 +292,19 @@ export function subscribeAggTrade(symbol: string, exchange: Exchange = 'binance-
 }
 
 export function unsubscribeAggTrade(symbol: string, exchange: Exchange = 'binance-spot') {
-  const stream = getChunkForSymbol(exchange, symbol)
+  // Guard against a stray double-unsubscribe: getChunkForSymbol() would
+  // otherwise create a fresh chunk just so we could tear it down again.
+  const stream = symbolToChunk.get(`${exchange}:${symbol}`)
+  if (!stream) return
   stream.activeSymbols.delete(symbol)
   if (stream.activeSymbols.size === 0) {
+    // Chunk is empty — tear the socket down AND drop its symbolToChunk entry:
+    // without this the Map grew one AggTradeStream per touched chunk forever
+    // (socket refs, timers, sets) across weeks of subscribe/unsubscribe churn.
+    symbolToChunk.delete(`${exchange}:${symbol}`)
+    const chunks = getChunks(exchange)
+    const idx = chunks.indexOf(stream)
+    if (idx >= 0) chunks.splice(idx, 1)
     if (stream.ws) {
       stream.generation++
       stream.isConnecting = false

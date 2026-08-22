@@ -11,9 +11,12 @@ let _data: Redis | null = null
 function createClient(): Redis {
   const client = new Redis(REDIS_URL, {
     maxRetriesPerRequest: 3,
+    // NEVER stop reconnecting: a transient ~30s Redis outage used to end
+    // reconnection attempts forever (returning null from this strategy
+    // disables them for the process lifetime), silently blinding broadcast
+    // nodes' market data until a manual restart. Backoff caps at 5s instead.
     retryStrategy(times) {
-      if (times > 10) return null
-      return Math.min(times * 500, 5000)
+      return Math.min(500 + times * 250, 5000)
     },
     lazyConnect: true,
     // A hung Redis (swap/pressure) must never park candle-history requests:

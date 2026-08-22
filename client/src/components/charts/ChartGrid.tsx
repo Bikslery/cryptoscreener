@@ -334,7 +334,13 @@ function backfillJumpWindow(
     .then(data => {
       const liveArr = candlesDataRef.current
       const series = candleRef.current
-      if (!liveArr || liveArr.length === 0 || !series || data.length === 0) return
+      if (!liveArr || liveArr.length === 0 || !series) return
+      // An empty answer is the same "server cannot cover the window" signal
+      // as a partial one — escalate instead of leaving flat bridges forever.
+      if (data.length === 0) {
+        onInsufficient?.()
+        return
+      }
       const candlesType = useChartSettings.getState().candlesType
       if (candlesType === 'line') return
       const realByTime = new Map<number, UnifiedCandle>()
@@ -1065,10 +1071,14 @@ function useFullHistory(
       }
       // Server answered without candles (or every attempt failed cleanly):
       // release the buffer so the forming candle can still paint from live
-      // events.
+      // events. "Empty" is only honest when NOTHING was painted — after a
+      // partial-cache first paint the chart is alive and must not get a
+      // "No data" overlay slapped over working candles.
       eventsRef?.current?.setBuffered(false)
-      setIsInitialLoading(false)
-      setStatus('empty')
+      if (candlesDataRef.current.length === 0) {
+        setIsInitialLoading(false)
+        setStatus('empty')
+      }
     }
 
     run()

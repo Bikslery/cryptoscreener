@@ -10,6 +10,8 @@ export interface WsDiagStats {
   framesProcessed: number
   parseErrors: number
   queueErrors: number
+  /** Frames shed by the bounded buffer (oldest-dropped on overflow). */
+  queueDropped: number
   maxQueueLagMs: number
   reconnects: number
 }
@@ -19,6 +21,7 @@ const wsDiag = {
   framesProcessed: 0,
   parseErrors: 0,
   queueErrors: 0,
+  queueDropped: 0,
   maxQueueLagMs: 0,
   reconnects: 0,
 }
@@ -121,11 +124,77 @@ function processParsedMessage(msg: WsMessage, arrivedAt: number): void {
 
 // Server frames are deflate-raw compressed binary (see server hub.ts
 // encodePayload). DecompressionStream is async, so frames are processed
-// through a promise chain to preserve WebSocket message order.
+// through a serial worker to preserve WebSocket message order.
+
 async function decompressFrame(buf: ArrayBuffer): Promise<string> {
   const ds = new DecompressionStream('deflate-raw')
   const stream = new Blob([buf]).stream().pipeThrough(ds)
   return await new Response(stream).text()
+}
+
+// --- Bounded low-priority frame buffer (scalpboard latest-wins semantics) ---
+// The old implementation chained every frame onto a promise chain that grew
+// WITHOUT BOUND whenever processing lagged behind arrival (tab wake-up, GC
+// pause, slow device): pending closures accumulated forever — a memory
+// spiral that only logged lag after the fact. Frames now wait in a
+// fixed-size buffer drained by ONE serial worker; on overflow the STALEST
+// frame is shed, because buffered lanes are snapshot-shaped (ticker,
+// density) or have recovery paths (REST history fallback) — freshest state
+// is the truth, stale snapshots are worthless.
+const MAX_FRAME_BUFFER = 48
+
+interface QueuedFrame {
+  /** Already-parsed low-priority text message. */
+  msg?: WsMessage
+  /** Compressed binary frame, decompressed in drain order. */
+  raw?: ArrayBuffer
+  arrivedAt: number
+}
+
+const frameBuffer: QueuedFrame[] = []
+let drainingFrames = false
+
+function enqueueLowPriorityFrame(frame: QueuedFrame): void {
+  if (frameBuffer.length >= MAX_FRAME_BUFFER) {
+    frameBuffer.shift()
+    wsDiag.queueDropped++
+    recordDiag('ws_frame_dropped_overflow', { detail: `buffer=${MAX_FRAME_BUFFER}` })
+  }
+  frameBuffer.push(frame)
+  void drainFrameBuffer()
+}
+
+async function drainFrameBuffer(): Promise<void> {
+  if (drainingFrames) return
+  drainingFrames = true
+  try {
+    while (frameBuffer.length > 0) {
+      const f = frameBuffer.shift()!
+      try {
+        let parsed: WsMessage
+        if (f.msg !== undefined) {
+          parsed = f.msg
+        } else {
+          let text: string
+          try {
+            text = await decompressFrame(f.raw!)
+          } catch {
+            // Decompression failure is a queue/transport problem, not a
+            // malformed payload — count it where transport errors live.
+            wsDiag.queueErrors++
+            continue
+          }
+          parsed = JSON.parse(text) as WsMessage
+        }
+        processParsedMessage(parsed, f.arrivedAt)
+      } catch {
+        // Malformed frame — never break the drain loop.
+        wsDiag.parseErrors++
+      }
+    }
+  } finally {
+    drainingFrames = false
+  }
 }
 
 function connect() {
@@ -153,7 +222,6 @@ function connect() {
     }
   }
 
-  let frameQueue: Promise<void> = Promise.resolve()
   socket.onmessage = (e) => {
     lastMessageAt = Date.now()
     wsDiag.framesReceived++
@@ -170,36 +238,14 @@ function connect() {
           processParsedMessage(parsed, arrivedAt)
           return
         }
-        frameQueue = frameQueue
-          .then(() => processParsedMessage(parsed, arrivedAt))
-          .catch((err) => {
-            wsDiag.queueErrors++
-            console.error('[WS] frame-queue rejection, chain reseeded', err)
-            recordDiag('ws_frame_queue_error', { detail: err instanceof Error ? err.message : String(err) })
-          })
-        return
+        enqueueLowPriorityFrame({ msg: parsed, arrivedAt })
       } catch {
         wsDiag.parseErrors++
-        return
       }
+      return
     }
 
-    frameQueue = frameQueue
-      .then(async () => {
-        try {
-          const text = await decompressFrame(e.data)
-          const msg = JSON.parse(text) as WsMessage
-          processParsedMessage(msg, arrivedAt)
-        } catch { wsDiag.parseErrors++ /* ignore malformed frame */ }
-      })
-      .catch((err) => {
-        // A rejected frame must NEVER blackhole the whole chain: without a
-        // failure handler every subsequent frame would silently vanish while
-        // this promise stays rejected. Log it and let the chain continue.
-        wsDiag.queueErrors++
-        console.error('[WS] frame-queue rejection, chain reseeded', err)
-        recordDiag('ws_frame_queue_error', { detail: err instanceof Error ? err.message : String(err) })
-      })
+    enqueueLowPriorityFrame({ raw: e.data, arrivedAt })
   }
 
   socket.onclose = () => {

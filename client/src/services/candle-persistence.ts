@@ -7,6 +7,13 @@ const STORE_NAME = 'tails'
 const RECORD_VERSION = 1
 const PERSISTENT_TAIL_LIMIT = 300
 const WRITE_DEBOUNCE_MS = 750
+/**
+ * A persisted tail older than this is treated as absent: the chart falls back
+ * to the server round-trip instead of painting a days-old snapshot as "fast
+ * path" and bridging the gap to now with live jumps. writtenAt was stored but
+ * never checked — stale tails lived forever.
+ */
+const TAIL_MAX_AGE_MS = 24 * 60 * 60 * 1000
 
 interface PersistentTailRecord {
   id: string
@@ -80,6 +87,11 @@ export async function loadCandleTail(exchange: Exchange, symbol: string, tf: str
       request.onsuccess = () => {
         const record = request.result as PersistentTailRecord | undefined
         if (!record || record.version !== RECORD_VERSION || !Array.isArray(record.candles)) return resolve([])
+        // Expired tail = no data: fresher truth arrives from the server in
+        // one round-trip, while a stale snapshot would paint days-old bars.
+        if (!Number.isFinite(record.writtenAt) || Date.now() - record.writtenAt > TAIL_MAX_AGE_MS) {
+          return resolve([])
+        }
         resolve(selectPersistentTail(record.candles))
       }
       request.onerror = () => resolve([])

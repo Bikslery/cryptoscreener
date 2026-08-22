@@ -88,8 +88,12 @@ export function isFlatFiller(c: UnifiedCandle): boolean {
 export function sanitizeCandles(candles: UnifiedCandle[]): UnifiedCandle[] {
   let needsWork = false
   const seen = new Set<number>()
+  let prevTime = -Infinity
   for (const c of candles) {
-    if (seen.has(c.time)) { needsWork = true; break }
+    // Ordering is part of the contract: lightweight-charts rejects unsorted
+    // input, and mergeCandleSeries assumes ascending inputs.
+    if (c.time <= prevTime || seen.has(c.time)) { needsWork = true; break }
+    prevTime = c.time
     seen.add(c.time)
     if (!validateCandle(c)) { needsWork = true; break }
   }
