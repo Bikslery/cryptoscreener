@@ -357,6 +357,127 @@ function getOrFetchChunk(
   return promise
 }
 
+// --- Serve-time hole guarantee -----------------------------------------------
+// A partial chunk (fetch throttled mid-window) poisons history with internal
+// holes for up to its whole cache TTL — clients render them as whitespace
+// bands or fake flat bridges. Before a response leaves this layer, every
+// internal gap is re-fetched DIRECTLY from the exchange (bypassing the
+// poisoned chunk cache) and merged in as REAL rows. Bounded: at most 2 holes
+// and 2000 missing periods per request — anything bigger is left to the
+// repair watchdog so one pathological symbol cannot hammer the exchange.
+
+export interface HistoryHole { from: number; to: number }
+
+export function detectHoles(candles: UnifiedCandle[], tfSec: number): HistoryHole[] {
+  const holes: HistoryHole[] = []
+  if (!Number.isFinite(tfSec) || tfSec <= 0) return holes
+  for (let i = 1; i < candles.length; i++) {
+    const diff = candles[i].time - candles[i - 1].time
+    if (diff > tfSec * 1.5) {
+      holes.push({ from: candles[i - 1].time + tfSec, to: candles[i].time - tfSec })
+    }
+  }
+  return holes
+}
+
+const MAX_HEAL_HOLES = 2
+const MAX_HEAL_PERIODS = 2000
+const healInflight = new Map<string, Promise<UnifiedCandle[]>>()
+
+function healKey(exchange: Exchange | undefined, symbol: string, tf: string, h: HistoryHole): string {
+  return `${exchange ?? 'auto'}:${symbol}:${tf}:${h.from}:${h.to}`
+}
+
+async function healOneHole(
+  symbol: string,
+  tf: string,
+  exchange: Exchange,
+  hole: HistoryHole,
+): Promise<UnifiedCandle[]> {
+  const tfMs = TF_MS[tf]
+  if (!tfMs) return []
+  const key = healKey(exchange, symbol, tf, hole)
+  const existing = healInflight.get(key)
+  if (existing) return existing
+
+  // Deduped in-flight per exact window: a 9-chart grid burst re-requesting
+  // the same symbol shares one healing round-trip.
+  const promise = (async (): Promise<UnifiedCandle[]> => {
+    try {
+      const { dispatcher, ipIndex } = pickDispatcher()
+      const market: 'spot' | 'futures' = (exchange?.includes('futures') ? 'futures' : 'spot') as 'spot' | 'futures'
+      // Same budget weight as a chunk fetch — healing must not jump the queue.
+      const acquired = await acquireBudget(market, 5, ipIndex)
+      if (!acquired) return []
+      addWeightToIp(ipIndex, 5)
+      const tfSec = Math.round(tfMs / 1000)
+      const periods = Math.round((hole.to - hole.from) / tfSec) + 1
+      // Explicit exchange → single-adapter fetch with NO cross-exchange
+      // stitching: a foreign venue's prices glued into a hole would read as
+      // a price teleport on the chart.
+      return await fetchCandlesSeamless(
+        symbol,
+        tf,
+        Math.min(periods + 2, MAX_HEAL_PERIODS),
+        exchange,
+        hole.from * 1000,
+        hole.to * 1000 + tfMs - 1,
+        { dispatcher },
+      )
+    } finally {
+      healInflight.delete(key)
+    }
+  })()
+
+  healInflight.set(key, promise)
+  return promise
+}
+
+/** Heal every bounded internal gap with REAL exchange rows; returns the input
+ *  unchanged when there is nothing to heal or the exchanges stay silent. */
+async function healHistoryHoles(
+  candles: UnifiedCandle[],
+  symbol: string,
+  tf: string,
+  exchange: Exchange,
+): Promise<UnifiedCandle[]> {
+  const tfMs = TF_MS[tf]
+  if (!tfMs || candles.length < 2) return candles
+  const tfSec = Math.round(tfMs / 1000)
+
+  const holes = detectHoles(candles, tfSec)
+  if (holes.length === 0) return candles
+
+  const bounded: HistoryHole[] = []
+  let budget = MAX_HEAL_PERIODS
+  for (const h of holes) {
+    const periods = Math.round((h.to - h.from) / tfSec) + 1
+    if (periods > budget) break
+    bounded.push(h)
+    budget -= periods
+    if (bounded.length >= MAX_HEAL_HOLES) break
+  }
+  if (bounded.length === 0) return candles
+
+  const results = await Promise.all(
+    bounded.map(h => healOneHole(symbol, tf, exchange, h).catch(() => [] as UnifiedCandle[])),
+  )
+
+  let added = 0
+  const byTime = new Map<number, UnifiedCandle>()
+  for (const c of candles) byTime.set(c.time, c)
+  for (let k = 0; k < bounded.length; k++) {
+    for (const c of results[k]) {
+      if (c.time < bounded[k].from || c.time > bounded[k].to) continue
+      byTime.set(c.time, c)
+      added++
+    }
+  }
+  if (added === 0) return candles
+  historyCacheAccessTotal.inc({ tier: 'exchange', outcome: 'hole_healed' }, added)
+  return Array.from(byTime.values()).sort((a, b) => a.time - b.time)
+}
+
 export interface HistoryOptions {
   before?: number
   limit?: number
@@ -451,7 +572,10 @@ async function getHistoryInternal(
   const sorted = Array.from(byTime.values()).sort((a, b) => a.time - b.time)
 
   const filtered = sorted.filter(c => c.time * 1000 <= beforeMs)
-  const result = filtered.slice(-limit)
+  // Slice first (holes are detected BETWEEN rows, so truncation cannot create
+  // a false hole), then heal what is actually about to be served.
+  const sliced = filtered.slice(-limit)
+  const result = await healHistoryHoles(sliced, symbol, tf, resolvedExchange)
   if (result.length > 0) setCachedResponse(responseKey, result)
   return result
 }

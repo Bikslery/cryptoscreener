@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { createCandleEvents } from '../candle-events'
-import { forwardFillGap, isFlatFiller, MAX_FORWARD_FILL_PERIODS, contiguify } from '../candle-utils'
+import { forwardFillGap, isFlatFiller, MAX_FORWARD_FILL_PERIODS, sanitizeCandles, mergeCandleSeries } from '../candle-utils'
 import type { UnifiedCandle, Exchange } from '../../types'
 
 const EX: Exchange = 'binance-futures'
@@ -91,45 +91,68 @@ describe('candle-events.forwardFill — tail bookkeeping without patches', () =>
   })
 })
 
-describe('contiguify � history normalization before setData', () => {
+describe('sanitizeCandles — history normalization before setData', () => {
   function bar(time: number, close: number): UnifiedCandle {
     return { symbol: SYM, exchange: EX, timeframe: TF, time, open: close - 1, high: close + 1, low: close - 2, close, volume: 7 }
   }
 
-  it('returns the input by reference when already contiguous', () => {
-    const input = [bar(0, 10), bar(60, 11), bar(120, 12)]
-    expect(contiguify(input, 60)).toBe(input)
+  it('returns the input by reference when already clean', () => {
+    const input = [bar(60, 10), bar(120, 11), bar(180, 12)]
+    expect(sanitizeCandles(input)).toBe(input)
   })
 
-  it('bridges holes between history neighbors with flat bars', () => {
-    const out = contiguify([bar(0, 100), bar(240, 110), bar(300, 111)], 60)
-    expect(out.map(c => c.time)).toEqual([0, 60, 120, 180, 240, 300])
-    const filler = out[1]
-    expect(filler.close).toBe(100)
-    expect(filler.volume).toBe(0)
-    expect(isFlatFiller(filler)).toBe(true)
-    // Real rows keep identity and values.
-    expect(out[4].close).toBe(110)
-    expect(isFlatFiller(out[4])).toBe(false)
+  it('NEVER fabricates rows for holes — history stays honest', () => {
+    const input = [bar(60, 100), bar(300, 110), bar(360, 111)]
+    const out = sanitizeCandles(input)
+    // The 120..240 hole renders as whitespace until healed server-side;
+    // no fake flat dojis are inserted.
+    expect(out.map(c => c.time)).toEqual([60, 300, 360])
+    expect(out.every(c => !isFlatFiller(c))).toBe(true)
   })
 
-  it('caps each gap at MAX_FORWARD_FILL_PERIODS', () => {
-    const huge = 60 * (MAX_FORWARD_FILL_PERIODS + 300)
-    const out = contiguify([bar(0, 5), bar(huge, 6)], 60)
-    expect(out).toHaveLength(MAX_FORWARD_FILL_PERIODS + 2)
+  it('drops invalid candles (NaN, inverted wicks)', () => {
+    const broken = { ...bar(180, 11), high: NaN }
+    const inverted = { ...bar(240, 12), high: 5, low: 20 } // high < low
+    const out = sanitizeCandles([bar(120, 10), broken, inverted, bar(300, 13)])
+    // Corrupt rows are DROPPED, not "repaired": fixing a high<low candle into
+    // a wide-range bar would paint a phantom price spike. A hole is honest.
+    expect(out.map(c => c.time)).toEqual([120, 300])
   })
 
-  it('handles multiple gaps and respects the total budget', () => {
-    // 3 gaps ? 150 missing periods > per-gap cap kicks in; total budget is
-    // MAX_FORWARD_FILL_PERIODS * 4 = 480.
-    const t = (n: number) => n * 60
-    const input = [bar(t(0), 1), bar(t(151), 2), bar(t(302), 3), bar(t(453), 4)]
-    const out = contiguify(input, 60)
-    const fillers = out.filter(isFlatFiller)
-    expect(fillers.length).toBeLessThanOrEqual(MAX_FORWARD_FILL_PERIODS * 4)
-    // Times stay strictly ascending and unique.
-    for (let i = 1; i < out.length; i++) {
-      expect(out[i].time).toBeGreaterThan(out[i - 1].time)
-    }
+  it('dedupes by time keeping the LAST occurrence and sorts ascending', () => {
+    const stale = bar(120, 11)
+    const fresh = { ...bar(120, 99) }
+    const out = sanitizeCandles([bar(180, 12), stale, bar(60, 10), fresh])
+    expect(out.map(c => c.time)).toEqual([60, 120, 180])
+    expect(out[1].close).toBe(99)
+  })
+})
+
+describe('mergeCandleSeries — regression-free union of painted and fetched', () => {
+  function bar(time: number, close: number): UnifiedCandle {
+    return { symbol: SYM, exchange: EX, timeframe: TF, time, open: close - 1, high: close + 1, low: close - 2, close, volume: 7 }
+  }
+
+  it('keeps live bars NEWER than the incoming tail (no tail regression)', () => {
+    const painted = [bar(0, 10), bar(60, 11), bar(120, 12), bar(180, 13)]
+    const fetched = [bar(0, 10), bar(60, 11)] // ends BEFORE the painted tail
+    const out = mergeCandleSeries(painted, fetched)
+    expect(out.map(c => c.time)).toEqual([0, 60, 120, 180])
+    expect(out[out.length - 1].close).toBe(13)
+  })
+
+  it('incoming wins collisions (fresher server snapshot replaces stale rows)', () => {
+    const painted = [bar(0, 10), bar(60, 99)]
+    const fetched = [bar(60, 55), bar(120, 56)]
+    const out = mergeCandleSeries(painted, fetched)
+    expect(out.map(c => c.time)).toEqual([0, 60, 120])
+    expect(out[1].close).toBe(55)
+  })
+
+  it('returns inputs untouched at the extremes', () => {
+    const a = [bar(0, 10)]
+    const b = [bar(60, 11)]
+    expect(mergeCandleSeries(a, [])).toBe(a)
+    expect(mergeCandleSeries([], b)).toBe(b)
   })
 })

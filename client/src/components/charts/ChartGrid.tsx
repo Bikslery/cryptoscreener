@@ -18,7 +18,7 @@ import { expandCompactCandles, type CompactCandle } from '../../services/candle-
 import { createCandleEvents, toChartTime, type CandleEvents, type ChartEventPatch, type TickPayload } from '../../services/candle-events'
 import { captureViewport, restoreViewport, saveViewport, getViewport } from '../../services/chart-viewport'
 import { canPaintPartialHistory, replaceDataPreservingPriceScale, resolveHistoryViewportAction } from '../../services/chart-history-paint'
-import { isFiniteOHLCV, validateCandle, MAX_FORWARD_FILL_PERIODS, forwardFillGap, isFlatFiller, contiguify } from '../../services/candle-utils'
+import { isFiniteOHLCV, validateCandle, MAX_FORWARD_FILL_PERIODS, forwardFillGap, isFlatFiller, sanitizeCandles, mergeCandleSeries } from '../../services/candle-utils'
 import { resolveHistoryLoadPlan } from '../../services/history-load-plan'
 import { recordDiag } from '../../services/candle-diag'
 import { useDrawings } from './useDrawings'
@@ -279,17 +279,20 @@ function isFormingBar(bar: UnifiedCandle, candlesDataRef: React.RefObject<Unifie
  * with real rows seconds later (server cache-repair keeps that cache warm).
  */
 
-// One background backfill per channel per window — several jumps in a row
-// must not stampede REST.
-const JUMP_BACKFILL_THROTTLE_MS = 10_000
+// One targeted range backfill per channel per window — several jumps in a
+// row must not stampede REST (the request itself is deduped in-flight).
+const JUMP_BACKFILL_THROTTLE_MS = 3_000
 const jumpBackfillAt = new Map<string, number>()
 
 /**
- * Replace freshly-forward-filled flat bars with REAL rows from the server
- * cache. Repaints in place via `series.update(bar, true)` (historicalUpdate)
- * — no setData, no viewport reset. Bounded to the filler region; anything the
- * cache cannot cover yet stays flat until the repair watchdog heals it and a
- * later history load paints it.
+ * Replace freshly-forward-filled flat bars with REAL rows from the server.
+ * The request is TARGETED: one `before`-page covering exactly the bridge
+ * window (the server serves it from healed history chunks), not a generic
+ * whole-history reload. Repaints in place via `series.update(bar, true)`
+ * (historicalUpdate) — no setData, no viewport reset — and writes the real
+ * rows into the client cache so the next full load cannot re-open the hole.
+ * Anything the server cannot cover yet stays flat until the repair watchdog
+ * heals it and a later history load paints it.
  */
 function backfillJumpWindow(
   candleRef: React.RefObject<ISeriesApi<SeriesType> | null>,
@@ -300,6 +303,20 @@ function backfillJumpWindow(
   exchange?: Exchange,
   onInsufficient?: () => void,
 ): void {
+  const arr = candlesDataRef.current
+  if (!arr || arr.length === 0) return
+
+  // Locate the contiguous flat-filler run at the tail: [firstFillerIdx..tail].
+  let firstFillerIdx = -1
+  for (let i = arr.length - 1; i >= 0 && arr.length - i <= MAX_FORWARD_FILL_PERIODS + 2; i--) {
+    if (!isFlatFiller(arr[i])) break
+    firstFillerIdx = i
+  }
+  if (firstFillerIdx < 0) return
+  const firstFillerTime = arr[firstFillerIdx].time
+  const lastFillerTime = arr[arr.length - 1].time
+  const spanPeriods = Math.round((lastFillerTime - firstFillerTime) / getTfSeconds(tf)) + 1
+
   const key = `${exchange ?? 'auto'}:${symbol}:${tf}`
   const now = Date.now()
   if (now - (jumpBackfillAt.get(key) ?? 0) < JUMP_BACKFILL_THROTTLE_MS) return
@@ -310,28 +327,36 @@ function backfillJumpWindow(
     }
   }
 
-  getOrFetchHistory(symbol, tf, GRID_CANDLE_LIMIT, exchange)
+  // `before` is EXCLUSIVE on the server: passing one period past the last
+  // filler returns rows ending exactly at the bridge window's right edge.
+  const beforeExclusive = lastFillerTime + getTfSeconds(tf)
+  getOrFetchOlder(symbol, tf, beforeExclusive, Math.min(spanPeriods + 5, 1000), exchange)
     .then(data => {
-      const arr = candlesDataRef.current
+      const liveArr = candlesDataRef.current
       const series = candleRef.current
-      if (!arr || arr.length === 0 || !series || data.length === 0) return
+      if (!liveArr || liveArr.length === 0 || !series || data.length === 0) return
       const candlesType = useChartSettings.getState().candlesType
       if (candlesType === 'line') return
       const realByTime = new Map<number, UnifiedCandle>()
-      for (const c of data) realByTime.set(c.time, c)
+      for (const c of data) {
+        if (c.time >= firstFillerTime && validateCandle(c)) realByTime.set(c.time, c)
+      }
+      if (realByTime.size === 0) {
+        // The server cache could not cover ANY of the bridge window — point
+        // repaints are useless here; escalate to a full history reload so
+        // real rows replace the bridges within one round-trip.
+        onInsufficient?.()
+        return
+      }
 
-      // Scan the tail region where fillers live (they were just appended).
-      let checked = 0
-      let fillersSeen = 0
       let replaced = 0
-      for (let i = arr.length - 1; i >= 0 && checked <= MAX_FORWARD_FILL_PERIODS + 2; i--, checked++) {
-        const cur = arr[i]
+      for (let i = firstFillerIdx; i < liveArr.length; i++) {
+        const cur = liveArr[i]
         if (!isFlatFiller(cur)) continue
-        fillersSeen++
         const real = realByTime.get(cur.time)
-        if (!real || !validateCandle(real)) continue
+        if (!real) continue
         if (real.close === cur.close && real.open === cur.open && real.high === cur.high && real.low === cur.low && real.volume === cur.volume) continue
-        arr[i] = { ...real }
+        liveArr[i] = { ...real }
         replaced++
         try {
           series.update({
@@ -341,10 +366,16 @@ function backfillJumpWindow(
           volumeRef.current?.update({ time: toChartTime(real.time) as Time, value: real.volume }, true)
         } catch { /* series recreated mid-backfill — next history load covers */ }
       }
-      // The server cache could not cover ANY of the bridge window — point
-      // repaints are useless here; escalate to a full history reload so real
-      // rows replace the bridges within one round-trip.
-      if (fillersSeen > 0 && replaced === 0) onInsufficient?.()
+      // Keep the client cache consistent: without this the next setData()
+      // rebuild would resurrect the flat placeholders from the cache.
+      if (exchange && replaced > 0) {
+        for (let i = firstFillerIdx; i < liveArr.length; i++) {
+          const cur = liveArr[i]
+          if (!isFlatFiller(cur)) continue
+          const real = realByTime.get(cur.time)
+          if (real) candleCache.updateCandle(exchange, symbol, tf, real)
+        }
+      }
     })
     .catch(() => { /* transient — the next jump or history load retries */ })
 }
@@ -828,11 +859,18 @@ function useFullHistory(
         saveViewport(prevKey, captureViewport(chartRef.current))
       }
 
-      // Contiguity normalization: server cache can still contain holes (the
-      // repair watchdog heals them within minutes) — painting them raw makes
-      // lightweight-charts insert whitespace INSIDE history. Bridge bars keep
-      // the series continuous until real rows arrive.
-      const valid = contiguify(candles.filter(validateCandle), getTfSeconds(tf))
+      // History painting rules (cryptoscreener.app semantics):
+      //  1. sanitize — validate/normalize/dedupe/sort, NEVER fabricate rows;
+      //     mid-history holes render as whitespace until the server serves
+      //     healed history instead of fake flat dojis.
+      //  2. merge with what is ALREADY painted when repainting the same key —
+      //     a fetched snapshot can end OLDER than bars already painted live
+      //     (SWR/response cache); raw setData() would erase those newer bars
+      //     and teleport the tail backwards. The union keeps them; incoming
+      //     wins per-time collisions.
+      const sanitized = sanitizeCandles(candles)
+      const prevPainted = prevKey === key ? candlesDataRef.current : []
+      const valid = mergeCandleSeries(prevPainted, sanitized)
       candlesDataRef.current = valid
       const lineMode = useChartSettings.getState().candlesType === 'line'
       const candleData = lineMode
@@ -1115,9 +1153,10 @@ function useLazyScroll(
         }
         // Capture BEFORE setData — prepending shifts every logical index.
         const prevLogical = ts.getVisibleLogicalRange()
-        // Same contiguity rule as the initial paint: older pages can bridge
-        // exchange-side holes; whitespace must never render inside history.
-        const contiguous = contiguify(merged, getTfSeconds(curTf))
+        // Same sanitize rule as the initial paint (validate/dedupe/sort, no
+        // fabrication): older pages come from the deduped cache and healed
+        // server history; holes must never be papered over with fake rows.
+        const contiguous = sanitizeCandles(merged)
         const prevLen = candlesDataRef.current.length
         const added = contiguous.length - prevLen
 

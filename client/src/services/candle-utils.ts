@@ -24,16 +24,22 @@ export function normalizeCandle<T extends UnifiedCandle>(c: T): T {
 }
 
 /**
- * Cap for client-side period-jump bridging: beyond this many missing periods
- * (clock skew / bad data) nothing is synthesized and the jump is logged.
+ * Cap for client-side period-jump bridging at the LIVE EDGE only: beyond this
+ * many missing periods nothing is synthesized and the jump escalates to a
+ * full history reload. History itself is NEVER fabricated — see
+ * sanitizeCandles.
  */
 export const MAX_FORWARD_FILL_PERIODS = 120
 
 /**
- * Flat bridge bars for a period jump: anchored to the previous close,
+ * Flat bridge bars for a live period jump: anchored to the previous close,
  * volume 0, marked final. The caller paints them right before the incoming
  * bar so lightweight-charts never inserts whitespace between the tail and
- * the new bar; a background backfill then swaps them for real rows.
+ * the new bar; a targeted range backfill then swaps them for real rows.
+ *
+ * These are a TRANSIENT right-edge patch ONLY (seconds, until real rows
+ * arrive). They must never be fed into history painting — the server heals
+ * its cache with REAL exchange rows and the client paints exactly that.
  */
 export function forwardFillGap(
   lastBar: UnifiedCandle,
@@ -41,6 +47,7 @@ export function forwardFillGap(
   tfSec: number,
 ): UnifiedCandle[] {
   const periods = Math.round((incomingTime - lastBar.time) / tfSec)
+  if (!(periods > 1)) return []
   const missing = Math.min(periods - 1, MAX_FORWARD_FILL_PERIODS)
   const fillers: UnifiedCandle[] = []
   for (let i = 1; i <= missing; i++) {
@@ -58,48 +65,75 @@ export function forwardFillGap(
   return fillers
 }
 
-/** A synthetic bridge bar produced by forwardFillGap (flat, zero volume). */
+/** A synthetic bridge bar produced by forwardFillGap / tick-opened bars
+ *  (flat, zero volume). */
 export function isFlatFiller(c: UnifiedCandle): boolean {
   return c.volume === 0 && c.open === c.high && c.high === c.low && c.low === c.close
 }
 
-/** Total bridge-bar budget for one array pass — a pathological input cannot
- *  balloon into thousands of synthetic rows. */
-const CONTIGUIFY_TOTAL_BUDGET = MAX_FORWARD_FILL_PERIODS * 4
+/**
+ * Normalize ANY candle array into a safe-to-paint series:
+ *   1. drop candles failing validateCandle (NaN/negative/inverted OHLC),
+ *   2. clamp high = max(o,h,l,c), low = min(o,h,l,c),
+ *   3. dedupe by time — the LAST occurrence wins (newest source of truth),
+ *   4. sort strictly ascending.
+ *
+ * Unlike the old contiguify() it NEVER fabricates rows: mid-history holes
+ * render as whitespace until the server serves healed, complete history —
+ * fake flat dojis painted over untraded periods were exactly the "broken
+ * candle" artifact this replaces.
+ *
+ * Returns the input by reference when already clean (hot path).
+ */
+export function sanitizeCandles(candles: UnifiedCandle[]): UnifiedCandle[] {
+  let needsWork = false
+  const seen = new Set<number>()
+  for (const c of candles) {
+    if (seen.has(c.time)) { needsWork = true; break }
+    seen.add(c.time)
+    if (!validateCandle(c)) { needsWork = true; break }
+  }
+  if (!needsWork) return candles
+
+  const byTime = new Map<number, UnifiedCandle>()
+  for (const c of candles) {
+    if (!validateCandle(c)) continue
+    // Last write wins: when two sources disagree on one timestamp the newer
+    // input (live kline / fresher REST page) replaces the stale row.
+    byTime.set(c.time, normalizeCandle(c))
+  }
+  return Array.from(byTime.values()).sort((a, b) => a.time - b.time)
+}
 
 /**
- * Normalize ANY candle array into a time-contiguous series: wherever neighbors
- * skip periods, insert flat bridge bars (forwardFillGap semantics). Applied
- * before every setData() so history holes — un-repaired server cache, bulk
- * pushes, reconnect tails — never render as lightweight-charts whitespace.
- * Returns the input by reference when already contiguous.
+ * Merge a freshly loaded series INTO the currently painted one without
+ * regression. lightweight-charts is append/replace-only: a setData() whose
+ * last bar is OLDER than what is already on screen silently erases those
+ * newer bars — the classic "tail teleports backwards, then the next kline
+ * bridges the vanished minutes with flat placeholders" bug.
+ *
+ * Rules:
+ *   - union by time, both inputs sorted ascending;
+ *   - `incoming` wins collisions (fresher server snapshot);
+ *   - bars that exist only in `current` survive — including everything
+ *     NEWER than the incoming tail (painted live klines are never lost);
+ *   - O(n + m), output sorted ascending.
  */
-export function contiguify(candles: UnifiedCandle[], tfSec: number): UnifiedCandle[] {
-  if (!Number.isFinite(tfSec) || tfSec <= 0 || candles.length < 2) return candles
-  let output: UnifiedCandle[] | null = null
-  let filledTotal = 0
-  for (let i = 1; i < candles.length; i++) {
-    const prev = candles[i - 1]
-    const cur = candles[i]
-    const gapPeriods = Math.round((cur.time - prev.time) / tfSec)
-    const missing = gapPeriods > 1 ? Math.min(gapPeriods - 1, MAX_FORWARD_FILL_PERIODS) : 0
-    if (missing > 0 && filledTotal < CONTIGUIFY_TOTAL_BUDGET) {
-      if (!output) output = candles.slice(0, i)
-      for (let k = 1; k <= missing && filledTotal < CONTIGUIFY_TOTAL_BUDGET; k++) {
-        output.push({
-          ...prev,
-          time: prev.time + k * tfSec,
-          open: prev.close,
-          high: prev.close,
-          low: prev.close,
-          close: prev.close,
-          volume: 0,
-          isFinal: true,
-        })
-        filledTotal++
-      }
-    }
-    if (output) output.push(cur)
+export function mergeCandleSeries(current: UnifiedCandle[], incoming: UnifiedCandle[]): UnifiedCandle[] {
+  if (incoming.length === 0) return current
+  if (current.length === 0) return incoming
+
+  const out: UnifiedCandle[] = []
+  let i = 0
+  let j = 0
+  while (i < current.length && j < incoming.length) {
+    const a = current[i]
+    const b = incoming[j]
+    if (a.time < b.time) { out.push(a); i++ }
+    else if (a.time > b.time) { out.push(b); j++ }
+    else { out.push(b); i++; j++ }
   }
-  return output || candles
+  while (i < current.length) { out.push(current[i]); i++ }
+  while (j < incoming.length) { out.push(incoming[j]); j++ }
+  return out
 }

@@ -89,14 +89,19 @@ describe('candle-events (scalpboard parity)', () => {
     expect(lastBar(tradePatch).close).toBe(101)
   })
 
-  it('tick outside (barStart, barStart+tf) is DROPPED (no synthetic candle)', () => {
+  it('tick outside (barStart, barStart+tf) is dropped unless it OPENS the next period', () => {
     const ev = makeEvents()
     ev.applyKline(makeCandle(300, 100, 101, 99, 100.5, 12))
 
+    // Older than / exactly at the current bar's own start → dropped.
     expect(ev.applyTick(tick(101, 299)).updates).toHaveLength(0)
     expect(ev.applyTick(tick(101, 300)).updates).toHaveLength(0)
-    expect(ev.applyTick(tick(101, 360)).updates).toHaveLength(0)
-    expect(ev.applyTick(tick(101, 361)).updates).toHaveLength(0)
+    // Exactly one period ahead → OPENS the forming bar (no frozen tail).
+    const p = ev.applyTick(tick(101, 360))
+    expect(p.updates).toHaveLength(1)
+    expect(lastBar(p).time).toBe(360)
+    // Now inside the newly opened bar's window → mutates it.
+    expect(ev.applyTick(tick(101.5, 361)).updates).toHaveLength(1)
   })
 
   it('identical consecutive tick prices are deduped', () => {
@@ -252,6 +257,45 @@ describe('candle-events (scalpboard parity)', () => {
     const offset = new Date().getTimezoneOffset() * 60
     expect(toChartTime(300)).toBe(300 - offset)
     expect(toChartTime(300 + offset)).toBe(300)
+  })
+})
+
+describe('tick opens the NEXT period bar (no frozen tail)', () => {
+  it('a print landing in the immediately-next period synthesizes the forming bar', () => {
+    const ev = makeEvents()
+    ev.applyKline(makeCandle(300, 100, 101, 99, 100.5, 12))
+    // First print of period 360 arrives BEFORE its kline snapshot.
+    const p = ev.applyTick(tick(101.2, 365))
+    expect(p.updates).toHaveLength(1)
+    const opened = lastBar(p)
+    expect(opened.time).toBe(360)
+    expect(opened.open).toBe(101.2)
+    expect(opened.high).toBe(101.2)
+    expect(opened.low).toBe(101.2)
+    expect(opened.close).toBe(101.2)
+    expect(opened.volume).toBe(0) // trades never paint volume
+    // Subsequent prints in that period MUTATE the synthesized bar normally.
+    const p2 = ev.applyTick(tick(100.9, 370))
+    expect(lastBar(p2).close).toBe(100.9)
+    expect(lastBar(p2).high).toBe(101.2)
+    // The authoritative kline then REPLACES it wholesale.
+    const p3 = ev.applyKline(makeCandle(360, 101, 102, 100, 101.5, 34))
+    const replaced = lastBar(p3)
+    expect(replaced.close).toBe(101.5)
+    expect(replaced.volume).toBe(34)
+  })
+
+  it('a print MORE than one period ahead is still dropped (skew guard)', () => {
+    const ev = makeEvents()
+    ev.applyKline(makeCandle(300, 100, 101, 99, 100.5, 12))
+    expect(ev.applyTick(tick(101.2, 425)).updates).toHaveLength(0)
+  })
+
+  it('a print older than the current period is still dropped', () => {
+    const ev = makeEvents()
+    ev.applyKline(makeCandle(300, 100, 101, 99, 100.5, 12))
+    ev.applyTick(tick(101.2, 365)) // opens 360
+    expect(ev.applyTick(tick(99.0, 305)).updates).toHaveLength(0)
   })
 })
 

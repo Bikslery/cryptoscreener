@@ -14,14 +14,17 @@ import { recordDiag } from './candle-diag'
  * shifted. A constant shift never changes the relative spacing, so logical
  * ranges and window guards stay exact.
  *
- * The offset is recomputed on EVERY call instead of cached once at module
- * load. `getTimezoneOffset()` is effectively free, and a tab left open
- * across a DST transition must not keep painting with a stale hour-off
- * shift until the page is reloaded.
+ * The offset is captured ONCE per session and must stay CONSTANT for the
+ * lifetime of the painted series: recomputing it per call made a tab open
+ * across a DST transition paint new bars with a +1h shift against existing
+ * ones — a one-hour whitespace band inserted mid-series. A frozen shift
+ * keeps the series internally consistent; worst case the axis reads an hour
+ * off until reload, which is what TradingView does too.
  */
+const TZ_OFFSET_SEC = new Date().getTimezoneOffset() * 60
+
 export function toChartTime(tSec: number): number {
-  const tzOffsetSec = new Date().getTimezoneOffset() * 60
-  return tSec - tzOffsetSec
+  return tSec - TZ_OFFSET_SEC
 }
 
 export interface TickPayload {
@@ -239,31 +242,59 @@ export function createCandleEvents(opts: CandleEventsOpts): CandleEvents {
     const cur = current()
     if (!cur) return EMPTY_PATCH()
 
-    // Scalpboard's updateLastPrice window: the tick must belong to the
-    // period already opened by a kline — strictly after its start and
-    // strictly before the next period. Anything else is dropped.
-    if (!(tick.timeSec > cur.candle.time && tick.timeSec < cur.candle.time + tfSeconds)) {
-      return EMPTY_PATCH()
+    // Scalpboard's updateLastPrice window: a tick mutates the bar already
+    // opened for its period — strictly after its start and strictly before
+    // the next period.
+    if (tick.timeSec > cur.candle.time && tick.timeSec < cur.candle.time + tfSeconds) {
+      // Dedupe: identical consecutive tick prices produce no visible change;
+      // skipping them keeps the trade lane from spamming update() per print.
+      if (tick.price === cur.lastTickPrice) return EMPTY_PATCH()
+
+      const prev = cur.candle
+      const mutated: UnifiedCandle = {
+        ...prev,
+        high: Math.max(prev.high, tick.price),
+        low: Math.min(prev.low, tick.price),
+        close: tick.price,
+      }
+      cur.lastTickPrice = tick.price
+      cur.candle = mutated
+
+      return {
+        updates: [{ bar: mutated, paintVolume: false }],
+        livePrice: tick.price,
+      }
     }
 
-    // Dedupe: identical consecutive tick prices produce no visible change;
-    // skipping them keeps the trade lane from spamming update() per print.
-    if (tick.price === cur.lastTickPrice) return EMPTY_PATCH()
-
-    const prev = cur.candle
-    const mutated: UnifiedCandle = {
-      ...prev,
-      high: Math.max(prev.high, tick.price),
-      low: Math.min(prev.low, tick.price),
-      close: tick.price,
+    // The NEXT period opened by a print before its first kline snapshot
+    // arrived (quiet pair / kline-lane hiccup): synthesize the forming bar
+    // from the trade itself instead of freezing on the old bar until the
+    // kline lands. The very next authoritative kline REPLACES this bar
+    // wholesale (applyKline full-replace), so OHLC stays exchange-true;
+    // volume stays 0 because trades never paint volume.
+    // A jump of more than one period is NOT synthesized here — that is the
+    // clock-skew / stale-tail case handled by the caller's jump bridge.
+    const alignedPeriod = Math.floor(tick.timeSec / tfSeconds) * tfSeconds
+    if (alignedPeriod === cur.candle.time + tfSeconds) {
+      const opened: UnifiedCandle = {
+        ...cur.candle,
+        time: alignedPeriod,
+        open: tick.price,
+        high: tick.price,
+        low: tick.price,
+        close: tick.price,
+        volume: 0,
+        isFinal: false,
+      }
+      pushTail({ candle: opened, lastTickPrice: tick.price })
+      return {
+        updates: [{ bar: opened, paintVolume: false }],
+        livePrice: tick.price,
+      }
     }
-    cur.lastTickPrice = tick.price
-    cur.candle = mutated
 
-    return {
-      updates: [{ bar: mutated, paintVolume: false }],
-      livePrice: tick.price,
-    }
+    // Anything else (older than the tail or multi-period ahead) is dropped.
+    return EMPTY_PATCH()
   }
 
   function applyHistory(candles: UnifiedCandle[]): void {
