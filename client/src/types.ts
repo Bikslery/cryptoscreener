@@ -260,6 +260,9 @@ export interface UserSettings {
   density?: Partial<DensitySettings>
   // Indicator column configuration: coin list columns + chart header fields.
   indicators?: { coinList: CoinListColKey[]; chartHeader: IndicatorKey[] }
+  // Mini-chart grid auto-refresh (periodic re-sort). Bound to the account and
+  // mirrored in a cookie so "off" survives page reloads on any device state.
+  autoRefresh?: boolean
 }
 
 export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w'

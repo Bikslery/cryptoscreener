@@ -26,6 +26,7 @@ export function TopBar() {
   const setPageIndex = useCoinListStore(s => s.setPageIndex)
   const isLoggedIn = useAuthStore(s => s.isLoggedIn)
   const { setShowAuth, setShowProfile, setShowExchangeModal } = useUIStore()
+  const expandedSymbol = useCoinListStore(s => s.expandedSymbol)
   const autoRefresh = useCoinListStore(s => s.autoRefresh)
   const countdown = useCoinListStore(s => s.countdown)
   const toggleAutoRefresh = useCoinListStore(s => s.toggleAutoRefresh)
@@ -100,16 +101,20 @@ export function TopBar() {
           <ChevronRight size={15} />
         </button>
 
-        <button
-          aria-label={autoRefresh ? 'Disable auto-refresh' : 'Enable auto-refresh'}
-          className={`clinic-btn clinic-btn-sm flex items-center justify-center h-[30px] px-[9px] text-[12px] gap-[4px] ${
-            autoRefresh ? 'clinic-btn-active' : 'clinic-btn-secondary'
-          }`}
-          onClick={toggleAutoRefresh}
-        >
-          <RefreshCw size={13} className={autoRefresh ? '' : ''} />
-          {autoRefresh && <span className="tabular-nums">{countdown}</span>}
-        </button>
+        {/* Big chart open → the grid is hidden: no auto-refresh UI at all
+            (its tick is frozen in the store while expandedSymbol is set). */}
+        {!expandedSymbol && (
+          <button
+            aria-label={autoRefresh ? 'Disable auto-refresh' : 'Enable auto-refresh'}
+            className={`clinic-btn clinic-btn-sm flex items-center justify-center h-[30px] px-[9px] text-[12px] gap-[4px] ${
+              autoRefresh ? 'clinic-btn-active' : 'clinic-btn-secondary'
+            }`}
+            onClick={toggleAutoRefresh}
+          >
+            <RefreshCw size={13} className={autoRefresh ? '' : ''} />
+            {autoRefresh && <span className="tabular-nums">{countdown}</span>}
+          </button>
+        )}
 
         <VolumeSlider />
       </div>

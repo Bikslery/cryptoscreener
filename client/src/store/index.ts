@@ -68,6 +68,36 @@ function readStoredChartExchange(): ChartExchange {
   return DEFAULT_CHART_EXCHANGE
 }
 
+// --- Auto-refresh persistence ------------------------------------------------
+// The 10s grid re-sort must stay OFF once the user turns it off: the flag is
+// mirrored in localStorage AND a year-long cookie, and bound to the account
+// settings when logged in (see checkSession/setUser/toggleAutoRefresh).
+const AUTO_REFRESH_STORAGE_KEY = 'serotonin.autoRefresh'
+const AUTO_REFRESH_COOKIE = 'cs_auto_refresh'
+export const AUTO_REFRESH_INTERVAL_SEC = 10
+
+function readStoredAutoRefresh(): boolean {
+  if (typeof window === 'undefined') return true
+  try {
+    const raw = window.localStorage.getItem(AUTO_REFRESH_STORAGE_KEY)
+    if (raw === '0') return false
+    if (raw === '1') return true
+  } catch { /* ignore */ }
+  try {
+    const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${AUTO_REFRESH_COOKIE}=(\\d)`))
+    if (match) return match[1] === '1'
+  } catch { /* ignore */ }
+  return true
+}
+
+function writeStoredAutoRefresh(value: boolean): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, value ? '1' : '0')
+    document.cookie = `${AUTO_REFRESH_COOKIE}=${value ? '1' : '0'}; Max-Age=31536000; Path=/; SameSite=Lax`
+  } catch { /* ignore */ }
+}
+
 const EXCHANGE_PRIORITY: Record<Exchange, number> = {
   'binance-futures': 5,
   'bybit-futures': 4,
@@ -578,20 +608,27 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
   watchlist: readStoredWatchlist(),
   pageIndex: 0,
   pageCount: 1,
-  autoRefresh: true,
-  countdown: 10,
+  autoRefresh: readStoredAutoRefresh(),
+  countdown: AUTO_REFRESH_INTERVAL_SEC,
 
-  toggleAutoRefresh: () => set((s) => ({
-    autoRefresh: !s.autoRefresh,
-    countdown: !s.autoRefresh ? 10 : 0,
-  })),
+  toggleAutoRefresh: () => set((s) => {
+    const next = !s.autoRefresh
+    writeStoredAutoRefresh(next)
+    // Account binding: cross-device persistence, fire-and-forget (no-op when
+    // logged out — the cookie/localStorage copy still holds the choice).
+    void useAuthStore.getState().updateSettings({ autoRefresh: next }).catch(() => {})
+    return { autoRefresh: next, countdown: next ? AUTO_REFRESH_INTERVAL_SEC : 0 }
+  }),
 
   tickCountdown: () => {
     const s = get()
-    if (!s.autoRefresh) return
+    // Big chart open: the grid is not visible — freeze the countdown and skip
+    // the re-sort entirely, so the user's grid order is exactly as they left
+    // it when they come back.
+    if (s.expandedSymbol || !s.autoRefresh) return
     const next = s.countdown - 1
     if (next <= 0) {
-      set({ countdown: 10 })
+      set({ countdown: AUTO_REFRESH_INTERVAL_SEC })
       // Trigger re-sort
       set({ coins: s.coins, ...recompute({ ...s, coins: s.coins }) })
     } else {
@@ -619,14 +656,16 @@ export const useCoinListStore = create<CoinListStore>((set, get) => ({
       const coin = s.coinMap.get(symbol)
       getOrFetchHistory(symbol, s.activeTimeframe, 300, coin?.exchange).catch(() => {})
     }
-    set({ expandedSymbol: symbol, selectedSymbol: symbol, expandedFocusPrice: null })
+    // Full countdown on open AND close: returning to the grid must not
+    // reshuffle it instantly — the user gets a whole interval first.
+    set({ expandedSymbol: symbol, selectedSymbol: symbol, expandedFocusPrice: null, countdown: AUTO_REFRESH_INTERVAL_SEC })
   },
 
   expandChartAtPrice: (symbol, price) => {
     const s = get()
     const coin = s.coinMap.get(symbol)
     getOrFetchHistory(symbol, s.activeTimeframe, 300, coin?.exchange).catch(() => {})
-    set({ expandedSymbol: symbol, selectedSymbol: symbol, expandedFocusPrice: price })
+    set({ expandedSymbol: symbol, selectedSymbol: symbol, expandedFocusPrice: price, countdown: AUTO_REFRESH_INTERVAL_SEC })
   },
 
   clearExpandedFocusPrice: () => set({ expandedFocusPrice: null }),
@@ -864,6 +903,18 @@ export const useAlertStore = create<AlertStore>((set) => ({
   },
 }))
 
+/**
+ * Account-bound auto-refresh preference wins over the local/cookie default
+ * once the session is known (cross-device consistency). Old accounts without
+ * the flag keep whatever the cookie/localStorage says.
+ */
+function applyServerAutoRefresh(settings: UserSettings | null | undefined): void {
+  if (typeof settings?.autoRefresh === 'boolean') {
+    useCoinListStore.setState({ autoRefresh: settings.autoRefresh })
+    writeStoredAutoRefresh(settings.autoRefresh)
+  }
+}
+
 interface AuthStore {
   userId: string | null
   username: string | null
@@ -897,6 +948,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         isChecking: false,
         settings: user.settings ?? null,
       })
+      applyServerAutoRefresh(user.settings)
     } catch {
       set({ userId: null, username: null, telegramVerified: false, isLoggedIn: false, isChecking: false, settings: null })
     }
